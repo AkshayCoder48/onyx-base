@@ -12,6 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { PageHeader } from './shell'
 import { maskKey, timeAgo } from './shared'
+import { useIsMobile } from '@/hooks/use-mobile'
 import { toast } from 'sonner'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -20,6 +21,7 @@ import {
 export function ApiKeysView() {
   const api = useApi()
   const qc = useQueryClient()
+  const isMobile = useIsMobile()
   const [createOpen, setCreateOpen] = useState(false)
   const [newName, setNewName] = useState('')
   const [createdKey, setCreatedKey] = useState<string | null>(null)
@@ -98,6 +100,56 @@ export function ApiKeysView() {
           <div className="py-16 grid place-items-center"><Loader2 className="size-5 animate-spin text-primary" /></div>
         ) : keys.length === 0 ? (
           <div className="py-16 text-center text-sm text-muted-foreground">No API keys yet.</div>
+        ) : isMobile ? (
+          // Mobile: card list — no horizontal scroll, big touch targets.
+          <div className="p-3 space-y-2.5">
+            {keys.map((k) => (
+              <div
+                key={k.id}
+                className="rounded-md border border-border/60 bg-card/60 p-3 space-y-2"
+                style={{ contentVisibility: 'auto', containIntrinsicSize: '120px' }}
+              >
+                <div className="flex items-start gap-2">
+                  <KeyRound className="size-4 text-primary mt-0.5 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-sm break-words">{k.name}</div>
+                    <code className="font-mono text-xs text-muted-foreground break-all">{maskKey(k.key)}</code>
+                  </div>
+                  {k.revoked ? (
+                    <Badge variant="outline" className="font-mono text-[10px] border-red-400/30 text-red-500 shrink-0">revoked</Badge>
+                  ) : (
+                    <Badge variant="outline" className="font-mono text-[10px] border-primary/30 text-primary shrink-0">
+                      <CheckCircle2 className="size-2.5 mr-1" /> active
+                    </Badge>
+                  )}
+                </div>
+                <div className="flex items-center justify-between gap-2 pt-1.5 border-t border-border/40">
+                  <div className="text-[11px] text-muted-foreground/70 font-mono shrink-0">
+                    {k.lastUsedAt ? `used ${timeAgo(k.lastUsedAt)}` : 'never used'}
+                    <span className="mx-1.5">·</span>
+                    created {timeAgo(k.createdAt)}
+                  </div>
+                  <div className="flex items-center gap-0.5 shrink-0">
+                    <button
+                      onClick={() => copy(k.key)}
+                      className="size-9 grid place-items-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted"
+                      aria-label="Copy API key"
+                    >
+                      <Copy className="size-4" />
+                    </button>
+                    <button
+                      onClick={() => setRevokeTarget(k)}
+                      disabled={k.revoked}
+                      className="size-9 grid place-items-center rounded-md text-muted-foreground hover:text-red-500 hover:bg-red-50 disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+                      aria-label="Revoke key"
+                    >
+                      <Trash2 className="size-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
         ) : (
           <Table>
             <TableHeader>

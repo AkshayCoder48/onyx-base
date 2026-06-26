@@ -79,8 +79,17 @@ function humanizeReason(reason: string, type: string): string {
  * Returns { valid: true } when the email is confirmed deliverable.
  * Returns { valid: false, reason } when the email is rejected.
  * Returns { valid: true, unreachable: true } when the API is down (fail-open).
+ *
+ * Pass `{ quick: true }` to SKIP the live SMTP probe and ONLY run the fast
+ * local disposable-domain blocklist. Used for login/reset flows where the
+ * email was already fully verified at signup — re-probing on every login
+ * would add a 10–20s latency hit for no security gain. Signup always uses
+ * the full probe (quick: false, the default).
  */
-export async function verifyEmail(email: string): Promise<EmailVerificationResult> {
+export async function verifyEmail(
+  email: string,
+  opts?: { quick?: boolean },
+): Promise<EmailVerificationResult> {
   const normalized = email.trim().toLowerCase()
   if (!normalized) {
     return {
@@ -102,6 +111,20 @@ export async function verifyEmail(email: string): Promise<EmailVerificationResul
       safeToSend: 'No',
       type: 'Disposable Account',
       reason: 'Disposable / temporary email addresses are not allowed. Please use a real email address.',
+      unreachable: false,
+    }
+  }
+
+  // ── Quick mode: temp-mail check only, skip the slow SMTP probe ──
+  // Used for login + reset (email already verified at signup). Still blocks
+  // disposable domains, but doesn't add 10–20s of SMTP-probe latency to
+  // every login attempt.
+  if (opts?.quick) {
+    return {
+      valid: true,
+      status: 'QUICK_OK',
+      safeToSend: 'Yes',
+      reason: 'Passed disposable-domain check (quick mode — SMTP probe skipped).',
       unreachable: false,
     }
   }

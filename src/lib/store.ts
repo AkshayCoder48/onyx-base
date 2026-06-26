@@ -13,6 +13,7 @@ export type ViewKey =
   | 'logs'
   | 'analytics'
   | 'playground'
+  | 'sql'
   | 'docs'
   | 'settings'
 

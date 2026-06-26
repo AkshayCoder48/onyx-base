@@ -168,6 +168,10 @@
 }
 
 /* Custom scrollbars for long lists */
+.scroll-slim {
+  /* iOS momentum scrolling — without this, mobile lists stutter. */
+  -webkit-overflow-scrolling: touch;
+}
 .scroll-slim::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -181,6 +185,14 @@
 }
 .scroll-slim::-webkit-scrollbar-thumb:hover {
   background: rgba(212, 116, 79, 0.6);
+}
+
+/* Skip painting off-screen list items / cards. Pair with
+   `contain-intrinsic-size: <height>` inline so the scrollbar
+   doesn't jump when the card scrolls into view. */
+.cv-auto {
+  content-visibility: auto;
+  contain-intrinsic-size: 96px;
 }
 
 /* Pulsing dot for "live" indicators */

@@ -17,6 +17,7 @@ import {
   Menu,
   X,
   Github,
+  Code2,
 } from 'lucide-react'
 import { useOnyxBase, type ViewKey } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -47,6 +48,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { key: 'api-keys', label: 'API Keys', icon: KeyRound },
       { key: 'share', label: 'Public Share', icon: Share2 },
       { key: 'playground', label: 'API Playground', icon: TerminalSquare },
+      { key: 'sql', label: 'SQL Editor', icon: Code2 },
       { key: 'docs', label: 'Docs', icon: BookOpen },
       { key: 'logs', label: 'Logs', icon: ScrollText },
       { key: 'analytics', label: 'Analytics', icon: BarChart3 },
@@ -82,7 +84,7 @@ export function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 overflow-y-auto scroll-slim px-2.5 py-4 space-y-5">
+      <nav className="flex-1 overflow-y-auto scroll-slim px-2.5 py-4 space-y-5 overscroll-contain">
         {NAV.map((section) => (
           <div key={section.group} className="space-y-1">
             <div className="px-2.5 mb-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
@@ -98,14 +100,17 @@ export function Sidebar() {
                     setMobileOpen(false)
                   }}
                   className={cn(
-                    'w-full group flex items-center gap-2.5 rounded-md px-2.5 py-2 text-sm transition-colors',
+                    // py-2.5 + min-h-[40px] so the touch target clears the
+                    // 44px Apple/Google minimum on phones (icon + padding).
+                    // lg:py-2 restores the tighter desktop density.
+                    'w-full group flex items-center gap-2.5 rounded-md px-2.5 py-2.5 lg:py-2 min-h-[40px] lg:min-h-0 text-sm transition-colors',
                     active
                       ? 'bg-primary/10 text-primary border border-primary/20'
                       : 'text-muted-foreground hover:text-foreground hover:bg-muted/50 border border-transparent',
                   )}
                 >
-                  <item.icon className={cn('size-4', active ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground')} />
-                  <span className="flex-1 text-left">{item.label}</span>
+                  <item.icon className={cn('size-4 shrink-0', active ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground')} />
+                  <span className="flex-1 text-left truncate">{item.label}</span>
                 </button>
               )
             })}
@@ -129,7 +134,7 @@ export function Sidebar() {
           variant="ghost"
           size="sm"
           onClick={logout}
-          className="w-full justify-start text-muted-foreground hover:text-foreground h-8"
+          className="w-full justify-start text-muted-foreground hover:text-foreground h-9"
         >
           <LogOut className="size-3.5" /> Sign out
         </Button>
@@ -139,11 +144,11 @@ export function Sidebar() {
 
   return (
     <>
-      {/* Mobile top bar */}
-      <div className="lg:hidden sticky top-0 z-40 flex items-center gap-2 h-12 px-3 border-b border-border/60 bg-background/80 backdrop-blur">
+      {/* Mobile top bar — semi-opaque bg so backdrop-blur has less to render. */}
+      <div className="lg:hidden sticky top-0 z-40 flex items-center gap-2 h-12 px-3 border-b border-border/60 bg-background/90 backdrop-blur-sm">
         <button
           onClick={() => setMobileOpen(true)}
-          className="size-8 grid place-items-center rounded-md hover:bg-muted"
+          className="size-9 grid place-items-center rounded-md hover:bg-muted active:bg-muted/70"
           aria-label="Open menu"
         >
           <Menu className="size-4" />
@@ -154,21 +159,41 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Mobile drawer */}
-      {mobileOpen && (
-        <div className="lg:hidden fixed inset-0 z-50 flex">
-          <div className="absolute inset-0 bg-black/60" onClick={() => setMobileOpen(false)} />
-          <div className="relative w-72 max-w-[80%] bg-sidebar border-r border-border/60">
-            <button
-              onClick={() => setMobileOpen(false)}
-              className="absolute right-2 top-3 size-8 grid place-items-center rounded-md hover:bg-muted"
-            >
-              <X className="size-4" />
-            </button>
-            {content}
-          </div>
+      {/* Mobile drawer — pure CSS transform (no framer-motion) for 60fps.
+          We always render the drawer+backdrop and toggle visibility via
+          translate/opacity so the slide animation runs on the compositor
+          thread instead of triggering layout. */}
+      <div
+        className="lg:hidden fixed inset-0 z-50"
+        // Pointer-events none when closed so the layer never blocks clicks.
+        style={{ pointerEvents: mobileOpen ? 'auto' : 'none' }}
+        aria-hidden={!mobileOpen}
+      >
+        {/* Backdrop — fade in/out. */}
+        <div
+          onClick={() => setMobileOpen(false)}
+          className={cn(
+            'absolute inset-0 bg-black/60 transition-opacity duration-200 ease-out',
+            mobileOpen ? 'opacity-100' : 'opacity-0',
+          )}
+        />
+        {/* Panel — slide in from the left on the compositor thread. */}
+        <div
+          className={cn(
+            'relative w-72 max-w-[80%] h-full bg-sidebar border-r border-border/60 shadow-xl transition-transform duration-200 ease-out',
+            mobileOpen ? 'translate-x-0' : '-translate-x-full',
+          )}
+        >
+          <button
+            onClick={() => setMobileOpen(false)}
+            className="absolute right-2 top-3 size-9 grid place-items-center rounded-md hover:bg-muted"
+            aria-label="Close menu"
+          >
+            <X className="size-4" />
+          </button>
+          {content}
         </div>
-      )}
+      </div>
 
       {/* Desktop sidebar */}
       <aside className="hidden lg:flex w-60 shrink-0 border-r border-border/60 bg-sidebar/50">
