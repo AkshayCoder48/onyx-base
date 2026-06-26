@@ -1,15 +1,11 @@
 import { NextRequest } from 'next/server'
 import { authenticate, ok, fail } from '@/lib/auth'
 import { db } from '@/lib/db'
+import { runUserSelect } from '@/lib/sql-engine'
 import {
   listRecords,
-  listCollections,
-  listApiKeys,
-  listLogs,
-  findUserByDbId,
   upsertRecord,
   deleteRecord,
-  createCollectionName,
   deleteCollection,
 } from '@/lib/data-store'
 
@@ -110,7 +106,7 @@ export async function POST(req: NextRequest) {
   const pubUid = user.userId
 
   if (isSelect) {
-    return handleSelect(raw, uid, pubUid, user.apiKeyName)
+    return await handleSelect(raw, uid, pubUid)
   }
 
   if (isInsert) {
@@ -129,145 +125,36 @@ export async function POST(req: NextRequest) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SELECT handler — loads data from the data-store, filters in JS
+// SELECT handler — runs REAL SQL via Prisma with userId-scoped virtual tables
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// This delegates to runUserSelect() (in sql-engine.ts), which:
+//   1. Rewrites virtual table names (records, collections, api_keys, logs,
+//      users) into userId-filtered subqueries — but ONLY in FROM/JOIN
+//      positions, so aliases and column qualifiers are not corrupted.
+//   2. Runs the query via Prisma's $queryRawUnsafe against the real SQLite
+//      database, with the userId parameterised into every placeholder.
+//   3. Caps results at 1000 rows and serialises BigInts.
+//
+// Unlike the old JS-based parser, this supports the FULL SQL surface area:
+// JOINs, GROUP BY, HAVING, aggregates (COUNT/SUM/AVG), functions
+// (LENGTH/UPPER/DATE/...), subqueries, UNION, CTEs (WITH), etc.
 
-function handleSelect(raw: string, uid: string, pubUid: string, apiKeyName: string) {
-  // Parse: SELECT cols FROM table [WHERE ...] [ORDER BY col [DESC]] [LIMIT n]
-  const m = raw.match(
-    /^SELECT\s+(.+?)\s+FROM\s+(`?\w+`?)(\s+WHERE\s+(.+?))?(\s+ORDER\s+BY\s+(\w+)(\s+DESC|\s+ASC)?)?(\s+LIMIT\s+(\d+))?$/is,
-  )
-  if (!m) {
-    return fail(
-      'SELECT must use the form: SELECT cols FROM table [WHERE ...] [ORDER BY col [DESC]] [LIMIT n]',
-      400,
-    )
-  }
-  const [, colsRaw, tableRaw, , whereRaw, , orderCol, orderDir, , limitRaw] = m
-  const table = tableRaw.replace(/`/g, '').toLowerCase()
-  const cols = colsRaw.trim()
-
-  // Load data for the virtual table.
-  let rows: Record<string, unknown>[] = []
-  switch (table) {
-    case 'records': {
-      const recs = listRecords(uid)
-      rows = recs.map((r) => ({
-        id: r.id,
-        key: r.key,
-        value: r.value,
-        valueType: r.valueType,
-        collection: r.collection,
-        telegramMessageId: r.telegramMessageId,
-        createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
-      }))
-      break
-    }
-    case 'collections': {
-      const colls = listCollections(uid)
-      rows = colls.map((c) => ({
-        name: c.name,
-        recordCount: c.count,
-        createdAt: c.createdAt,
-      }))
-      break
-    }
-    case 'api_keys': {
-      const keys = listApiKeys(uid)
-      rows = keys.map((k) => ({
-        id: k.id,
-        name: k.name,
-        key: maskKey(k.key),
-        revoked: k.revoked,
-        lastUsedAt: k.lastUsedAt,
-        createdAt: k.createdAt,
-      }))
-      break
-    }
-    case 'logs': {
-      const logs = listLogs(uid, 1000)
-      rows = logs.map((l) => ({
-        id: l.id,
-        action: l.action,
-        key: l.key,
-        detail: l.detail,
-        source: l.source,
-        ip: l.ip,
-        createdAt: l.createdAt,
-      }))
-      break
-    }
-    case 'users': {
-      const u = findUserByDbId(uid)
-      if (u) {
-        rows = [
-          {
-            userId: u.userId,
-            name: u.name,
-            email: u.email,
-            plan: u.plan,
-            createdAt: u.createdAt,
-            updatedAt: u.updatedAt,
-          },
-        ]
-      }
-      break
-    }
-    default:
-      return fail(
-        `Unknown virtual table "${table}". Available: records, collections, api_keys, logs, users.`,
-        400,
-      )
-  }
-
-  // Apply WHERE clause (simple: col op val [AND col op val])
-  if (whereRaw) {
-    rows = applyWhere(rows, whereRaw)
-  }
-
-  // Apply ORDER BY
-  if (orderCol) {
-    const col = orderCol.trim()
-    const dir = orderDir?.trim().toUpperCase() === 'DESC' ? -1 : 1
-    rows.sort((a, b) => {
-      const av = a[col]
-      const bv = b[col]
-      if (av === bv) return 0
-      if (av === null || av === undefined) return 1
-      if (bv === null || bv === undefined) return -1
-      return av < bv ? -dir : dir
+async function handleSelect(raw: string, uid: string, pubUid: string) {
+  try {
+    const result = await runUserSelect(raw, pubUid)
+    return ok({
+      rows: result.rows,
+      count: result.count,
+      affected: 0,
+      truncated: result.truncated,
+      type: 'select',
+      virtualTables: ['users', 'records', 'api_keys', 'collections', 'logs'],
     })
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    return fail(`SQL error: ${reason}`, 400)
   }
-
-  // Apply LIMIT
-  let truncated = false
-  const limit = limitRaw ? parseInt(limitRaw, 10) : 1000
-  const effectiveLimit = Math.min(limit, 1000)
-  if (rows.length > effectiveLimit) {
-    rows = rows.slice(0, effectiveLimit)
-    truncated = true
-  }
-
-  // Project columns (SELECT * keeps all; otherwise filter)
-  let projected = rows
-  if (cols !== '*') {
-    const colList = cols.split(',').map((c) => c.trim().replace(/`/g, ''))
-    projected = rows.map((r) => {
-      const out: Record<string, unknown> = {}
-      for (const c of colList) out[c] = r[c]
-      return out
-    })
-  }
-
-  return ok({
-    rows: projected,
-    count: projected.length,
-    affected: 0,
-    truncated,
-    type: 'select',
-    virtualTables: ['users', 'records', 'api_keys', 'collections', 'logs'],
-  })
 }
 
 /** Parse a simple WHERE clause: col op val [AND col op val] */
@@ -505,12 +392,6 @@ function handleDelete(raw: string, uid: string, pubUid: string) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-/** Mask an API key: first 12 + ... + last 4 */
-function maskKey(key: string): string {
-  if (key.length <= 16) return key.slice(0, 4) + '...'
-  return key.slice(0, 12) + '...' + key.slice(-4)
-}
 
 /** Parse a comma-separated value list: 'a', 123, true, null */
 function parseValList(raw: string): unknown[] {

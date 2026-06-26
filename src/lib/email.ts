@@ -1,143 +1,145 @@
 /**
  * Onyx Base — email delivery (OTP / verification codes).
  *
- * LOCAL UNLIMITED FREE design
- * ───────────────────────────────────────────────────────────
- * The OTP system MUST work out-of-the-box in a fresh clone with ZERO external
- * configuration. So we have two modes:
+ * Multi-provider approach — pick whichever fits your needs:
+ * ──────────────────────────────────────────────────────────────
  *
- *   1. Production mode (SMTP configured):
- *      SMTP_HOST + SMTP_PORT + SMTP_FROM are all set in .env → we use
- *      nodemailer to send a real HTML email with the 6-digit code. The code
- *      is NEVER returned in the API response (no `devCode` field).
+ * 1. Gmail OAuth2 XOAUTH2  (your regular Gmail — NO App Password)  [priority 1]
+ *    One-time consent flow: sign in with your regular Gmail password (no
+ *    App Password, no 2FA requirement). We persist a long-lived refresh
+ *    token and auto-mint short-lived access tokens for XOAUTH2 SMTP.
+ *    Sends via smtp.gmail.com:465. Free, 500 emails/day (2000/day Workspace).
+ *    This is the "real Gmail + Gmail password, no App Password, auto-sending,
+ *    unlimited free" path the user asked for. Setup is in the admin Email tab.
+ *    Requires GMAIL_OAUTH_CLIENT_ID + GMAIL_OAUTH_CLIENT_SECRET in .env +
+ *    a one-time browser consent (admin → Email → Connect Gmail).
  *
- *   2. Local dev mode (SMTP NOT configured):
- *      Any of SMTP_HOST / SMTP_PORT / SMTP_FROM is missing → we DON'T send any
- *      email. Instead we log the code to the server console AND return
- *      `{ delivered: false, devMode: true, devCode: <code> }` from the API
- *      route so the frontend can display it inline ("Dev mode: your code is
- *      123456"). This is the "local unlimited free" path — no SMTP provider,
- *      no API key, no rate limit, no cost.
+ * 2. SMTP plain  (your own credentials)                            [priority 2]
+ *    Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM.
+ *    Works with ANY SMTP provider:
+ *      • Brevo    — 300 emails/day FREE, no credit card  → https://brevo.com
+ *      • SendGrid — 100 emails/day free
+ *      • Mailgun  — 5 000/month free (3 months)
+ *      • Your own mail server — truly unlimited, no daily cap
  *
- * ROBUST SMTP DELIVERY
- * ───────────────────────────────────────────────────────────
- * Gmail (and most providers) can be picky about the connection. We try
- * MULTIPLE connection configurations in sequence until one works:
- *   1. Port 465 with `secure: true`  (implicit TLS — Gmail's preferred)
- *   2. Port 587 with `secure: false` + STARTTLS upgrade
- *   3. Port 465 with `secure: true` + `requireTLS: true` (force)
+ * 3. Resend HTTP API  (100 emails/day free)                        [priority 3]
+ *    Set RESEND_API_KEY, RESEND_FROM.
+ *    A single API key + one HTTP POST — no TLS handshakes, no App Passwords.
  *
- * If ALL fail with an auth error (535), we surface a crystal-clear message
- * telling the operator to generate a Gmail App Password (regular Gmail
- * passwords are blocked for SMTP since 2022).
+ * 4. Local dev mode  (NO credentials — truly unlimited free)       [fallback]
+ *    Leave ALL email env vars unset. The 6-digit code is returned as
+ *    `devCode` in the API response AND printed to the server console AND
+ *    surfaced inline in the UI. Works fully offline.
+ *
+ * Provider priority:  Gmail-OAuth2  >  SMTP  >  Resend  >  Dev mode
  *
  * This module NEVER throws — `sendOtpEmail` always returns a result object.
  */
 
-import nodemailer, { type Transporter } from 'nodemailer'
+import nodemailer from 'nodemailer'
 import type { OtpPurpose } from '@/lib/otp'
+import { isGmailOauthConfigured, getFreshAccessToken } from '@/lib/gmail-oauth'
 
 /** App name shown in the OTP email subject + body. */
 const APP_NAME = process.env.NEXT_PUBLIC_APP_NAME || 'Onyx Base'
 
+/** Resend API endpoint. */
+const RESEND_API_URL = 'https://api.resend.com/emails'
+
+/** Which delivery backend is active. */
+export type EmailProvider = 'gmail-oauth' | 'smtp' | 'resend' | 'dev'
+
 /**
- * SMTP is "configured" only when host + port + from are ALL present. User and
- * password are technically optional (some relays accept unauthenticated
- * sends from inside a trusted network), so we don't gate on them.
+ * Detect which email provider is configured.
+ *
+ * Priority:  Gmail-OAuth2  >  SMTP  >  Resend  >  Dev mode
+ *
+ * Gmail-OAuth2 wins when the OAuth2 client creds are in env AND a refresh
+ * token has been persisted (i.e. the admin completed the consent flow).
+ * SMTP wins when SMTP_HOST + SMTP_USER + SMTP_PASS are set. Resend wins
+ * when RESEND_API_KEY is set. Otherwise dev mode.
+ *
+ * ASYNC because the Gmail-OAuth2 check reads a file.
  */
-export function isSmtpConfigured(): boolean {
-  const host = process.env.SMTP_HOST?.trim()
-  const port = process.env.SMTP_PORT?.trim()
-  const from = process.env.SMTP_FROM?.trim()
-  return Boolean(host && port && from)
+export async function getEmailProvider(): Promise<EmailProvider> {
+  if (await isGmailOauthConfigured()) return 'gmail-oauth'
+  if (
+    process.env.SMTP_HOST?.trim() &&
+    process.env.SMTP_USER?.trim() &&
+    process.env.SMTP_PASS?.trim()
+  ) {
+    return 'smtp'
+  }
+  if (process.env.RESEND_API_KEY?.trim()) return 'resend'
+  return 'dev'
 }
 
-// ─── Lazy transporter cache ────────────────────────────────────────────────
+/**
+ * Email delivery is "configured" when any real provider (Gmail-OAuth2 / SMTP /
+ * Resend) is set up — i.e. NOT in dev mode.
+ *
+ * ASYNC because it delegates to getEmailProvider().
+ */
+export async function isEmailConfigured(): Promise<boolean> {
+  return (await getEmailProvider()) !== 'dev'
+}
+
+/** Backward-compatible alias for callers that still use the old name. */
+export const isSmtpConfigured = isEmailConfigured
+
+/**
+ * Human-readable label for the active provider — safe to surface in the
+ * admin dashboard so an operator can see at a glance which path is live.
+ */
+export async function getProviderLabel(): Promise<string> {
+  switch (await getEmailProvider()) {
+    case 'gmail-oauth':
+      return 'Gmail OAuth2 (XOAUTH2 SMTP · no App Password)'
+    case 'smtp':
+      return `SMTP · ${process.env.SMTP_HOST?.trim() || '?'}:${process.env.SMTP_PORT?.trim() || '587'}`
+    case 'resend':
+      return 'Resend HTTP API'
+    case 'dev':
+      return 'Dev mode (no credentials — code shown inline)'
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SMTP transporter (plain SMTP path) — cached as a module-level singleton.
 //
-// We cache ONE transporter per connection-config on globalThis so hot reloads
-// don't leak transporters. We try configs in order; the first that verifies
-// is reused for all subsequent sends.
-const globalForMailer = globalThis as unknown as {
-  __onyxMailers?: Map<string, Transporter>
-  __onyxMailerVerifiedKey?: string
-}
+// nodemailer transporters are designed to be reused: they pool connections
+// and reuse them across sendMail() calls. Creating a new transporter per
+// request would defeat the pool and add TLS handshake latency.
+//
+// NOTE: The Gmail-OAuth2 path does NOT use a cached transporter because the
+// access token changes every hour. We build a fresh transporter per send
+// with the current access token. nodemailer handles connection pooling
+// internally even for one-off transporters when using SMTP pool, but the
+// volume here (a few OTPs per hour) doesn't justify pooling.
+// ─────────────────────────────────────────────────────────────────────────────
+let smtpTransporter: nodemailer.Transporter | null = null
 
-interface SmtpConfig {
-  key: string
-  host: string
-  port: number
-  secure: boolean
-  requireTLS?: boolean
-}
-
-/** Build the ordered list of SMTP configs to try. */
-function buildConfigs(): SmtpConfig[] {
+function getSmtpTransporter(): nodemailer.Transporter {
+  if (smtpTransporter) return smtpTransporter
   const host = process.env.SMTP_HOST!.trim()
-  const port = Number(process.env.SMTP_PORT!.trim())
-  const configs: SmtpConfig[] = []
-
-  // 1. The configured port with auto-detected secure flag.
-  if (Number.isFinite(port)) {
-    configs.push({
-      key: `p${port}-secure${port === 465}`,
-      host,
-      port,
-      secure: port === 465,
-    })
-    // 2. If the user picked 465, also try 587 STARTTLS as a fallback.
-    if (port === 465) {
-      configs.push({
-        key: 'p587-starttls',
-        host,
-        port: 587,
-        secure: false,
-        requireTLS: true,
-      })
-    }
-    // 3. If the user picked 587, also try 465 implicit SSL as a fallback.
-    if (port === 587) {
-      configs.push({
-        key: 'p465-ssl',
-        host,
-        port: 465,
-        secure: true,
-      })
-    }
-  }
-
-  return configs
-}
-
-/** Create (or fetch from cache) a transporter for a given config. */
-function getOrCreateMailer(cfg: SmtpConfig): Transporter {
-  if (!globalForMailer.__onyxMailers) {
-    globalForMailer.__onyxMailers = new Map()
-  }
-  const cached = globalForMailer.__onyxMailers.get(cfg.key)
-  if (cached) return cached
-
-  const user = process.env.SMTP_USER?.trim() || undefined
-  const pass = process.env.SMTP_PASS?.trim() || undefined
-
-  const transporter = nodemailer.createTransport({
-    host: cfg.host,
-    port: cfg.port,
-    secure: cfg.secure,
-    requireTLS: cfg.requireTLS,
-    auth: user && pass ? { user, pass } : undefined,
-    // Generous timeouts so a hung connection doesn't block the request.
-    connectionTimeout: 10_000,
-    greetingTimeout: 10_000,
-    socketTimeout: 15_000,
+  const port = parseInt(process.env.SMTP_PORT?.trim() || '587', 10)
+  const user = process.env.SMTP_USER!.trim()
+  const pass = process.env.SMTP_PASS!.trim()
+  // Port 465 = implicit TLS (TLS from the start).
+  // Port 587 / 25 = STARTTLS (plaintext that upgrades to TLS).
+  const secure = port === 465
+  smtpTransporter = nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
   })
-  globalForMailer.__onyxMailers.set(cfg.key, transporter)
-  return transporter
+  return smtpTransporter
 }
 
 /**
  * Human-readable label for the OTP purpose — shown in the email body so the
- * user knows WHY they're getting the code (and can spot a phishing attempt
- * where they get a "reset" code but didn't ask for one).
+ * user knows WHY they're getting the code.
  */
 function purposeLabel(purpose: OtpPurpose): string {
   switch (purpose) {
@@ -154,8 +156,8 @@ function purposeLabel(purpose: OtpPurpose): string {
 
 /**
  * Build a clean HTML email body for the OTP code. Uses inline styles (no
- * external CSS) so it renders correctly in Gmail / Outlook / Apple Mail —
- * which strip <style> tags. Warm-clay palette consistent with the dashboard.
+ * external CSS) so it renders correctly in Gmail / Outlook / Apple Mail.
+ * Warm-clay palette consistent with the dashboard.
  */
 function buildOtpHtml(opts: { code: string; purpose: OtpPurpose }): string {
   const { code, purpose } = opts
@@ -231,38 +233,23 @@ function buildOtpText(opts: { code: string; purpose: OtpPurpose }): string {
 }
 
 export interface SendOtpResult {
-  /** True if a real email was handed to SMTP for delivery. */
+  /** True if a real email was handed to the provider for delivery. */
   delivered: boolean
-  /** True when we're in local dev mode (SMTP not configured). */
+  /** True when we're in local dev mode (no provider configured). */
   devMode: boolean
   /** Human-readable status — safe to log or surface to operators. */
   message: string
 }
 
 /**
- * Detect whether an SMTP error is a Gmail auth failure (535 / BadCredentials)
- * and return a human-actionable hint. Gmail blocks regular account passwords
- * for SMTP since 2022 — the operator MUST generate a 16-char App Password.
- */
-export function detectAuthFailure(message: string): string | null {
-  if (/535|Username and Password not accepted|BadCredentials/i.test(message)) {
-    return `Gmail rejected the SMTP credentials (535). Regular Gmail passwords are blocked for SMTP. Generate a 16-character App Password at https://myaccount.google.com/apppasswords (requires 2-Step Verification to be enabled on the account), then set SMTP_PASS to that App Password in your .env file.`
-  }
-  return null
-}
-
-/**
  * Send (or, in dev mode, surface) an OTP code via email.
  *
- * Production mode: tries multiple SMTP connection configs in sequence. Returns
- * `{ delivered: true, devMode: false }` on the first success. On total
- * failure, returns `{ delivered: false, devMode: false, message }` WITHOUT
- * throwing — the caller decides whether to fall back to dev mode.
+ * Dispatches to the active provider (Gmail-OAuth2 / SMTP / Resend / dev mode)
+ * detected by `getEmailProvider()`. See the file header for the priority +
+ * setup guide.
  *
- * Dev mode: doesn't send anything. Logs the code to the server console AND
- * returns `{ delivered: false, devMode: true, message }`. The caller (API
- * route) is responsible for including the plaintext code in the response
- * body as `devCode` so the frontend can display it.
+ * NEVER throws — on failure returns `{ delivered: false, devMode: false,
+ * message }` and the caller decides whether to fall back to dev mode.
  */
 export async function sendOtpEmail(opts: {
   to: string
@@ -271,40 +258,56 @@ export async function sendOtpEmail(opts: {
 }): Promise<SendOtpResult> {
   const { to, code, purpose } = opts
   const recipient = to.trim().toLowerCase()
+  const provider = await getEmailProvider()
 
-  // ── Dev mode: no SMTP configured → log + signal devMode ──
-  if (!isSmtpConfigured()) {
+  // ── Dev mode: no provider configured → log + signal devMode ──
+  if (provider === 'dev') {
     const msg = `[otp] dev mode — code for ${recipient} (${purpose}): ${code}`
     console.log(msg)
     return {
       delivered: false,
       devMode: true,
-      message: 'SMTP not configured — OTP shown in server logs / API response (dev mode)',
+      message:
+        'Email not configured — OTP shown in server logs / API response (dev mode). Connect Gmail in the admin Email tab (no App Password) OR set SMTP_* (Brevo: 300/day free) OR RESEND_API_KEY (100/day free) in .env to enable real email delivery.',
     }
   }
 
-  // ── Production mode: try each SMTP config until one works ──
-  const from = process.env.SMTP_FROM!.trim()
   const subject = `Your ${APP_NAME} verification code`
   const html = buildOtpHtml({ code, purpose })
   const text = buildOtpText({ code, purpose })
 
-  const configs = buildConfigs()
-  const errors: string[] = []
-
-  for (const cfg of configs) {
+  // ── Gmail OAuth2 XOAUTH2 SMTP (your regular Gmail — NO App Password) ──
+  if (provider === 'gmail-oauth') {
+    const tokenInfo = await getFreshAccessToken()
+    if (!tokenInfo) {
+      return {
+        delivered: false,
+        devMode: false,
+        message:
+          'Gmail OAuth2 is connected but the access token could not be refreshed (the refresh token may have been revoked). Disconnect Gmail in the admin Email tab and reconnect, or fall back to another provider.',
+      }
+    }
     try {
-      const mailer = getOrCreateMailer(cfg)
-      await mailer.sendMail({
-        from,
+      // Build a transporter with the OAuth2 access token. nodemailer's
+      // built-in OAuth2 support would also accept clientId/clientSecret/
+      // refreshToken and refresh internally, but passing the access token
+      // directly is simpler and lets us control the refresh logic.
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          type: 'OAuth2',
+          user: tokenInfo.email,
+          accessToken: tokenInfo.accessToken,
+        },
+      })
+      await transporter.sendMail({
+        from: tokenInfo.email,
         to: recipient,
         subject,
         html,
         text,
       })
-      // Success — remember which config worked for next time.
-      globalForMailer.__onyxMailerVerifiedKey = cfg.key
-      console.log(`[email] sent OTP to ${recipient} via ${cfg.key}`)
+      console.log(`[email] sent OTP to ${recipient} via Gmail OAuth2 (${tokenInfo.email})`)
       return {
         delivered: true,
         devMode: false,
@@ -312,88 +315,277 @@ export async function sendOtpEmail(opts: {
       }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
-      errors.push(`[${cfg.key}] ${reason}`)
-      // If it's an auth failure, no point trying other configs — the
-      // credentials are wrong regardless of port. Stop early.
-      if (/535|Username and Password not accepted|BadCredentials/i.test(reason)) {
-        console.error(`[email] SMTP auth failed for ${recipient} via ${cfg.key}:`, reason)
-        const hint = detectAuthFailure(reason)
-        return {
-          delivered: false,
-          devMode: false,
-          message: hint ?? `Failed to send verification email: ${reason}`,
-        }
+      console.error(`[email] Gmail OAuth2 SMTP error for ${recipient}:`, reason)
+      let hint = reason
+      if (/invalid_grant|revoked|expired/i.test(reason)) {
+        hint =
+          `Gmail OAuth2 token was rejected (possibly revoked). Disconnect Gmail ` +
+          `in the admin Email tab and reconnect. Original: ${reason}`
+      } else if (/quota|rate|limit|421|450|550/i.test(reason)) {
+        hint =
+          `Gmail rejected the email (quota/rate limit). Gmail allows 500/day ` +
+          `(2000/day Workspace). Original: ${reason}`
       }
-      // Other errors (connection timeout, network) → try the next config.
-      console.warn(`[email] config ${cfg.key} failed for ${recipient}: ${reason}`)
+      return {
+        delivered: false,
+        devMode: false,
+        message: `Failed to send verification email via Gmail: ${hint}`,
+      }
     }
   }
 
-  // All configs exhausted.
-  const lastErr = errors[errors.length - 1] ?? 'Unknown SMTP error'
-  console.error(`[email] all SMTP configs failed for ${recipient}:`, errors.join(' | '))
-  return {
-    delivered: false,
-    devMode: false,
-    message: `Failed to send verification email: ${lastErr}`,
+  // ── SMTP plain (your own credentials — Brevo, your server, etc.) ──
+  if (provider === 'smtp') {
+    const from =
+      process.env.SMTP_FROM?.trim() || process.env.SMTP_USER!.trim()
+    try {
+      const transporter = getSmtpTransporter()
+      await transporter.sendMail({
+        from,
+        to: recipient,
+        subject,
+        html,
+        text,
+      })
+      console.log(
+        `[email] sent OTP to ${recipient} via SMTP (${process.env.SMTP_HOST}:${process.env.SMTP_PORT || '587'})`,
+      )
+      return {
+        delivered: true,
+        devMode: false,
+        message: `Verification code sent to ${recipient}.`,
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      console.error(`[email] SMTP error for ${recipient}:`, reason)
+      let hint = reason
+      if (/535|5\.7\.8|invalid login|auth|credential/i.test(reason)) {
+        hint =
+          `SMTP authentication failed. Check SMTP_USER and SMTP_PASS. ` +
+          `If using Gmail SMTP directly, you need a 16-char App Password ` +
+          `(NOT your regular password) — but for a no-App-Password flow, ` +
+          `use the Gmail OAuth2 option in the admin Email tab instead. ` +
+          `For a simpler free setup, use Brevo (300/day free, no 2FA) — ` +
+          `see .env.example. Original: ${reason}`
+      } else if (/connect|ECONNREFUSED|ETIMEDOUT|ENOTFOUND/i.test(reason)) {
+        hint =
+          `Could not connect to SMTP server ${process.env.SMTP_HOST}:${process.env.SMTP_PORT || '587'}. ` +
+          `Common ports: 587 (STARTTLS), 465 (implicit TLS), 25 (plaintext). ` +
+          `Original: ${reason}`
+      } else if (/SSL|TLS|certificate|self.signed/i.test(reason)) {
+        hint =
+          `TLS/SSL error connecting to ${process.env.SMTP_HOST}. ` +
+          `Try SMTP_PORT=587 (STARTTLS) or SMTP_PORT=465 (implicit TLS). ` +
+          `Original: ${reason}`
+      }
+      return {
+        delivered: false,
+        devMode: false,
+        message: `Failed to send verification email: ${hint}`,
+      }
+    }
+  }
+
+  // ── Resend HTTP API (100/day free) ──
+  const apiKey = process.env.RESEND_API_KEY!.trim()
+  const from =
+    process.env.RESEND_FROM?.trim() ||
+    'Onyx Base <onboarding@resend.dev>'
+  try {
+    const res = await fetch(RESEND_API_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from,
+        to: [recipient],
+        subject,
+        html,
+        text,
+      }),
+      signal: AbortSignal.timeout(15_000),
+    })
+
+    if (res.ok) {
+      console.log(`[email] sent OTP to ${recipient} via Resend API`)
+      return {
+        delivered: true,
+        devMode: false,
+        message: `Verification code sent to ${recipient}.`,
+      }
+    }
+
+    const errBody = await res.json().catch(() => null)
+    const reason =
+      (errBody &&
+        typeof errBody === 'object' &&
+        'message' in errBody &&
+        String(errBody.message)) ||
+      `Resend API returned HTTP ${res.status} ${res.statusText}`
+    console.error(`[email] Resend API error for ${recipient}:`, reason)
+
+    let hint = reason
+    if (res.status === 401 || res.status === 403) {
+      hint =
+        `Resend auth failed (HTTP ${res.status}). RESEND_API_KEY is invalid or ` +
+        `revoked. Generate a new one at https://resend.com/api-keys. ` +
+        `Original: ${reason}`
+    } else if (res.status === 422 || /domain|from/i.test(reason)) {
+      hint =
+        `Sender rejected. RESEND_FROM must use a verified domain. Verify your ` +
+        `domain at https://resend.com/domains or use the default ` +
+        `onboarding@resend.dev. Original: ${reason}`
+    } else if (res.status === 429) {
+      hint =
+        `Resend rate limit (HTTP 429). Free tier = 100/day. Wait and retry, ` +
+        `or connect Gmail in the admin Email tab (500/day free, no App Password). ` +
+        `Original: ${reason}`
+    }
+
+    return {
+      delivered: false,
+      devMode: false,
+      message: `Failed to send verification email: ${hint}`,
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    console.error(`[email] network error sending to ${recipient}:`, reason)
+    return {
+      delivered: false,
+      devMode: false,
+      message: `Failed to send verification email (network error): ${reason}`,
+    }
   }
 }
 
 /**
- * Send a test email (used by the /api/admin/email/test endpoint). Reuses the
- * same multi-config retry logic as sendOtpEmail so the test accurately
- * reflects whether real OTP emails will go out.
+ * Send a test email (used by the admin email-test endpoint). Reuses the
+ * same dispatch path as sendOtpEmail so the test accurately reflects
+ * whether real OTP emails will go out.
  */
 export async function sendTestEmail(to: string): Promise<SendOtpResult> {
-  if (!isSmtpConfigured()) {
+  const provider = await getEmailProvider()
+  const recipient = to.trim().toLowerCase()
+
+  if (provider === 'dev') {
     return {
       delivered: false,
       devMode: true,
-      message: 'SMTP is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM in .env to enable real email delivery.',
+      message:
+        'Email is not configured. Connect Gmail in the admin Email tab (no App Password) OR set SMTP_* (Brevo: 300/day free) OR RESEND_API_KEY (100/day free) in .env.',
     }
   }
 
-  const recipient = to.trim().toLowerCase()
-  const from = process.env.SMTP_FROM!.trim()
-  const html = `<!doctype html><html><body style="margin:0;padding:24px;font-family:sans-serif;background:#f4f3ee;color:#2b2825;"><div style="max-width:480px;margin:0 auto;background:#fff;border-radius:12px;padding:28px;border:1px solid #d9d4c7;"><h1 style="font-size:18px;color:#d4744f;margin:0 0 8px;">${APP_NAME} — test email</h1><p style="font-size:14px;color:#6b6557;line-height:1.5;">If you can read this, your SMTP configuration is working correctly. Verification emails will be delivered to this address.</p></div></body></html>`
-  const text = `${APP_NAME} — test email\n\nIf you can read this, your SMTP configuration is working correctly. Verification emails will be delivered to this address.`
+  const html = `<!doctype html><html><body style="margin:0;padding:24px;font-family:sans-serif;background:#f4f3ee;color:#2b2825;"><div style="max-width:480px;margin:0 auto;background:#fff;border-radius:12px;padding:28px;border:1px solid #d9d4c7;"><h1 style="font-size:18px;color:#d4744f;margin:0 0 8px;">${APP_NAME} — test email</h1><p style="font-size:14px;color:#6b6557;line-height:1.5;">If you can read this, your email configuration is working correctly. Verification emails will be delivered to this address.</p></div></body></html>`
+  const text = `${APP_NAME} — test email\n\nIf you can read this, your email configuration is working correctly. Verification emails will be delivered to this address.`
+  const subject = `${APP_NAME} — email test`
 
-  const configs = buildConfigs()
-  const errors: string[] = []
-
-  for (const cfg of configs) {
+  // ── Gmail OAuth2 ──
+  if (provider === 'gmail-oauth') {
+    const tokenInfo = await getFreshAccessToken()
+    if (!tokenInfo) {
+      return {
+        delivered: false,
+        devMode: false,
+        message:
+          'Gmail OAuth2 access token could not be refreshed. Disconnect and reconnect Gmail in the admin Email tab.',
+      }
+    }
     try {
-      const mailer = getOrCreateMailer(cfg)
-      await mailer.sendMail({
-        from,
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+          type: 'OAuth2',
+          user: tokenInfo.email,
+          accessToken: tokenInfo.accessToken,
+        },
+      })
+      await transporter.sendMail({
+        from: tokenInfo.email,
         to: recipient,
-        subject: `${APP_NAME} — SMTP test`,
+        subject,
         html,
         text,
       })
-      globalForMailer.__onyxMailerVerifiedKey = cfg.key
       return {
         delivered: true,
         devMode: false,
-        message: `Test email sent to ${recipient} via ${cfg.key}.`,
+        message: `Test email sent to ${recipient} via Gmail OAuth2 (${tokenInfo.email}).`,
       }
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
-      errors.push(`[${cfg.key}] ${reason}`)
-      if (/535|Username and Password not accepted|BadCredentials/i.test(reason)) {
-        const hint = detectAuthFailure(reason)
-        return {
-          delivered: false,
-          devMode: false,
-          message: hint ?? reason,
-        }
+      return {
+        delivered: false,
+        devMode: false,
+        message: `Gmail OAuth2 error: ${reason}`,
       }
     }
   }
 
-  return {
-    delivered: false,
-    devMode: false,
-    message: `Failed: ${errors.join(' | ')}`,
+  // ── SMTP plain ──
+  if (provider === 'smtp') {
+    const from =
+      process.env.SMTP_FROM?.trim() || process.env.SMTP_USER!.trim()
+    try {
+      const transporter = getSmtpTransporter()
+      await transporter.sendMail({ from, to: recipient, subject, html, text })
+      return {
+        delivered: true,
+        devMode: false,
+        message: `Test email sent to ${recipient} via SMTP (${process.env.SMTP_HOST}).`,
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err)
+      return {
+        delivered: false,
+        devMode: false,
+        message: `SMTP error: ${reason}`,
+      }
+    }
+  }
+
+  // ── Resend ──
+  const apiKey = process.env.RESEND_API_KEY!.trim()
+  const from =
+    process.env.RESEND_FROM?.trim() ||
+    'Onyx Base <onboarding@resend.dev>'
+  try {
+    const res = await fetch(RESEND_API_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ from, to: [recipient], subject, html, text }),
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (res.ok) {
+      return {
+        delivered: true,
+        devMode: false,
+        message: `Test email sent to ${recipient} via Resend API.`,
+      }
+    }
+    const errBody = await res.json().catch(() => null)
+    const reason =
+      (errBody &&
+        typeof errBody === 'object' &&
+        'message' in errBody &&
+        String(errBody.message)) ||
+      `HTTP ${res.status} ${res.statusText}`
+    return {
+      delivered: false,
+      devMode: false,
+      message: `Failed: ${reason}`,
+    }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    return {
+      delivered: false,
+      devMode: false,
+      message: `Network error: ${reason}`,
+    }
   }
 }

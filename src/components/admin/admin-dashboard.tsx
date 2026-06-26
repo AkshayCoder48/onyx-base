@@ -31,6 +31,7 @@ import {
   File as FileIcon,
   AlertCircle,
   Info,
+  Mail,
 } from 'lucide-react'
 import { useApi } from '@/lib/api'
 import { useOnyxBase } from '@/lib/store'
@@ -72,6 +73,7 @@ import {
   TabsContent,
 } from '@/components/ui/tabs'
 import { TypeBadge, formatBytes, timeAgo, maskKey } from '@/components/dashboard/shared'
+import { GmailSetup } from '@/components/admin/gmail-setup'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 
@@ -170,7 +172,7 @@ interface AdminKeyView {
   revoked: boolean
 }
 
-type AdminTab = 'users' | 'files' | 'admins'
+type AdminTab = 'users' | 'files' | 'admins' | 'email'
 
 /* ===================================================================
  *  Telegram link cache (localStorage, 55-min TTL).
@@ -259,7 +261,13 @@ export function AdminDashboard() {
   const user = useOnyxBase((s) => s.user)
   const setAdminMode = useOnyxBase((s) => s.setAdminMode)
   const clearSession = useOnyxBase((s) => s.clearSession)
-  const [activeTab, setActiveTab] = useState<AdminTab>('users')
+  const [activeTab, setActiveTab] = useState<AdminTab>(() => {
+    if (typeof window === 'undefined') return 'users'
+    const params = new URLSearchParams(window.location.search)
+    const tab = params.get('tab')
+    if (tab === 'email' || tab === 'files' || tab === 'admins' || tab === 'users') return tab
+    return 'users'
+  })
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null)
 
   // Cleanup expired localStorage link entries on mount.
@@ -288,7 +296,9 @@ export function AdminDashboard() {
   return (
     <div className="h-dvh flex flex-col bg-background overflow-hidden">
       {/* ─── Header bar ─────────────────────────────────────────────── */}
-      <header className="sticky top-0 z-40 border-b border-border/60 bg-background/95 backdrop-blur">
+      {/* Not sticky — the parent is h-dvh + overflow-hidden, so the header
+          is just a normal flex item at the top. main scrolls below it. */}
+      <header className="shrink-0 z-40 border-b border-border/60 bg-background/95 backdrop-blur">
         <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-3 h-14">
             <img src="/logo.png" alt="Onyx Base" className="size-7 rounded-md object-cover" />
@@ -374,13 +384,22 @@ export function AdminDashboard() {
                 icon={ShieldCheck}
                 label="Admins"
               />
+              <TabButton
+                active={activeTab === 'email'}
+                onClick={() => {
+                  setSelectedUserId(null)
+                  setActiveTab('email')
+                }}
+                icon={Mail}
+                label="Email"
+              />
             </nav>
           </div>
         </div>
       </header>
 
       {/* ─── Main content ──────────────────────────────────────────── */}
-      <main className="flex-1 overflow-y-auto">
+      <main className="flex-1 min-h-0 overflow-y-auto">
         <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-8 py-6 lg:py-8">
           {activeTab === 'users' && selectedUserId && (
             <UserDetail userId={selectedUserId} onBack={() => setSelectedUserId(null)} />
@@ -390,6 +409,7 @@ export function AdminDashboard() {
           )}
           {activeTab === 'files' && <AllFilesView />}
           {activeTab === 'admins' && <AdminsView />}
+          {activeTab === 'email' && <GmailSetup />}
         </div>
       </main>
 
