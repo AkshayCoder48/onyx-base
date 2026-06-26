@@ -941,8 +941,8 @@ at: 2026-06-25T07:40:12.000Z`} />
             { name: 'Policies', status: 'equivalent', desc: 'API-key scoping + share-token scope field (read/write) bound to a single (collection, key).' },
             { name: 'JWT Verification', status: 'equivalent', desc: 'Signed download tokens (HMAC-SHA256, constant-time verify) for private-file access.' },
             { name: 'SSL Connections', status: 'equivalent', desc: 'HTTPS terminated at the Caddy gateway; HSTS enforced.' },
-            { name: 'Network Restrictions', status: 'roadmap', desc: 'Env-configurable allow/deny list of source IPs at the gateway.' },
-            { name: 'IP Allow Lists', status: 'roadmap', desc: 'Per-API-key IP allowlist (reject calls from unlisted addresses).' },
+            { name: 'Network Restrictions', status: 'implemented', desc: 'IP_ALLOWLIST env var + runtime allowlist (mutable via POST /api/admin/network). Enforced on every /v1/* and /api/* request in src/proxy.ts. Empty = open; non-empty = strict.' },
+            { name: 'IP Allow Lists', status: 'implemented', desc: 'Per-instance IP/CIDR allowlist (env + runtime). IPv4 CIDR matching (e.g. 10.0.0.0/8); IPv6 exact-match. 403 + JSON error on miss. Admin: GET/POST /api/admin/network.' },
             { name: 'Vault (Secrets)', status: 'equivalent', desc: 'All secrets in .env (gitignored). BOOTSTRAP_ADMIN_KEY, CLOUDKV_SECRET, TELEGRAM_BOT_TOKEN never in source.' },
             { name: 'Audit Logs', status: 'implemented', desc: 'Every write / login / admin action recorded in the logs table + mirrored to Telegram.' },
           ]}
@@ -955,17 +955,17 @@ at: 2026-06-25T07:40:12.000Z`} />
           subtitle="SQLite is the fast local index; Telegram is the durable mirror. No connection pool, no replicas — reads are local and instant."
           features={[
             { name: 'Managed PostgreSQL', status: 'different', desc: 'N/A — Onyx Base uses SQLite + Telegram. PostgreSQL is not the model.' },
-            { name: 'SQL Editor', status: 'implemented', desc: 'Read-only SQL console in the dashboard — run SELECT queries against virtual tables (records, collections, api_keys, logs, users) pre-filtered to your account. 1000-row cap, API keys masked, ⌘+Enter to run.' },
-            { name: 'Database Branching', status: 'roadmap', desc: 'Per-environment SQLite snapshots with optional Telegram replay.' },
+            { name: 'SQL Editor', status: 'implemented', desc: 'Read+write SQL console in the dashboard — run SELECT/INSERT/UPDATE/DELETE/CREATE/DROP/ALTER against virtual tables (records, collections, api_keys, logs, users) pre-filtered to your account. 1000-row cap, API keys masked, usr_* tables for custom schemas, ⌘+Enter to run.' },
+            { name: 'Database Branching', status: 'implemented', desc: 'Admin-only: POST /api/admin/branches { name } snapshots both db/custom.db + db/cloudkv.json → db/branches/<name>.{db,json}. POST with action:restore overwrites the live files. DELETE /api/admin/branches/<name> removes a snapshot.' },
             { name: 'Point-in-Time Recovery (PITR)', status: 'equivalent', desc: 'Telegram mirror is an append-only durable backup — manifest + record messages can be replayed.' },
             { name: 'Backups', status: 'implemented', desc: 'Every record mirrored to Telegram; identity manifest is pinned after every write.' },
             { name: 'Read Replicas', status: 'different', desc: 'N/A — single-node SQLite; reads are local and instant.' },
             { name: 'Connection Pooling', status: 'different', desc: 'N/A — embedded SQLite, no connections to pool.' },
             { name: 'Extensions (PostGIS, pgvector, pg_cron)', status: 'different', desc: 'N/A — SQLite has no equivalent extension ecosystem. Roadmap: FTS5 for full-text search.' },
             { name: 'Triggers', status: 'equivalent', desc: 'Event system — every write fires a record:changed event (WebSocket + Telegram mirror).' },
-            { name: 'Functions (PL/pgSQL)', status: 'roadmap', desc: 'Server-side JS/TS handlers (webhook-style) callable from /v1/*.' },
-            { name: 'Views', status: 'roadmap', desc: 'Named, server-defined projections over collections.' },
-            { name: 'Materialized Views', status: 'roadmap', desc: 'Pre-computed aggregations refreshed on write.' },
+            { name: 'Functions (PL/pgSQL)', status: 'implemented', desc: 'Server-side JS handlers stored in a Prisma `Function` table. Create via POST /api/v1/functions, test-invoke via POST /api/v1/functions/[name]. Runs in `new Function("ctx", code)` sandbox with { record, db, user } — db is read-only, user-scoped. 5s timeout, syntax-checked at create.' },
+            { name: 'Views', status: 'implemented', desc: 'Named projections over a collection. Create via POST /api/v1/views { name, collection, projection, filter? }. Execute via GET /api/v1/views/[name] — applies substring filter on key, projects requested columns. Stored in Prisma `View` table.' },
+            { name: 'Materialized Views', status: 'implemented', desc: 'Pre-computed aggregations cached as JSON. Create via POST /api/v1/matviews { name, query } — runs the SELECT immediately and caches the result. Read is O(1) (GET /api/v1/matviews/[name]). POST to refresh, DELETE to drop. Refresh-all via POST /api/v1/matviews { action: "refresh_all" }.' },
             { name: 'Foreign Data Wrappers (FDW)', status: 'different', desc: 'N/A — not applicable to the SQLite+Telegram model.' },
           ]}
         />
@@ -978,10 +978,10 @@ at: 2026-06-25T07:40:12.000Z`} />
           features={[
             { name: 'Enable Data API (REST API)', status: 'implemented', desc: '/v1/* is the auto-generated REST surface for KV + files.' },
             { name: 'Auto-generated RESTful API', status: 'implemented', desc: 'Every collection auto-exposes /v1/set, /v1/get, /v1/delete, /v1/list.' },
-            { name: 'GraphQL API', status: 'roadmap', desc: 'Single /v1/graphql endpoint with per-userId scoping.' },
-            { name: 'OpenAPI documentation', status: 'roadmap', desc: '/api/openapi.json + /api/docs (Swagger UI).' },
+            { name: 'GraphQL API', status: 'implemented', desc: 'Single /api/v1/graphql endpoint. Minimal subset: queries for records, collections, apiKeys, logs, me — all user-scoped via authenticate(). Hand-rolled parser (no Apollo/graphql deps). Standard { data, errors } JSON response. Args + variables supported on records(limit, collection) and logs(limit, action).' },
+            { name: 'OpenAPI documentation', status: 'implemented', desc: 'GET /api/openapi.json returns a real OpenAPI 3.0 spec covering /v1/* + /api/auth/* + the new /api/v1/{graphql,rpc,views,functions,matviews} + /api/admin/{network,branches}. GET /api/docs renders Swagger UI (CDN-loaded) for interactive exploration. Bearer auth security scheme documented.' },
             { name: 'Realtime API', status: 'implemented', desc: 'WebSocket mini-service on port 3003 pushes record:changed events.' },
-            { name: 'RPC (Database Functions)', status: 'roadmap', desc: 'Invoke server-side JS/TS handlers via /v1/rpc/:name.' },
+            { name: 'RPC (Database Functions)', status: 'implemented', desc: 'Built-in RPC at /api/v1/rpc/[name]: count_records, sum { key }, aggregate { collection, type: count|sum|avg|min|max }, search { query, collection?, limit? } (substring match on key + value), touch { key, value, collection? } (upsert + return). All user-scoped.' },
             { name: 'API Keys', status: 'implemented', desc: 'kv_live_* keys — per-user, revocable, named, multiple per account.' },
             { name: 'JWT Authentication', status: 'equivalent', desc: 'Signed download tokens (short-lived, HMAC-SHA256).' },
             { name: 'Auto-expose new tables / RLS-by-default', status: 'equivalent', desc: 'Every new collection is immediately accessible via /v1/* with automatic per-userId isolation.' },
