@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg width="820" height="420" viewBox="0 0 820 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture overview">
+<svg width="820" height="460" viewBox="0 0 820 460" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture overview">
   <defs>
     <linearGradient id="archApi" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#ffffff"/>
@@ -14,63 +14,78 @@
     </marker>
   </defs>
 
+  <!-- Column headers -->
+  <text x="100" y="28" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="700" fill="#6b6557" text-anchor="middle">Clients</text>
+  <text x="410" y="28" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="700" fill="#6b6557" text-anchor="middle">Onyx Base API</text>
+  <text x="720" y="28" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="700" fill="#6b6557" text-anchor="middle">Storage backends</text>
+
   <!-- Clients column -->
   <g>
     <!-- Browser -->
-    <rect x="40" y="40" width="120" height="80" rx="10" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
-    <rect x="40" y="40" width="120" height="20" rx="10" fill="#e8e5dc"/>
-    <circle cx="52" cy="50" r="3" fill="#d4744f"/>
-    <circle cx="62" cy="50" r="3" fill="#e09a7a"/>
-    <circle cx="72" cy="50" r="3" fill="#b1ada1"/>
-    <rect x="52" y="70" width="96" height="6" rx="3" fill="#ece9e1"/>
-    <rect x="52" y="82" width="72" height="6" rx="3" fill="#ece9e1"/>
-    <rect x="52" y="94" width="84" height="6" rx="3" fill="#f7e8df"/>
+    <rect x="40" y="50" width="120" height="80" rx="10" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
+    <rect x="40" y="50" width="120" height="20" rx="10" fill="#e8e5dc"/>
+    <circle cx="52" cy="60" r="3" fill="#d4744f"/>
+    <circle cx="62" cy="60" r="3" fill="#e09a7a"/>
+    <circle cx="72" cy="60" r="3" fill="#b1ada1"/>
+    <rect x="52" y="80" width="96" height="6" rx="3" fill="#ece9e1"/>
+    <rect x="52" y="92" width="72" height="6" rx="3" fill="#ece9e1"/>
+    <rect x="52" y="104" width="84" height="6" rx="3" fill="#f7e8df"/>
+    <text x="100" y="124" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#2b2825" text-anchor="middle">Browser dashboard</text>
 
     <!-- Terminal (clean, compact) -->
-    <rect x="40" y="150" width="120" height="80" rx="10" fill="#2b2825" stroke="#d9d4c7" stroke-width="1.5"/>
-    <rect x="40" y="150" width="120" height="18" rx="10" fill="#1a1815"/>
-    <circle cx="52" cy="159" r="3" fill="#d4744f"/>
-    <circle cx="62" cy="159" r="3" fill="#e09a7a"/>
-    <circle cx="72" cy="159" r="3" fill="#b1ada1"/>
-    <path d="M52 184 L58 189 L52 194" stroke="#e09a7a" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-    <rect x="64" y="187" width="10" height="3" rx="1.5" fill="#e09a7a"/>
-    <rect x="52" y="200" width="70" height="5" rx="2" fill="#6b6557"/>
-    <rect x="52" y="210" width="90" height="5" rx="2" fill="#4a463f"/>
+    <rect x="40" y="155" width="120" height="80" rx="10" fill="#2b2825" stroke="#d9d4c7" stroke-width="1.5"/>
+    <rect x="40" y="155" width="120" height="18" rx="10" fill="#1a1815"/>
+    <circle cx="52" cy="164" r="3" fill="#d4744f"/>
+    <circle cx="62" cy="164" r="3" fill="#e09a7a"/>
+    <circle cx="72" cy="164" r="3" fill="#b1ada1"/>
+    <path d="M52 189 L58 194 L52 199" stroke="#e09a7a" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="64" y="192" width="10" height="3" rx="1.5" fill="#e09a7a"/>
+    <rect x="52" y="205" width="70" height="5" rx="2" fill="#6b6557"/>
+    <rect x="52" y="215" width="90" height="5" rx="2" fill="#4a463f"/>
+    <text x="100" y="228" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="600" fill="#e09a7a" text-anchor="middle">CLI (onyx)</text>
 
     <!-- HTTP / curl -->
     <rect x="40" y="260" width="120" height="80" rx="10" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
     <path d="M60 290 Q60 280 70 280 L100 280 Q110 280 110 290 L110 300 L120 300 L105 315 L90 300 L100 300 L100 295 Q100 290 95 290 L75 290 Q70 290 70 295 L70 310 Q70 315 75 315 L95 315" fill="none" stroke="#d4744f" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
     <rect x="60" y="325" width="80" height="5" rx="2.5" fill="#ece9e1"/>
+    <text x="100" y="335" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#2b2825" text-anchor="middle">HTTP / curl</text>
   </g>
 
   <!-- Arrows from clients to API -->
-  <path d="M165 80 C 220 80, 240 160, 295 160" fill="none" stroke="#6b6557" stroke-width="2" marker-end="url(#arrArch)"/>
-  <path d="M165 190 L 295 210" fill="none" stroke="#6b6557" stroke-width="2" marker-end="url(#arrArch)"/>
+  <path d="M165 90 C 220 90, 240 170, 295 170" fill="none" stroke="#6b6557" stroke-width="2" marker-end="url(#arrArch)"/>
+  <path d="M165 195 L 295 215" fill="none" stroke="#6b6557" stroke-width="2" marker-end="url(#arrArch)"/>
   <path d="M165 300 C 220 300, 240 240, 295 240" fill="none" stroke="#6b6557" stroke-width="2" marker-end="url(#arrArch)"/>
+  <text x="240" y="148" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle" font-style="italic">HTTPS + Bearer</text>
 
   <!-- API core box -->
   <rect x="300" y="80" width="220" height="260" rx="16" fill="url(#archApi)" stroke="#d4744f" stroke-width="2"/>
   <rect x="300" y="80" width="220" height="40" rx="16" fill="#d4744f"/>
   <rect x="300" y="110" width="220" height="10" fill="#d4744f"/>
+  <text x="410" y="106" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">Next.js API core</text>
+
   <!-- API inner modules -->
   <rect x="320" y="140" width="180" height="34" rx="8" fill="#ffffff" stroke="#d9d4c7"/>
   <circle cx="338" cy="157" r="7" fill="#d4744f"/>
-  <rect x="352" y="151" width="120" height="12" rx="3" fill="#e8e5dc"/>
+  <text x="430" y="161" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#2b2825" text-anchor="middle">Bearer auth (kv_live_)</text>
 
   <rect x="320" y="184" width="180" height="34" rx="8" fill="#ffffff" stroke="#d9d4c7"/>
   <rect x="332" y="196" width="14" height="10" rx="2" fill="#e09a7a"/>
   <rect x="350" y="196" width="14" height="10" rx="2" fill="#e09a7a"/>
   <rect x="368" y="196" width="14" height="10" rx="2" fill="#e09a7a"/>
+  <text x="430" y="205" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#2b2825" text-anchor="middle">KV store + collections</text>
 
   <rect x="320" y="228" width="180" height="34" rx="8" fill="#ffffff" stroke="#d9d4c7"/>
   <path d="M338 250 L346 245 L346 255 z" fill="#8a3f23"/>
   <rect x="352" y="243" width="110" height="14" rx="4" fill="#f7e8df"/>
+  <text x="430" y="250" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#2b2825" text-anchor="middle">File router</text>
 
   <rect x="320" y="272" width="180" height="34" rx="8" fill="#ffffff" stroke="#d9d4c7"/>
   <path d="M332 289 L342 289 M336 285 L342 289 L336 293" stroke="#d4744f" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
   <rect x="350" y="283" width="120" height="12" rx="3" fill="#e8e5dc"/>
+  <text x="430" y="294" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="600" fill="#2b2825" text-anchor="middle">Share tokens + admin</text>
 
   <rect x="320" y="316" width="180" height="14" rx="6" fill="#2b2825"/>
+  <text x="410" y="326" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600" fill="#f7e8df" text-anchor="middle">/v1/*   /api/dashboard/*   /api/admin/*</text>
 
   <!-- Arrows from API to backends -->
   <path d="M525 150 C 580 150, 600 110, 650 110" fill="none" stroke="#6b6557" stroke-width="2" marker-end="url(#arrArch)"/>
@@ -85,6 +100,8 @@
     <ellipse cx="720" cy="110" rx="60" ry="14" fill="none" stroke="#6b6557" stroke-width="1.5"/>
     <ellipse cx="720" cy="135" rx="60" ry="14" fill="none" stroke="#ffffff" stroke-width="1" stroke-opacity="0.5"/>
     <ellipse cx="720" cy="155" rx="60" ry="14" fill="none" stroke="#ffffff" stroke-width="1" stroke-opacity="0.3"/>
+    <text x="720" y="145" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#2b2825" text-anchor="middle">SQLite index</text>
+    <text x="720" y="200" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">fast read path</text>
   </g>
 
   <!-- Telegram cloud -->
@@ -94,11 +111,18 @@
     <circle cx="715" cy="192" r="26" fill="url(#archTg)"/>
     <circle cx="750" cy="200" r="22" fill="url(#archTg)"/>
     <path d="M700 215 L745 198 L725 210 L715 205 z" fill="#ffffff" stroke="#ffffff" stroke-width="1" stroke-linejoin="round"/>
+    <text x="720" y="215" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">Telegram</text>
+    <text x="720" y="252" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">durable backup</text>
   </g>
 
   <!-- WebSocket bolt -->
   <g>
     <rect x="660" y="280" width="120" height="70" rx="12" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
     <path d="M720 292 L702 322 L716 322 L710 340 L730 308 L716 308 L722 292 z" fill="#d4744f" stroke="#8a3f23" stroke-width="1" stroke-linejoin="round"/>
+    <text x="720" y="370" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#2b2825" text-anchor="middle">Realtime service</text>
+    <text x="720" y="386" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">Socket.io :3003</text>
   </g>
+
+  <!-- Bottom legend -->
+  <text x="410" y="425" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-style="italic" fill="#6b6557" text-anchor="middle">SQLite is the fast read path; Telegram is the durable backup; Socket.io pushes record:changed events to the dashboard.</text>
 </svg>

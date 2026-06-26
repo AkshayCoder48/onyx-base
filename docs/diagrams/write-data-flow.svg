@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg width="840" height="220" viewBox="0 0 840 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Write data flow">
+<svg width="840" height="240" viewBox="0 0 840 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Write data flow">
   <defs>
     <marker id="arrFlow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 z" fill="#d4744f"/>
@@ -10,50 +10,69 @@
     </linearGradient>
   </defs>
 
-  <!-- Stage 1: set key -->
-  <rect x="20" y="60" width="160" height="100" rx="14" fill="url(#flowStage)" stroke="#d4744f" stroke-width="2"/>
-  <circle cx="100" cy="100" r="22" fill="#f7e8df"/>
-  <path d="M88 100 L112 100 M100 88 L100 112" stroke="#d4744f" stroke-width="3" stroke-linecap="round"/>
-  <rect x="40" y="135" width="120" height="8" rx="4" fill="#e8e5dc"/>
+  <!-- Header -->
+  <text x="420" y="28" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="700" fill="#2b2825" text-anchor="middle">Every write is fast (SQLite) AND durable (Telegram)</text>
 
-  <path d="M185 110 L215 110" fill="none" stroke="#d4744f" stroke-width="2.5" marker-end="url(#arrFlow)"/>
+  <!-- Stage 1: set key -->
+  <rect x="20" y="50" width="160" height="100" rx="14" fill="url(#flowStage)" stroke="#d4744f" stroke-width="2"/>
+  <circle cx="100" cy="90" r="22" fill="#f7e8df"/>
+  <path d="M88 90 L112 90 M100 78 L100 112" stroke="#d4744f" stroke-width="3" stroke-linecap="round"/>
+  <rect x="40" y="125" width="120" height="8" rx="4" fill="#e8e5dc"/>
+  <text x="100" y="175" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#2b2825" text-anchor="middle">1. Set key</text>
+  <text x="100" y="193" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">POST /v1/set</text>
+  <text x="100" y="208" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">auto-typed value</text>
+  <text x="100" y="225" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-style="italic" fill="#d4744f" text-anchor="middle">client request</text>
+
+  <path d="M185 100 L215 100" fill="none" stroke="#d4744f" stroke-width="2.5" marker-end="url(#arrFlow)"/>
 
   <!-- Stage 2: SQLite upsert -->
-  <rect x="220" y="60" width="160" height="100" rx="14" fill="url(#flowStage)" stroke="#d4744f" stroke-width="2"/>
+  <rect x="220" y="50" width="160" height="100" rx="14" fill="url(#flowStage)" stroke="#d4744f" stroke-width="2"/>
   <g>
-    <ellipse cx="300" cy="80" rx="36" ry="9" fill="#b1ada1"/>
-    <rect x="264" y="80" width="72" height="40" fill="#b1ada1"/>
-    <ellipse cx="300" cy="120" rx="36" ry="9" fill="#8a7e6a"/>
-    <ellipse cx="300" cy="80" rx="36" ry="9" fill="none" stroke="#6b6557" stroke-width="1.2"/>
-    <path d="M286 100 L300 88 L314 100 L308 100 L308 112 L292 112 L292 100 z" fill="#d4744f"/>
+    <ellipse cx="300" cy="70" rx="36" ry="9" fill="#b1ada1"/>
+    <rect x="264" y="70" width="72" height="40" fill="#b1ada1"/>
+    <ellipse cx="300" cy="110" rx="36" ry="9" fill="#8a7e6a"/>
+    <ellipse cx="300" cy="70" rx="36" ry="9" fill="none" stroke="#6b6557" stroke-width="1.2"/>
+    <path d="M286 90 L300 78 L314 90 L308 90 L308 102 L292 102 L292 90 z" fill="#d4744f"/>
   </g>
-  <rect x="240" y="135" width="120" height="8" rx="4" fill="#e8e5dc"/>
+  <rect x="240" y="125" width="120" height="8" rx="4" fill="#e8e5dc"/>
+  <text x="300" y="175" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#2b2825" text-anchor="middle">2. SQLite upsert</text>
+  <text x="300" y="193" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">instant ack</text>
+  <text x="300" y="208" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">key + value + type</text>
+  <text x="300" y="225" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-style="italic" fill="#d4744f" text-anchor="middle">fast read path</text>
 
-  <path d="M385 110 L415 110" fill="none" stroke="#d4744f" stroke-width="2.5" marker-end="url(#arrFlow)"/>
+  <path d="M385 100 L415 100" fill="none" stroke="#d4744f" stroke-width="2.5" marker-end="url(#arrFlow)"/>
 
   <!-- Stage 3: Telegram mirror -->
-  <rect x="420" y="60" width="160" height="100" rx="14" fill="url(#flowStage)" stroke="#d4744f" stroke-width="2"/>
+  <rect x="420" y="50" width="160" height="100" rx="14" fill="url(#flowStage)" stroke="#d4744f" stroke-width="2"/>
   <g>
-    <rect x="442" y="78" width="116" height="56" rx="10" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
-    <rect x="442" y="78" width="116" height="14" rx="10" fill="#d4744f"/>
-    <rect x="452" y="100" width="70" height="5" rx="2.5" fill="#e8e5dc"/>
-    <rect x="452" y="110" width="90" height="5" rx="2.5" fill="#ece9e1"/>
-    <rect x="452" y="120" width="50" height="5" rx="2.5" fill="#f7e8df"/>
-    <circle cx="555" cy="124" r="6" fill="#d4744f"/>
+    <rect x="442" y="68" width="116" height="56" rx="10" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
+    <rect x="442" y="68" width="116" height="14" rx="10" fill="#d4744f"/>
+    <rect x="452" y="90" width="70" height="5" rx="2.5" fill="#e8e5dc"/>
+    <rect x="452" y="100" width="90" height="5" rx="2.5" fill="#ece9e1"/>
+    <rect x="452" y="110" width="50" height="5" rx="2.5" fill="#f7e8df"/>
+    <circle cx="555" cy="114" r="6" fill="#d4744f"/>
   </g>
-  <rect x="440" y="135" width="120" height="8" rx="4" fill="#e8e5dc"/>
+  <rect x="440" y="125" width="120" height="8" rx="4" fill="#e8e5dc"/>
+  <text x="500" y="175" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#2b2825" text-anchor="middle">3. Telegram mirror</text>
+  <text x="500" y="193" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">send or edit message</text>
+  <text x="500" y="208" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">never blocks writes</text>
+  <text x="500" y="225" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-style="italic" fill="#d4744f" text-anchor="middle">durable backup</text>
 
-  <path d="M585 110 L615 110" fill="none" stroke="#d4744f" stroke-width="2.5" marker-end="url(#arrFlow)"/>
+  <path d="M585 100 L615 100" fill="none" stroke="#d4744f" stroke-width="2.5" marker-end="url(#arrFlow)"/>
 
   <!-- Stage 4: pinned manifest -->
-  <rect x="620" y="60" width="200" height="100" rx="14" fill="url(#flowStage)" stroke="#d4744f" stroke-width="2"/>
+  <rect x="620" y="50" width="200" height="100" rx="14" fill="url(#flowStage)" stroke="#d4744f" stroke-width="2"/>
   <g>
-    <rect x="640" y="78" width="120" height="56" rx="10" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
-    <rect x="640" y="78" width="120" height="14" rx="10" fill="#2b2825"/>
-    <path d="M750 70 L758 78 L754 82 L760 88 L756 92 L750 86 L746 90 L742 86 L748 80 L744 76 z" fill="#d4744f" stroke="#8a3f23" stroke-width="1"/>
-    <rect x="650" y="100" width="80" height="5" rx="2.5" fill="#e09a7a"/>
-    <rect x="650" y="110" width="100" height="5" rx="2.5" fill="#ece9e1"/>
-    <rect x="650" y="120" width="60" height="5" rx="2.5" fill="#ece9e1"/>
+    <rect x="640" y="68" width="120" height="56" rx="10" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
+    <rect x="640" y="68" width="120" height="14" rx="10" fill="#2b2825"/>
+    <path d="M750 60 L758 68 L754 72 L760 78 L756 82 L750 76 L746 80 L742 76 L748 70 L744 66 z" fill="#d4744f" stroke="#8a3f23" stroke-width="1"/>
+    <rect x="650" y="90" width="80" height="5" rx="2.5" fill="#e09a7a"/>
+    <rect x="650" y="100" width="100" height="5" rx="2.5" fill="#ece9e1"/>
+    <rect x="650" y="110" width="60" height="5" rx="2.5" fill="#ece9e1"/>
   </g>
-  <rect x="640" y="135" width="120" height="8" rx="4" fill="#e8e5dc"/>
+  <rect x="640" y="125" width="120" height="8" rx="4" fill="#e8e5dc"/>
+  <text x="720" y="175" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#2b2825" text-anchor="middle">4. Pinned manifest</text>
+  <text x="720" y="193" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">identity re-pinned</text>
+  <text x="720" y="208" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">userId + apiKey + chat</text>
+  <text x="720" y="225" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-style="italic" fill="#d4744f" text-anchor="middle">self-heal after reset</text>
 </svg>

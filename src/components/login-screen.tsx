@@ -145,7 +145,7 @@ export function LoginScreen() {
 
   function enterDashboard(key: string, partial: Partial<SessionUser>) {
     // Re-verify on the way in so we get accurate counts.
-    api<{ userId: string; name: string | null; plan: string; apiKeyName: string; createdAt: string; counts: SessionUser['counts'] }>(
+    api<{ userId: string; name: string | null; plan: string; apiKeyName: string; createdAt: string; counts: SessionUser['counts']; isAdmin?: boolean }>(
       '/api/auth/verify',
       { method: 'POST', body: JSON.stringify({ apiKey: key }) },
     )
@@ -157,6 +157,7 @@ export function LoginScreen() {
           apiKeyName: res.apiKeyName,
           createdAt: res.createdAt,
           counts: res.counts ?? partial.counts ?? { records: 0, collections: 0, apiKeys: 0, logs: 0 },
+          isAdmin: res.isAdmin,
         })
         toast.success(`Welcome, ${res.userId}`)
       })
@@ -171,7 +172,7 @@ export function LoginScreen() {
     if (!key) return toast.error('Paste your API key first')
     setSigningIn(true)
     try {
-      const res = await api<{ userId: string; name: string | null; plan: string; apiKeyName: string; createdAt: string; counts: SessionUser['counts'] }>(
+      const res = await api<{ userId: string; name: string | null; plan: string; apiKeyName: string; createdAt: string; counts: SessionUser['counts']; isAdmin?: boolean }>(
         '/api/auth/verify',
         { method: 'POST', body: JSON.stringify({ apiKey: key }) },
       )
@@ -182,6 +183,7 @@ export function LoginScreen() {
         apiKeyName: res.apiKeyName,
         createdAt: res.createdAt,
         counts: res.counts,
+        isAdmin: res.isAdmin,
       })
       toast.success(`Welcome back, ${res.userId}`)
     } catch (err) {
