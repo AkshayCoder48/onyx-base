@@ -183,17 +183,19 @@ dashboard.
 
 ### The bootstrap admin key
 
-Every instance boots with one hardcoded, irrevocable admin key:
+Every instance boots with one irrevocable admin key that **you set yourself**
+in `.env`:
 
-```
-onyxbase_8018097297
+```bash
+# .env (NEVER commit this file — it's gitignored)
+BOOTSTRAP_ADMIN_KEY=onyxbase_<your-own-long-random-string>
 ```
 
-Sign in with this key (web UI or CLI) to enter the **Admin Dashboard** — a
-separate console that shows every user, their collections, keyvalues, files,
-and API keys. The bootstrap key cannot be revoked or rotated from the UI;
-keep it secret, and rotate it only by redeploying with a different bootstrap
-value baked into the source.
+Generate one with, for example, `openssl rand -hex 16` and prefix it with
+`onyxbase_`. Sign in with this key (web UI or CLI) to enter the **Admin
+Dashboard** — a separate console that shows every user, their collections,
+keyvalues, files, and API keys. The bootstrap key cannot be revoked or rotated
+from the UI; rotate it by changing the env var and redeploying.
 
 ### Accessing the admin dashboard
 
@@ -231,7 +233,7 @@ onyx admin promote kv_live_abc123def456 --label "Ada (ops)"
 
 # Or via curl:
 curl -X POST https://onyx.example.com/api/admin/promote \
-  -H "Authorization: Bearer onyxbase_8018097297" \
+  -H "Authorization: Bearer $BOOTSTRAP_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{"kvLiveKey":"kv_live_abc123def456","label":"Ada (ops)"}'
 # → { "adminKey": "onyxbase_a1b2c3d4e5f6…", "label": "Ada (ops)" }
@@ -247,12 +249,12 @@ user-level data operations.
 onyx admin revoke onyxbase_a1b2c3d4e5f6
 # or via curl:
 curl -X DELETE "https://onyx.example.com/api/admin/admins?id=<adminKeyId>" \
-  -H "Authorization: Bearer onyxbase_8018097297"
+  -H "Authorization: Bearer $BOOTSTRAP_ADMIN_KEY"
 ```
 
-The bootstrap key (`onyxbase_8018097297`) is **irrevocable** — attempting to
-delete it returns a 409 Conflict. To rotate it, redeploy with a different
-bootstrap value baked into the source.
+The bootstrap key (the value you set in `BOOTSTRAP_ADMIN_KEY`) is
+**irrevocable** — attempting to delete it returns a 409 Conflict. To rotate
+it, change the env var and redeploy.
 
 <br/>
 

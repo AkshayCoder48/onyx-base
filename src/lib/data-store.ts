@@ -219,7 +219,8 @@ interface CollectionNameRecord {
  * `/admin` dashboard, which is a separate app surface only reachable with an
  * `onyxbase_*` key.
  *
- * The bootstrap key `onyxbase_8018097297` is hardcoded and cannot be revoked.
+ * The bootstrap key (the value of `process.env.BOOTSTRAP_ADMIN_KEY`, set by
+ * the operator in `.env`) cannot be revoked.
  * Additional admins are created by "promoting" a regular user (via their
  * `kv_live_*` key) — this mints a new `onyxbase_<hex>` key for them.
  *
@@ -229,7 +230,7 @@ interface CollectionNameRecord {
  */
 export interface AdminKeyRecord {
   id: string
-  /** The full key string, e.g. `onyxbase_8018097297` or `onyxbase_a1b2c3...`. */
+  /** The full key string, e.g. `onyxbase_<hex>` (the bootstrap value comes from BOOTSTRAP_ADMIN_KEY env). */
   key: string
   /** Human-readable label (e.g. "Bootstrap Admin", "Promoted from alice@…"). */
   label: string
@@ -243,8 +244,18 @@ export interface AdminKeyRecord {
   revoked: boolean
 }
 
-/** The hardcoded bootstrap admin key — always works, cannot be revoked. */
-export const BOOTSTRAP_ADMIN_KEY = 'onyxbase_8018097297'
+/**
+ * The bootstrap admin key — always works, cannot be revoked.
+ *
+ * SECURITY: Loaded from `process.env.BOOTSTRAP_ADMIN_KEY` so the production key
+ * is NEVER committed to source control. Operators set it in `.env` (which is
+ * gitignored). The legacy hard-coded value is gone — if the env var is missing
+ * we surface that loudly at boot instead of silently using a leaked default.
+ */
+export const BOOTSTRAP_ADMIN_KEY = process.env.BOOTSTRAP_ADMIN_KEY || ''
+
+/** True when an operator has configured the bootstrap admin key. */
+export const BOOTSTRAP_ADMIN_KEY_CONFIGURED = BOOTSTRAP_ADMIN_KEY.length > 0
 
 /** The virtual admin user's dbUserId (admin can use the regular app too). */
 export const ADMIN_DB_USER_ID = 'admin'
@@ -1778,8 +1789,16 @@ function ensureAdminUser(): UserRecord {
   return admin
 }
 
-/** Seed the hardcoded bootstrap admin key (idempotent). */
+/**
+ * Seed the bootstrap admin key (idempotent).
+ *
+ * SECURITY: Skipped entirely when the operator has not set
+ * `BOOTSTRAP_ADMIN_KEY` in `.env` — we never want an empty-string admin key
+ * sitting in the store. The admin app will simply show "no admin key
+ * configured" until the operator adds one.
+ */
 function seedBootstrapAdminKey() {
+  if (!BOOTSTRAP_ADMIN_KEY_CONFIGURED) return
   if (!store.adminKeys.some((k) => k.key === BOOTSTRAP_ADMIN_KEY)) {
     store.adminKeys.push({
       id: 'admin_bootstrap',

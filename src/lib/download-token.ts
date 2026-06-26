@@ -24,11 +24,22 @@ import crypto from 'crypto'
 
 /**
  * The HMAC secret. We reuse the existing CLOUDKV_SECRET (already used to mint
- * API keys) so operators only configure one secret. Falls back to a dev value
- * so the feature works out-of-the-box in a fresh sandbox.
+ * API keys) so operators only configure one secret.
+ *
+ * SECURITY: No hard-coded fallback — if neither env var is set, token signing
+ * and verification will throw. This is intentional: a baked-in dev secret would
+ * let anyone forge download links against deployments where the operator forgot
+ * to set the env var. Fail closed.
  */
 function getDownloadSecret(): string {
-  return process.env.CLOUDKV_SECRET || process.env.DOWNLOAD_TOKEN_SECRET || 'onyx-base-dev-download-secret'
+  const secret = process.env.CLOUDKV_SECRET || process.env.DOWNLOAD_TOKEN_SECRET || ''
+  if (!secret) {
+    throw new Error(
+      'Download-token signing requires CLOUDKV_SECRET (or DOWNLOAD_TOKEN_SECRET) to be set in .env. ' +
+      'Refusing to sign/verify with a hard-coded fallback — that would be a security hole.'
+    )
+  }
+  return secret
 }
 
 /** Default link lifetime: 55 minutes (just under Telegram's ~1-hour URL expiry). */

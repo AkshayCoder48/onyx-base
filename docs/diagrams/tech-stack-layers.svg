@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg width="780" height="320" viewBox="0 0 780 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tech stack layers">
+<svg width="780" height="360" viewBox="0 0 780 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Tech stack layers">
+
+  <!-- Title bar (Task ID 9: svg-text-enhancer) -->
+  <text x="390" y="22" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#2b2825" text-anchor="middle">Tech Stack Layers</text>
+  <text x="390" y="36" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">Telegram (durability) → Next.js API (logic) → Prisma + SQLite (index) → shadcn/ui (dashboard)</text>
+
+  <g transform="translate(0 40)">
   <!-- Telegram layer -->
   <rect x="20" y="20" width="740" height="64" rx="12" fill="#d4744f"/>
   <rect x="20" y="60" width="740" height="24" fill="#8a3f23"/>
@@ -54,4 +60,6 @@
   <rect x="606" y="270" width="40" height="22" rx="6" fill="#4a463f"/>
   <rect x="652" y="270" width="40" height="22" rx="6" fill="#4a463f"/>
   <rect x="698" y="270" width="22" height="22" rx="6" fill="#e09a7a"/>
+  </g>
+
 </svg>

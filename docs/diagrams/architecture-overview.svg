@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg width="820" height="460" viewBox="0 0 820 460" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture overview">
+<svg width="820" height="500" viewBox="0 0 820 500" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture overview">
   <defs>
     <linearGradient id="archApi" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#ffffff"/>
@@ -13,6 +13,12 @@
       <path d="M0 0 L10 5 L0 10 z" fill="#6b6557"/>
     </marker>
   </defs>
+
+  <!-- Title bar (Task ID 9: svg-text-enhancer) -->
+  <text x="410" y="22" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#2b2825" text-anchor="middle">Onyx Base — Architecture Overview</text>
+  <text x="410" y="36" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">Clients call the REST API; data lands in SQLite (fast index) and Telegram (durable backup)</text>
+
+  <g transform="translate(0 40)">
 
   <!-- Column headers -->
   <text x="100" y="28" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="700" fill="#6b6557" text-anchor="middle">Clients</text>
@@ -125,4 +131,6 @@
 
   <!-- Bottom legend -->
   <text x="410" y="425" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-style="italic" fill="#6b6557" text-anchor="middle">SQLite is the fast read path; Telegram is the durable backup; Socket.io pushes record:changed events to the dashboard.</text>
+  </g>
+
 </svg>
