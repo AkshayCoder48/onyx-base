@@ -151,9 +151,12 @@ $ onyx export`}
         <Card className="bg-card/40 border-border/60 divide-y divide-border/40">
           {records?.records?.length ? (
             records.records.slice(0, 6).map((r) => (
-              <div key={`${r.collection}-${r.key}`} className="flex items-center gap-3 px-4 py-2.5">
-                <code className="font-mono text-sm text-foreground/90 min-w-0 truncate">{r.key}</code>
-                <TypeBadge type={r.valueType} />
+              // min-w-0 on every flex child so truncation works; the key is
+              // capped at 40% width on mobile so the value preview always
+              // gets at least half the row.
+              <div key={`${r.collection}-${r.key}`} className="flex items-center gap-2 sm:gap-3 px-4 py-2.5 min-w-0">
+                <code className="font-mono text-sm text-foreground/90 min-w-0 max-w-[40%] sm:max-w-[35%] truncate shrink-0">{r.key}</code>
+                <TypeBadge type={r.valueType} className="shrink-0" />
                 <div className="flex-1 min-w-0 truncate">
                   <ValuePreview value={r.value} type={r.valueType} max={60} />
                 </div>

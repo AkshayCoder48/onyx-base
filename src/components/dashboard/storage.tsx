@@ -439,8 +439,8 @@ export function CloudStorageView() {
                   <Icon className="size-4 text-primary" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-sm truncate text-foreground/90">{f.fileName}</span>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="font-mono text-sm truncate text-foreground/90 min-w-0">{f.fileName}</span>
                     {f.isPublic ? (
                       <Unlock className="size-3 text-muted-foreground shrink-0" />
                     ) : (
@@ -456,18 +456,20 @@ export function CloudStorageView() {
                       </Badge>
                     )}
                   </div>
-                  <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                    <span className="tabular-nums">{formatBytes(f.size)}</span>
-                    <span>·</span>
-                    <span className="truncate">{f.mimeType || 'unknown'}</span>
-                    <span>·</span>
-                    <span>{timeAgo(f.createdAt)}</span>
-                    <span>·</span>
-                    <span className="tabular-nums">{f.downloads} dl</span>
+                  {/* flex-wrap so the meta row collapses to multiple lines on
+                      narrow phones instead of overflowing horizontally. */}
+                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground min-w-0">
+                    <span className="tabular-nums shrink-0">{formatBytes(f.size)}</span>
+                    <span className="shrink-0">·</span>
+                    <span className="truncate min-w-0">{f.mimeType || 'unknown'}</span>
+                    <span className="shrink-0">·</span>
+                    <span className="shrink-0">{timeAgo(f.createdAt)}</span>
+                    <span className="shrink-0">·</span>
+                    <span className="tabular-nums shrink-0">{f.downloads} dl</span>
                     {f.label && (
                       <>
-                        <span>·</span>
-                        <Badge variant="outline" className="font-mono text-[9px] px-1 py-0">{f.label}</Badge>
+                        <span className="shrink-0">·</span>
+                        <Badge variant="outline" className="font-mono text-[9px] px-1 py-0 shrink-0">{f.label}</Badge>
                       </>
                     )}
                   </div>

@@ -955,7 +955,7 @@ at: 2026-06-25T07:40:12.000Z`} />
           subtitle="SQLite is the fast local index; Telegram is the durable mirror. No connection pool, no replicas — reads are local and instant."
           features={[
             { name: 'Managed PostgreSQL', status: 'different', desc: 'N/A — Onyx Base uses SQLite + Telegram. PostgreSQL is not the model.' },
-            { name: 'SQL Editor', status: 'roadmap', desc: 'Web SQL console against the SQLite index (read-only by default).' },
+            { name: 'SQL Editor', status: 'implemented', desc: 'Read-only SQL console in the dashboard — run SELECT queries against virtual tables (records, collections, api_keys, logs, users) pre-filtered to your account. 1000-row cap, API keys masked, ⌘+Enter to run.' },
             { name: 'Database Branching', status: 'roadmap', desc: 'Per-environment SQLite snapshots with optional Telegram replay.' },
             { name: 'Point-in-Time Recovery (PITR)', status: 'equivalent', desc: 'Telegram mirror is an append-only durable backup — manifest + record messages can be replayed.' },
             { name: 'Backups', status: 'implemented', desc: 'Every record mirrored to Telegram; identity manifest is pinned after every write.' },

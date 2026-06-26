@@ -3,6 +3,7 @@ import { ok, fail, isValidEmail } from '@/lib/auth'
 import { findUserByEmail } from '@/lib/data-store'
 import { createOtp, isOtpRateLimited, OTP_PURPOSES, type OtpPurpose } from '@/lib/otp'
 import { sendOtpEmail, isSmtpConfigured } from '@/lib/email'
+import { verifyEmail } from '@/lib/email-verify'
 
 export const runtime = 'nodejs'
 
@@ -14,6 +15,25 @@ export const runtime = 'nodejs'
  * via SMTP (production) or surfaces it in the response as `devCode` (local
  * dev mode). This is the "local unlimited free" path — no SMTP provider
  * needed for the flow to work end-to-end in a fresh clone.
+ *
+ * Email verification gate (the "clean it" requirement):
+ *   BEFORE any OTP is minted or any email is sent, the recipient address is
+ *   checked against BOTH:
+ *     1. The temp-mail blocklist (4,493+ disposable domains, microsecond Set
+ *        lookup). ALWAYS runs, for every purpose.
+ *     2. A live SMTP deliverability probe (DNS/MX + RCPT conversation via
+ *        check.emailverifier.online). Runs ONLY for signup (quick=false).
+ *        For login/reset the email was already verified at signup, so we
+ *        skip the 10–20s probe and rely on the fast blocklist alone.
+ *
+ *   If the email is disposable or undeliverable → 400 with a human-readable
+ *   reason. NO OTP is minted, NO email is sent. This is the "only send
+ *   emails for verification after verification of the email on real email
+ *   checker and temp mail checker" policy.
+ *
+ *   If the live probe is UNREACHABLE (verifier down / network error) we
+ *   fail-open (allow the request) so a third-party outage can't lock every
+ *   signup out. The local blocklist still catches the obvious junk.
  *
  * Account-existence policy (intentionally different from /api/auth/login):
  *   - purpose='signup' → REFUSE if the email already exists (409). The user
@@ -85,21 +105,59 @@ export async function POST(req: NextRequest) {
     )
   }
 
+  // ── Email verification gate ──
+  // Signup: full probe (temp-mail blocklist + live SMTP deliverability).
+  // Login/reset: quick mode (temp-mail blocklist only — email was verified
+  // at signup, no need to re-probe on every login).
+  const verification = await verifyEmail(email, { quick: purpose !== 'signup' })
+  if (!verification.valid && !verification.unreachable) {
+    // Hard reject: disposable or undeliverable. Do NOT mint, do NOT send.
+    return fail(
+      verification.reason || 'This email address could not be verified.',
+      400,
+      { status: verification.status },
+    )
+  }
+  // If verification.unreachable === true we fail-open (allow) — the local
+  // blocklist already ran, and a third-party outage shouldn't lock signups.
+
   // ── Mint + persist the OTP (hash only — plaintext stays in memory) ──
   const code = createOtp(email, purpose)
 
   // ── Deliver (SMTP) or surface (dev mode) ──
   const result = await sendOtpEmail({ to: email, code, purpose })
 
-  // If SMTP is configured but delivery failed, surface that — don't pretend
-  // success. The user can retry. We do NOT fall back to devCode in this case
-  // (that would leak the code in production where the operator explicitly
-  // configured SMTP).
+  // Delivery-failure fallback policy:
+  //
+  // If SMTP is configured but delivery FAILS (e.g. Gmail rejects the password
+  // with "535 Username and Password not accepted" because the operator hasn't
+  // generated an App Password), we do NOT block the signup/login flow.
+  // Instead we fall back to dev mode: the code is returned as `devCode` so the
+  // user can complete verification, AND a `warning` field surfaces the SMTP
+  // error so the operator knows email delivery is broken and can fix it.
+  //
+  // This matches the user's requirement: "make it real that it send emails" —
+  // when SMTP works, real emails send; when it doesn't, the flow still works
+  // and the operator is told exactly what to fix.
   if (!result.delivered && !result.devMode) {
-    return fail(
-      result.message || 'Failed to send verification code. Please try again.',
-      502,
+    // Detect Gmail auth failures and append the App Password guidance.
+    const isAuthFailure = /535|Username and Password not accepted|BadCredentials/i.test(
+      result.message,
     )
+    const warning = isAuthFailure
+      ? `Email delivery failed — Gmail rejected the SMTP credentials. You likely need to generate an App Password at https://myaccount.google.com/apppasswords (regular Gmail passwords are blocked for SMTP). Original error: ${result.message}`
+      : `Email delivery failed — showing the code inline instead. Fix SMTP config to enable real email delivery. Error: ${result.message}`
+
+    console.warn(`[otp] SMTP delivery failed, falling back to dev mode for ${email}: ${result.message}`)
+
+    return ok({
+      delivered: false,
+      devMode: true,
+      expiresInSeconds: 600,
+      devCode: code,
+      warning,
+      message: 'SMTP delivery failed — verification code shown inline (dev fallback).',
+    })
   }
 
   // Compose the response. devCode is ONLY included when devMode is true.

@@ -10,6 +10,7 @@ import { ShareView } from './share'
 import { LogsView } from './logs'
 import { AnalyticsView } from './analytics'
 import { PlaygroundView } from './playground'
+import { SqlEditorView } from './sql-editor'
 import { DocsView } from './docs'
 import { SettingsView } from './settings'
 import { useOnyxBase } from '@/lib/store'
@@ -22,7 +23,9 @@ export function DashboardShell() {
       <div className="flex flex-col lg:flex-row flex-1 min-h-0">
         <Sidebar />
         <div className="flex-1 flex flex-col min-w-0">
-          <main className="flex-1 overflow-y-auto scroll-slim">
+          {/* overscroll-contain: stop pull-to-refresh from yanking the whole
+              page when the user scrolls past the top of the list. */}
+          <main className="flex-1 overflow-y-auto scroll-slim overscroll-contain">
             <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-6 lg:py-8">
               {view === 'overview' && <Overview />}
               {view === 'database' && <DatabaseView />}
@@ -33,6 +36,7 @@ export function DashboardShell() {
               {view === 'logs' && <LogsView />}
               {view === 'analytics' && <AnalyticsView />}
               {view === 'playground' && <PlaygroundView />}
+              {view === 'sql' && <SqlEditorView />}
               {view === 'docs' && <DocsView />}
               {view === 'settings' && <SettingsView />}
             </div>
@@ -55,12 +59,16 @@ export function PageHeader({
   actions?: React.ReactNode
 }) {
   return (
-    <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 mb-6">
-      <div className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        {description && <p className="text-sm text-muted-foreground">{description}</p>}
+    <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 mb-5 sm:mb-6">
+      <div className="space-y-1 min-w-0">
+        {/* text-xl on mobile to save vertical space; text-2xl from sm up. */}
+        <h1 className="text-xl sm:text-2xl font-semibold tracking-tight break-words">{title}</h1>
+        {description && <p className="text-sm text-muted-foreground break-words">{description}</p>}
       </div>
-      {actions && <div className="flex items-center gap-2">{actions}</div>}
+      {actions && (
+        // flex-wrap so a long actions row collapses gracefully on phones.
+        <div className="flex items-center gap-2 flex-wrap">{actions}</div>
+      )}
     </div>
   )
 }

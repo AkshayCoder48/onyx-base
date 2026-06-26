@@ -2,6 +2,7 @@
 
 import { useState, useSyncExternalStore } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { useIsMobile } from '@/hooks/use-mobile'
 import {
   Terminal,
   KeyRound,
@@ -79,6 +80,13 @@ export function LoginScreen() {
   const setSession = useOnyxBase((s) => s.setSession)
   const origin = useOrigin()
   const serverUrl = origin || 'https://your-onyx.example.com'
+  // Motion is expensive on phones — disable entrance/exit animations on
+  // mobile so the form swaps instantly (no jank during tab/success changes).
+  const reduceMotion = useIsMobile()
+  // Shared motion variants: full fade+slide on desktop, no-op on mobile.
+  const motionVariants = reduceMotion
+    ? { initial: false, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: 0 }, transition: { duration: 0 } }
+    : { initial: { opacity: 0, y: 12 }, animate: { opacity: 1, y: 0 }, exit: { opacity: 0, y: -12 }, transition: { duration: 0.3 } }
 
   // ── Sign-up state ──
   const [name, setName] = useState('')
@@ -294,17 +302,22 @@ export function LoginScreen() {
     }
     setSignupOtpSending(true)
     try {
-      const res = await api<{ devMode: boolean; devCode?: string; expiresInSeconds: number; message?: string }>(
+      const res = await api<{ devMode: boolean; devCode?: string; expiresInSeconds: number; message?: string; warning?: string }>(
         '/api/auth/send-otp',
         { method: 'POST', body: JSON.stringify({ email: email.trim().toLowerCase(), purpose: 'signup' }) },
       )
       setSignupOtpSent(true)
       setSignupDevCode(res.devMode ? (res.devCode ?? null) : null)
-      toast.success(
-        res.devMode
-          ? 'Dev mode — code shown below (SMTP not configured).'
-          : 'Verification code sent to your email.',
-      )
+      if (res.warning) {
+        toast.error(res.warning, { duration: 8000 })
+        toast.success('Verification code shown below — enter it to continue.')
+      } else {
+        toast.success(
+          res.devMode
+            ? 'Dev mode — code shown below (SMTP not configured).'
+            : 'Verification code sent to your email.',
+        )
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not send code')
     } finally {
@@ -337,17 +350,22 @@ export function LoginScreen() {
     if (!emailVal) return toast.error('Enter your email first')
     setOtpLoginSending(true)
     try {
-      const res = await api<{ devMode: boolean; devCode?: string; message?: string }>(
+      const res = await api<{ devMode: boolean; devCode?: string; message?: string; warning?: string }>(
         '/api/auth/send-otp',
         { method: 'POST', body: JSON.stringify({ email: emailVal.toLowerCase(), purpose: 'login' }) },
       )
       setOtpLoginSent(true)
       setOtpLoginDevCode(res.devMode ? (res.devCode ?? null) : null)
-      toast.success(
-        res.devMode
-          ? 'Dev mode — code shown below (SMTP not configured).'
-          : 'A sign-in code was sent to your email.',
-      )
+      if (res.warning) {
+        toast.error(res.warning, { duration: 8000 })
+        toast.success('Sign-in code shown below — enter it to continue.')
+      } else {
+        toast.success(
+          res.devMode
+            ? 'Dev mode — code shown below (SMTP not configured).'
+            : 'A sign-in code was sent to your email.',
+        )
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not send code')
     } finally {
@@ -410,17 +428,22 @@ export function LoginScreen() {
     if (!emailVal) return toast.error('Enter your email')
     setResetSending(true)
     try {
-      const res = await api<{ devMode: boolean; devCode?: string; message?: string }>(
+      const res = await api<{ devMode: boolean; devCode?: string; message?: string; warning?: string }>(
         '/api/auth/send-otp',
         { method: 'POST', body: JSON.stringify({ email: emailVal.toLowerCase(), purpose: 'reset' }) },
       )
       setResetDevCode(res.devMode ? (res.devCode ?? null) : null)
       setResetStep(2)
-      toast.success(
-        res.devMode
-          ? 'Dev mode — code shown below (SMTP not configured).'
-          : 'A reset code was sent to your email.',
-      )
+      if (res.warning) {
+        toast.error(res.warning, { duration: 8000 })
+        toast.success('Reset code shown below — enter it to continue.')
+      } else {
+        toast.success(
+          res.devMode
+            ? 'Dev mode — code shown below (SMTP not configured).'
+            : 'A reset code was sent to your email.',
+        )
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not send code')
     } finally {
@@ -549,13 +572,7 @@ export function LoginScreen() {
 
             <AnimatePresence mode="wait">
               {created ? (
-                <motion.div
-                  key="success"
-                  initial={{ opacity: 0, y: 12 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -12 }}
-                  transition={{ duration: 0.3 }}
-                >
+                <motion.div key="success" {...motionVariants}>
                   <SuccessPanel
                     result={created}
                     onEnter={() =>
@@ -571,14 +588,7 @@ export function LoginScreen() {
                   />
                 </motion.div>
               ) : (
-                <motion.div
-                  key="form"
-                  initial={{ opacity: 0, y: 12 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -12 }}
-                  transition={{ duration: 0.3 }}
-                  className="space-y-7"
-                >
+                <motion.div key="form" className="space-y-7" {...motionVariants}>
                   <div className="space-y-1.5">
                     <h2 className="text-xl font-semibold tracking-tight">Get started</h2>
                     <p className="text-sm text-muted-foreground">
