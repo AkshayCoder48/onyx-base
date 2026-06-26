@@ -8,9 +8,12 @@
 
 A lightweight Supabase / Firebase–style developer platform. No database to
 provision — bring a Telegram Bot Token + Chat ID (or just use the built-in
-server-side storage) and you get a fast key-value database **and** a 2 GB-per-file
-object store, both backed by Telegram for durability. Ships with a real-time web
-dashboard, a REST API, and a zero-dependency CLI.
+server-side storage) and you get a fast key-value database **and** a file store
+(up to 50 MB upload / 20 MB download via the cloud Bot API; 2 GB both ways with
+a self-hosted [Local Bot API
+server](https://github.com/tdlib/telegram-bot-api)), both backed by Telegram for
+durability. Ships with a real-time web dashboard, a REST API, and a
+zero-dependency CLI.
 
 **Unlimited & free.** Every operation is mirrored into a private Telegram chat,
 so your full data and audit log live in Telegram — you can read your database
@@ -70,7 +73,7 @@ same Telegram-backed durability model.
 
 | | | |
 |:---:|:---:|:---:|
-| **Key-value store** — auto-typed values (string / number / boolean / JSON), grouped into collections. | **File storage** — any extension, up to 2 GB per file. Tap **Get link** to mint a signed, 1-hour download URL from Telegram (never auto-refreshed). | **Public share tokens** — scoped, rate-limited, expiring, revocable tokens for embedding in public HTML. |
+| **Key-value store** — auto-typed values (string / number / boolean / JSON), grouped into collections. | **File storage** — any extension, up to 50 MB upload / 20 MB download via the cloud Bot API (2 GB with a self-hosted Local Bot API server — roadmap). Tap **Get link** to mint a signed, 1-hour download URL from Telegram (never auto-refreshed). | **Public share tokens** — scoped, rate-limited, expiring, revocable tokens for embedding in public HTML. |
 | **CLI** (`onyx`) — zero-dependency Node.js tool: `set`, `get`, `list`, `export`, `upload`, `download`, `whoami`. | **REST API** — `Authorization: Bearer kv_live_…` on every `/v1/*` route. Cross-origin ready. | **Real-time dashboard** — Socket.io pushes `record:changed` events; the UI updates without polling. |
 
 <br/>
@@ -304,7 +307,7 @@ curl https://onyx.example.com/v1/kv/default/visits \
   -H "Authorization: Bearer kv_live_…"
 # → { "value": 0, "type": "number" }
 
-# 4. Upload a file (any extension, up to 2 GB) — auto-routed to server-side Telegram
+# 4. Upload a file (any extension, up to 50 MB via cloud Bot API) — auto-routed to server-side Telegram
 curl -X POST https://onyx.example.com/v1/files \
   -H "Authorization: Bearer kv_live_…" \
   -F "file=@./report.pdf"
@@ -526,10 +529,11 @@ and gives you dramatically more control:
   you're the only tenant.
 - **Your data stays with you.** Stop using Onyx Base tomorrow and your full
   database is still sitting in your Telegram chat, fully readable.
-- **2 GB per file unlocks.** Telegram's cloud Bot API caps at ~50 MB upload /
-  ~20 MB `getFile`. Running your own [local Bot API
+- **Up to 2 GB per file (with a local Bot API server).** Telegram's cloud Bot
+  API caps at ~50 MB upload / ~20 MB `getFile`. Running your own [local Bot API
   server](https://github.com/tdlib/telegram-bot-api) unlocks the full 2 GB
-  envelope app-side.
+  envelope app-side. Out of the box (no local server), the practical per-file
+  limits are **50 MB upload** and **20 MB download**.
 
 ### How to set it up
 
@@ -548,10 +552,13 @@ From that point, new uploads and KV mirrors go to **your** bot. Existing files
 stay on whichever backend they were uploaded to (each file remembers its
 backend), so downloads and deletes keep working seamlessly.
 
-> The cloud Telegram Bot API caps bot uploads at ~50 MB and `getFile` downloads
-> at ~20 MB. The full 2 GB envelope is unlocked by running a
-> [local Bot API server](https://github.com/tdlib/telegram-bot-api). The 2 GB
-> ceiling is enforced app-side either way.
+> **Default limits (no setup):** the cloud Telegram Bot API caps bot uploads
+> at ~50 MB and `getFile` downloads at ~20 MB. The full 2 GB envelope (both
+> directions) is unlocked by running a [local Bot API
+> server](https://github.com/tdlib/telegram-bot-api); the 2 GB ceiling is
+> enforced app-side either way. Onyx Base does not currently wire up a local
+> Bot API server for you — it is a roadmap item (operator-configurable
+> `TELEGRAM_BOT_API_URL`).
 
 > The server's default bot is **shared** and intended for evaluation / demos
 > only. For production, **bring your own bot.**

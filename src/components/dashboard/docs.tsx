@@ -1,11 +1,12 @@
 'use client'
 
 import { useState } from 'react'
-import { BookOpen, Copy, Check, Terminal, Code2, Globe, Server, Key, ShieldCheck, HardDrive } from 'lucide-react'
+import { BookOpen, Copy, Check, Terminal, Code2, Globe, Server, Key, ShieldCheck, HardDrive, Database, Sparkles } from 'lucide-react'
 import { PageHeader } from './shell'
 import { useOnyxBase } from '@/lib/store'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { toast } from 'sonner'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -141,11 +142,35 @@ export function DocsView() {
   // path (empty string) during SSR; the browser always has window.location.
   const apiBase = typeof window !== 'undefined' ? window.location.origin : ''
 
+  // "Copy for LLMs" — fetches /llms.txt (the llmstxt.org convention) and writes
+  // the markdown to the clipboard so a user can paste it straight into an LLM.
+  const [llmCopied, setLlmCopied] = useState(false)
+  async function copyForLlms() {
+    try {
+      const r = await fetch('/llms.txt')
+      if (!r.ok) throw new Error(`/llms.txt returned ${r.status}`)
+      const text = await r.text()
+      await navigator.clipboard.writeText(text)
+      setLlmCopied(true)
+      setTimeout(() => setLlmCopied(false), 2000)
+      toast.success('Copied — paste into your favourite LLM')
+    } catch (e) {
+      toast.error('Copy failed — try fetching /llms.txt directly')
+    }
+  }
+
   return (
     <div className="space-y-10">
       <PageHeader
         title="Docs"
         description="Everything you need to use Onyx Base — REST API, CLI, and drop-in SDKs for every language."
+        actions={
+          <Button variant="outline" size="sm" onClick={copyForLlms} className="gap-1.5">
+            {llmCopied
+              ? <><Check className="size-3.5 text-emerald-600" /> Copied for LLMs</>
+              : <><Sparkles className="size-3.5 text-primary" /> Copy for LLMs</>}
+          </Button>
+        }
       />
 
       {/* Quick nav */}
@@ -163,6 +188,7 @@ export function DocsView() {
           ['#html', 'HTML SDK'],
           ['#share', 'Public Share'],
           ['#events', 'Telegram events'],
+          ['#features', 'Features'],
         ].map(([href, label]) => (
           <a key={href} href={href} className="px-2 py-0.5 rounded border border-border/50 hover:border-primary/40 hover:bg-primary/5 hover:text-primary transition-colors">
             {label}
@@ -545,7 +571,23 @@ onyx export --collection metrics` },
       </Section>
 
       {/* ── File storage ── */}
-      <Section id="files" icon={<HardDrive className="size-4" />} title="File storage" description="Store files up to 2 GB each — any extension (exe, txt, png, jpg, zip, video, audio, anything). Every file gets a permanent download link that proxies through this server; the Telegram URL is never exposed.">
+      <Section id="files" icon={<HardDrive className="size-4" />} title="File storage" description="Store files via the standard Telegram Bot API — up to 50 MB on upload and 20 MB on download. Any extension (exe, txt, png, jpg, zip, video, audio, anything). Every file gets a permanent download link that proxies through this server; the Telegram URL is never exposed.">
+        <div className="rounded-md border border-primary/20 bg-primary/5 p-3.5 text-[13px] text-muted-foreground space-y-1.5">
+          <p className="font-medium text-foreground/90">File-size limits (Telegram Bot API)</p>
+          <p>
+            <strong className="text-foreground">Upload:</strong> up to <strong>50 MB</strong> via the cloud Bot API
+            (<code className="font-mono">sendDocument</code> / <code className="font-mono">sendVideo</code> / …).
+            <br/>
+            <strong className="text-foreground">Download:</strong> up to <strong>20 MB</strong> via <code className="font-mono">getFile</code>
+            (Telegram only returns a <code className="font-mono">file_path</code> for files ≤ 20 MB).
+          </p>
+          <p>
+            <strong className="text-foreground">Need bigger?</strong> A self-hosted
+            <a href="https://github.com/tdlib/telegram-bot-api" target="_blank" rel="noreferrer" className="text-primary hover:underline"> Local Bot API Server</a>
+            {' '}raises both limits to <strong>2 GB</strong>. Onyx Base does not currently support this — it is a
+            roadmap item (operator-configurable <code className="font-mono">TELEGRAM_BOT_API_URL</code>).
+          </p>
+        </div>
         <EndpointCard method="POST" path="/v1/files" title="Upload a file" auth="required" description="multipart/form-data with a `file` field. Optional: `label` (string), `public` ('true'|'false', default true). Returns a permanent /f/<fileId> link.">
           <MultiLangCode
             samples={[
@@ -877,6 +919,158 @@ at: 2026-06-25T07:40:12.000Z`} />
           <strong>Settings → Storage backend</strong> panel for live connection status.
         </p>
       </Section>
+
+      {/* ── Feature inventory (Supabase-style mapping) ── */}
+      <Section
+        id="features"
+        icon={<Sparkles className="size-4" />}
+        title="Feature inventory"
+        description="How Onyx Base maps to the Supabase-style platform primitives — what's implemented, what's an equivalent, and what's on the roadmap."
+      >
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-2">
+          <FeatureLegend />
+        </div>
+
+        {/* ─── Security ─── */}
+        <FeatureCard
+          icon={<ShieldCheck className="size-4" />}
+          title="Security"
+          subtitle="Per-user isolation, signed tokens, audit trail — defence in depth, no shared surface."
+          features={[
+            { name: 'Row Level Security (RLS)', status: 'equivalent', desc: 'Per-userId data isolation on every query — no user can read another user\'s records.' },
+            { name: 'Policies', status: 'equivalent', desc: 'API-key scoping + share-token scope field (read/write) bound to a single (collection, key).' },
+            { name: 'JWT Verification', status: 'equivalent', desc: 'Signed download tokens (HMAC-SHA256, constant-time verify) for private-file access.' },
+            { name: 'SSL Connections', status: 'equivalent', desc: 'HTTPS terminated at the Caddy gateway; HSTS enforced.' },
+            { name: 'Network Restrictions', status: 'roadmap', desc: 'Env-configurable allow/deny list of source IPs at the gateway.' },
+            { name: 'IP Allow Lists', status: 'roadmap', desc: 'Per-API-key IP allowlist (reject calls from unlisted addresses).' },
+            { name: 'Vault (Secrets)', status: 'equivalent', desc: 'All secrets in .env (gitignored). BOOTSTRAP_ADMIN_KEY, CLOUDKV_SECRET, TELEGRAM_BOT_TOKEN never in source.' },
+            { name: 'Audit Logs', status: 'implemented', desc: 'Every write / login / admin action recorded in the logs table + mirrored to Telegram.' },
+          ]}
+        />
+
+        {/* ─── Database ─── */}
+        <FeatureCard
+          icon={<Database className="size-4" />}
+          title="Database"
+          subtitle="SQLite is the fast local index; Telegram is the durable mirror. No connection pool, no replicas — reads are local and instant."
+          features={[
+            { name: 'Managed PostgreSQL', status: 'different', desc: 'N/A — Onyx Base uses SQLite + Telegram. PostgreSQL is not the model.' },
+            { name: 'SQL Editor', status: 'roadmap', desc: 'Web SQL console against the SQLite index (read-only by default).' },
+            { name: 'Database Branching', status: 'roadmap', desc: 'Per-environment SQLite snapshots with optional Telegram replay.' },
+            { name: 'Point-in-Time Recovery (PITR)', status: 'equivalent', desc: 'Telegram mirror is an append-only durable backup — manifest + record messages can be replayed.' },
+            { name: 'Backups', status: 'implemented', desc: 'Every record mirrored to Telegram; identity manifest is pinned after every write.' },
+            { name: 'Read Replicas', status: 'different', desc: 'N/A — single-node SQLite; reads are local and instant.' },
+            { name: 'Connection Pooling', status: 'different', desc: 'N/A — embedded SQLite, no connections to pool.' },
+            { name: 'Extensions (PostGIS, pgvector, pg_cron)', status: 'different', desc: 'N/A — SQLite has no equivalent extension ecosystem. Roadmap: FTS5 for full-text search.' },
+            { name: 'Triggers', status: 'equivalent', desc: 'Event system — every write fires a record:changed event (WebSocket + Telegram mirror).' },
+            { name: 'Functions (PL/pgSQL)', status: 'roadmap', desc: 'Server-side JS/TS handlers (webhook-style) callable from /v1/*.' },
+            { name: 'Views', status: 'roadmap', desc: 'Named, server-defined projections over collections.' },
+            { name: 'Materialized Views', status: 'roadmap', desc: 'Pre-computed aggregations refreshed on write.' },
+            { name: 'Foreign Data Wrappers (FDW)', status: 'different', desc: 'N/A — not applicable to the SQLite+Telegram model.' },
+          ]}
+        />
+
+        {/* ─── Data API ─── */}
+        <FeatureCard
+          icon={<Server className="size-4" />}
+          title="Data API"
+          subtitle="Every collection auto-exposes /v1/* with per-userId isolation by default — no schema publishing step, no RLS toggle to forget."
+          features={[
+            { name: 'Enable Data API (REST API)', status: 'implemented', desc: '/v1/* is the auto-generated REST surface for KV + files.' },
+            { name: 'Auto-generated RESTful API', status: 'implemented', desc: 'Every collection auto-exposes /v1/set, /v1/get, /v1/delete, /v1/list.' },
+            { name: 'GraphQL API', status: 'roadmap', desc: 'Single /v1/graphql endpoint with per-userId scoping.' },
+            { name: 'OpenAPI documentation', status: 'roadmap', desc: '/api/openapi.json + /api/docs (Swagger UI).' },
+            { name: 'Realtime API', status: 'implemented', desc: 'WebSocket mini-service on port 3003 pushes record:changed events.' },
+            { name: 'RPC (Database Functions)', status: 'roadmap', desc: 'Invoke server-side JS/TS handlers via /v1/rpc/:name.' },
+            { name: 'API Keys', status: 'implemented', desc: 'kv_live_* keys — per-user, revocable, named, multiple per account.' },
+            { name: 'JWT Authentication', status: 'equivalent', desc: 'Signed download tokens (short-lived, HMAC-SHA256).' },
+            { name: 'Auto-expose new tables / RLS-by-default', status: 'equivalent', desc: 'Every new collection is immediately accessible via /v1/* with automatic per-userId isolation.' },
+          ]}
+        />
+      </Section>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Feature inventory helpers (Security / Database / Data API)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type FeatureStatus = 'implemented' | 'equivalent' | 'roadmap' | 'different'
+
+const STATUS_BADGE_CLASS: Record<FeatureStatus, string> = {
+  implemented: 'bg-emerald-100 text-emerald-700 border-emerald-300',
+  equivalent:  'bg-primary/15 text-primary border-primary/30',
+  roadmap:     'bg-muted text-muted-foreground border-border/60',
+  different:   'bg-stone-100 text-stone-600 border-stone-300',
+}
+
+const STATUS_LABEL: Record<FeatureStatus, string> = {
+  implemented: 'Implemented',
+  equivalent:  'Equivalent',
+  roadmap:     'Roadmap',
+  different:   'Different',
+}
+
+function FeatureLegend() {
+  const items: FeatureStatus[] = ['implemented', 'equivalent', 'roadmap', 'different']
+  return (
+    <>
+      {items.map((s) => (
+        <div key={s} className="flex items-center gap-2 text-[12px] text-muted-foreground">
+          <Badge variant="outline" className={STATUS_BADGE_CLASS[s]}>{STATUS_LABEL[s]}</Badge>
+          <span className="truncate">
+            {s === 'implemented' && 'shipped today'}
+            {s === 'equivalent' && 'different primitive, same outcome'}
+            {s === 'roadmap' && 'planned, not yet shipped'}
+            {s === 'different' && 'not the Onyx Base model'}
+          </span>
+        </div>
+      ))}
+    </>
+  )
+}
+
+function FeatureCard({
+  icon,
+  title,
+  subtitle,
+  features,
+}: {
+  icon: React.ReactNode
+  title: string
+  subtitle: string
+  features: { name: string; status: FeatureStatus; desc: string }[]
+}) {
+  return (
+    <div className="rounded-xl border border-border/60 bg-card/30 overflow-hidden">
+      <div className="p-4 sm:p-5 border-b border-border/40 bg-primary/[0.03]">
+        <div className="flex items-center gap-2.5">
+          <div className="size-7 rounded-md bg-primary/10 border border-primary/20 flex items-center justify-center text-primary shrink-0">
+            {icon}
+          </div>
+          <div>
+            <h3 className="font-semibold text-[15px]">{title}</h3>
+            <p className="text-[12px] text-muted-foreground mt-0.5 leading-snug">{subtitle}</p>
+          </div>
+        </div>
+      </div>
+      <div className="divide-y divide-border/40">
+        {features.map((f) => (
+          <div
+            key={f.name}
+            className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto_minmax(0,1.4fr)] gap-1.5 sm:gap-4 px-4 sm:px-5 py-3 items-start sm:items-center"
+          >
+            <div className="font-medium text-[13px] text-foreground/90">{f.name}</div>
+            <div>
+              <Badge variant="outline" className={STATUS_BADGE_CLASS[f.status]}>
+                {STATUS_LABEL[f.status]}
+              </Badge>
+            </div>
+            <div className="text-[12.5px] text-muted-foreground leading-snug">{f.desc}</div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

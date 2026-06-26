@@ -58,11 +58,23 @@ export async function POST(req: NextRequest) {
   const rawPassword = typeof body.password === 'string' ? body.password : ''
   const source = (typeof body.source === 'string' && body.source) || 'cli'
   const isWeb = source === 'web'
+  const otpVerified = body.otpVerified === true
   const name = rawName || undefined
 
   // ── Web signups require a name ──
   if (isWeb && !rawName) {
     return fail('Please enter your name.', 400)
+  }
+
+  // ── Web signups MUST have completed email OTP verification ──
+  // The frontend runs the send-otp + verify-otp flow BEFORE submitting the
+  // signup form, then passes `otpVerified: true` to signal that the email is
+  // confirmed. CLI signups skip this check (same as they skip email/password).
+  if (isWeb && !otpVerified) {
+    return fail(
+      'Email verification required. Please request an OTP code and verify your email before signing up.',
+      400,
+    )
   }
 
   // ── Email validation ──
