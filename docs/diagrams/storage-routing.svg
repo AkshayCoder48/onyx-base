@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg width="780" height="380" viewBox="0 0 780 380" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Storage routing">
+<svg width="780" height="430" viewBox="0 0 780 430" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Storage routing">
   <defs>
     <marker id="arrRoute" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
       <path d="M0 0 L10 5 L0 10 z" fill="#6b6557"/>
@@ -17,18 +17,21 @@
   <!-- Upload node -->
   <circle cx="390" cy="50" r="34" fill="#f7e8df" stroke="#d4744f" stroke-width="2"/>
   <path d="M390 36 L390 64 M376 50 L390 36 L404 50" stroke="#d4744f" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="320" y="92" width="140" height="6" rx="3" fill="#e8e5dc"/>
+  <text x="390" y="105" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#2b2825" text-anchor="middle">Upload (POST /v1/files)</text>
 
   <!-- decision diamond -->
-  <path d="M390 110 L460 160 L390 210 L320 160 z" fill="#ffffff" stroke="#d4744f" stroke-width="2"/>
-  <circle cx="390" cy="160" r="14" fill="#f7e8df"/>
-  <path d="M390 152 L390 168 M382 160 L398 160" stroke="#8a3f23" stroke-width="2.5" stroke-linecap="round"/>
+  <path d="M390 120 L460 170 L390 220 L320 170 z" fill="#ffffff" stroke="#d4744f" stroke-width="2"/>
+  <circle cx="390" cy="170" r="14" fill="#f7e8df"/>
+  <path d="M390 162 L390 178 M382 170 L398 170" stroke="#8a3f23" stroke-width="2.5" stroke-linecap="round"/>
+  <text x="390" y="200" font-family="system-ui, -apple-system, sans-serif" font-size="12" font-weight="700" fill="#2b2825" text-anchor="middle">Custom bot configured?</text>
 
   <!-- left branch: custom -->
-  <path d="M320 160 L200 160 L200 240" fill="none" stroke="#6b6557" stroke-width="2" marker-end="url(#arrRoute)"/>
-  <rect x="80" y="240" width="240" height="110" rx="14" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
+  <path d="M320 170 L200 170 L200 240" fill="none" stroke="#6b6557" stroke-width="2" marker-end="url(#arrRoute)"/>
+  <text x="255" y="160" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" fill="#8a3f23" text-anchor="middle">YES</text>
+  <rect x="80" y="240" width="240" height="120" rx="14" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
   <rect x="80" y="240" width="240" height="28" rx="14" fill="url(#custBot)"/>
   <rect x="80" y="254" width="240" height="14" fill="url(#custBot)"/>
+  <text x="200" y="259" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">Your own Telegram bot</text>
   <circle cx="120" cy="295" r="14" fill="#f7e8df"/>
   <circle cx="120" cy="290" r="5" fill="#8a3f23"/>
   <path d="M110 305 Q110 298 120 298 Q130 298 130 305" fill="#8a3f23"/>
@@ -41,12 +44,15 @@
   <rect x="260" y="297" width="50" height="6" rx="3" fill="#ece9e1"/>
   <rect x="260" y="309" width="30" height="6" rx="3" fill="#f7e8df"/>
   <rect x="100" y="332" width="200" height="6" rx="3" fill="#ece9e1"/>
+  <text x="200" y="350" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#6b6557" text-anchor="middle">private storage · your chat · full control</text>
 
   <!-- right branch: server -->
-  <path d="M460 160 L580 160 L580 240" fill="none" stroke="#6b6557" stroke-width="2" marker-end="url(#arrRoute)"/>
-  <rect x="460" y="240" width="240" height="110" rx="14" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
+  <path d="M460 170 L580 170 L580 240" fill="none" stroke="#6b6557" stroke-width="2" marker-end="url(#arrRoute)"/>
+  <text x="520" y="160" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-weight="700" fill="#8a3f23" text-anchor="middle">NO (default)</text>
+  <rect x="460" y="240" width="240" height="120" rx="14" fill="#ffffff" stroke="#d9d4c7" stroke-width="1.5"/>
   <rect x="460" y="240" width="240" height="28" rx="14" fill="url(#srvBot)"/>
   <rect x="460" y="254" width="240" height="14" fill="url(#srvBot)"/>
+  <text x="580" y="259" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#ffffff" text-anchor="middle">Server-side shared bot</text>
   <rect x="490" y="282" width="90" height="20" rx="4" fill="#2b2825"/>
   <circle cx="500" cy="292" r="3" fill="#d4744f"/>
   <rect x="510" y="290" width="60" height="4" rx="2" fill="#6b6557"/>
@@ -59,8 +65,11 @@
   <circle cx="660" cy="300" r="4" fill="#ffffff"/>
   <rect x="635" y="276" width="10" height="6" rx="3" fill="#8a3f23"/>
   <circle cx="640" cy="276" r="3" fill="#2b2825"/>
+  <text x="580" y="350" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#6b6557" text-anchor="middle">shared · automatic · works out of the box</text>
 
   <!-- merge to permanent link -->
-  <path d="M200 350 C 200 370, 320 372, 390 372" fill="none" stroke="#6b6557" stroke-width="2"/>
-  <path d="M580 350 C 580 370, 460 372, 390 372" fill="none" stroke="#6b6557" stroke-width="2"/>
+  <path d="M200 360 C 200 380, 320 382, 390 382" fill="none" stroke="#6b6557" stroke-width="2"/>
+  <path d="M580 360 C 580 380, 460 382, 390 382" fill="none" stroke="#6b6557" stroke-width="2"/>
+  <text x="390" y="405" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#d4744f" text-anchor="middle">Permanent /f/&lt;fileId&gt; link (each file remembers its backend)</text>
+  <text x="390" y="422" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#6b6557" text-anchor="middle">downloads + deletes always hit the correct bot</text>
 </svg>

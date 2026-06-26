@@ -16,6 +16,23 @@ dashboard, a REST API, and a zero-dependency CLI.
 so your full data and audit log live in Telegram — you can read your database
 back from the chat itself.
 
+<br/>
+
+![Unlimited Free Access](https://img.shields.io/badge/Unlimited_Free_Access-d4744f?style=for-the-badge)
+![No credit card](https://img.shields.io/badge/No_credit_card-e09a7a?style=for-the-badge)
+![No usage caps](https://img.shields.io/badge/No_usage_caps-8a3f23?style=for-the-badge)
+![No vendor lock-in](https://img.shields.io/badge/No_vendor_lock--in-2b2825?style=for-the-badge)
+![Backed by Telegram](https://img.shields.io/badge/Backed_by_Telegram-d4744f?style=for-the-badge)
+
+### Truly unlimited. Truly free.
+
+No storage caps. No API-call quotas. No collection limits. No file-count
+limits. No "contact sales" wall. No proprietary runtime. The only cost is
+your own Telegram bot — talk to [@BotFather](https://t.me/BotFather), it's
+free, takes 30 seconds, and you already have a Telegram account. No credit
+card, no trial, no vendor lock-in: your data lives in **your** Telegram chat,
+and you can walk away with it at any time.
+
 </div>
 
 <br/>
@@ -155,6 +172,90 @@ the door.*
 
 <br/>
 
+<!-- ───────────────────────── ADMIN SYSTEM ───────────────────────── -->
+## Admin system
+
+Onyx Base ships with a built-in admin role that can see and manage **every
+user's data** on the instance — useful for self-hosted operators, support
+workflows, and disaster recovery. Admins use a separate key prefix
+(`onyxbase_…`) that unlocks a dedicated admin console alongside the regular
+dashboard.
+
+### The bootstrap admin key
+
+Every instance boots with one hardcoded, irrevocable admin key:
+
+```
+onyxbase_8018097297
+```
+
+Sign in with this key (web UI or CLI) to enter the **Admin Dashboard** — a
+separate console that shows every user, their collections, keyvalues, files,
+and API keys. The bootstrap key cannot be revoked or rotated from the UI;
+keep it secret, and rotate it only by redeploying with a different bootstrap
+value baked into the source.
+
+### Accessing the admin dashboard
+
+Two ways in:
+
+1. **Sign in** with the admin key on the regular login screen — Onyx Base
+   detects the `onyxbase_` prefix and routes you straight into the admin
+   console. A header toggle lets you switch between the admin console and the
+   regular user dashboard at any time.
+2. **Direct URL** — visit [`/admin`](src/app/admin/page.tsx) on your instance.
+   If you aren't signed in yet, you'll be asked for an admin key; if you are,
+   the admin console loads immediately.
+
+### What the admin can see
+
+- **Users** — every account with stats (records, files, collections, last
+  activity, signup time).
+- Per-user detail: **collections**, **keyvalues** (full database-IDE table
+  with sortable columns and expandable JSON), **files** (with Telegram
+  direct-link mint / refresh / revoke), and **API keys**.
+- **All files** — across every user, with the same Get-link / Refresh / Revoke
+  controls as the regular storage tab.
+- **Admin keys** — list and revoke promoted admin keys (the bootstrap key
+  cannot be revoked).
+
+### Promoting a user to admin
+
+To grant admin powers to a regular user (e.g. a teammate who needs
+cross-user visibility), promote their existing `kv_live_` API key to an
+`onyxbase_` key:
+
+```bash
+# CLI:
+onyx admin promote kv_live_abc123def456 --label "Ada (ops)"
+
+# Or via curl:
+curl -X POST https://onyx.example.com/api/admin/promote \
+  -H "Authorization: Bearer onyxbase_8018097297" \
+  -H "Content-Type: application/json" \
+  -d '{"kvLiveKey":"kv_live_abc123def456","label":"Ada (ops)"}'
+# → { "adminKey": "onyxbase_a1b2c3d4e5f6…", "label": "Ada (ops)" }
+```
+
+The promoted user gets back a fresh `onyxbase_<hex>` key — they sign in with
+that from then on. Their original `kv_live_` key still works for ordinary
+user-level data operations.
+
+### Revoking an admin key
+
+```bash
+onyx admin revoke onyxbase_a1b2c3d4e5f6
+# or via curl:
+curl -X DELETE "https://onyx.example.com/api/admin/admins?id=<adminKeyId>" \
+  -H "Authorization: Bearer onyxbase_8018097297"
+```
+
+The bootstrap key (`onyxbase_8018097297`) is **irrevocable** — attempting to
+delete it returns a 409 Conflict. To rotate it, redeploy with a different
+bootstrap value baked into the source.
+
+<br/>
+
 <!-- ───────────────────────── TECH STACK LAYERS ───────────────────────── -->
 ## Tech stack
 
@@ -239,12 +340,48 @@ curl -X POST "https://onyx.example.com/api/files/<id>/link?force=1" \
 npm i -g onyx-base
 export ONYX_URL=https://onyx.example.com
 
+# Auth & data
 onyx login --name "Ada" --email ada@example.com
 onyx set visits 0
 onyx get visits
+onyx list                          # list keys in the default collection
+onyx export --output backup.json   # dump the whole database as JSON
+
+# Collections
+onyx collections                   # list collections (+ record counts)
+onyx collections --create cache    # create a new collection
+
+# Files
 onyx upload ./report.pdf --label "Q3 report"
-onyx files
+onyx files                         # list stored files
 onyx download f_abc123 ./out.pdf
+onyx file-link f_abc123            # mint a fresh Telegram cloud URL (~1h)
+onyx file-revoke f_abc123          # drop the cached URL immediately
+onyx file-delete f_abc123          # permanently delete a file
+
+# Share tokens
+onyx share --key visits --mode read --ttl 3600   # mint a scoped share token
+onyx share --list                               # list your share tokens
+onyx share --revoke <tokenId>                    # revoke one
+
+# Telemetry
+onyx whoami                        # current API key + user info
+onyx stats                         # account statistics
+onyx logs --limit 50               # recent audit log entries
+
+# Settings
+onyx telegram-config --show        # show your current storage backend
+onyx telegram-config --token "<bot_token>" --chat "<chat_id>"  # switch to BYOB
+onyx api-keys                      # list / rotate / revoke your API keys
+
+# Admin (requires an onyxbase_ key)
+onyx admin whoami                  # confirm admin identity
+onyx admin users                   # list all users + global stats
+onyx admin user <userId>           # full per-user detail (kv, files, api keys)
+onyx admin files                   # list ALL files across ALL users
+onyx admin promote kv_live_abc123  # promote a regular user to admin
+onyx admin admins                  # list all admin keys
+onyx admin revoke onyxbase_xxx     # revoke a promoted admin key
 ```
 
 <br/>
@@ -293,6 +430,20 @@ Authorization: Bearer kv_live_…
 | `POST` | `/api/dashboard/collections` | Create a collection (dashboard) |
 | `DELETE` | `/api/dashboard/collections/:name` | Delete a collection (dashboard) |
 
+**Admin routes** — require `Authorization: Bearer onyxbase_…`:
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `GET` | `/api/admin/whoami` | Confirm admin identity + bootstrap flag |
+| `GET` | `/api/admin/users` | List ALL users with stats + global stats |
+| `GET` | `/api/admin/users/:id` | Per-user detail: collections, records, files, API keys |
+| `GET` | `/api/admin/files` | List ALL files across ALL users with owner info |
+| `POST` | `/api/admin/files/:id/link` | Admin override — mint Telegram URL for ANY user's file (`?force=1` bypasses cache) |
+| `DELETE` | `/api/admin/files/:id/link` | Admin override — revoke cached URL for ANY user's file |
+| `POST` | `/api/admin/promote` | Promote a `kv_live_` key to an `onyxbase_` key (body: `{kvLiveKey, label}`) |
+| `GET` | `/api/admin/admins` | List all admin keys (bootstrap flagged) |
+| `DELETE` | `/api/admin/admins?id=` | Revoke an admin key (bootstrap cannot be revoked → 409) |
+
 <br/>
 
 <!-- ───────────────────────── DESIGN SYSTEM ───────────────────────── -->
@@ -329,17 +480,19 @@ available via `.dark`.
 ```
 src/
 ├── app/
-│   ├── api/            # dashboard API routes (auth, files, share-tokens, …)
+│   ├── api/            # dashboard + admin API routes (auth, files, share-tokens, /api/admin/*, …)
 │   ├── v1/             # public REST API (kv, files, share, write)
 │   ├── f/[id]/         # public file download proxy
+│   ├── admin/          # /admin direct-entry route to the admin console
 │   └── page.tsx        # the single user-visible route
 ├── components/
 │   ├── dashboard/      # storage, share, docs, playground, settings, …
+│   ├── admin/          # admin console (cross-user management)
 │   └── ui/             # shadcn/ui component set
 ├── lib/
-│   ├── data-store.ts   # the in-memory + disk store, Telegram sync, file CRUD
+│   ├── data-store.ts   # the in-memory + disk store, Telegram sync, file CRUD, admin keys
 │   ├── telegram.ts     # sendKvMessage, sendDocumentFile, pinned manifest…
-│   ├── auth.ts         # Bearer auth + getPublicOrigin + auto-rehydrate
+│   ├── auth.ts         # Bearer auth + getPublicOrigin + auto-rehydrate + admin detection
 │   ├── kv.ts           # ensureCollection, setKey, getKey, logAction…
 │   └── api.ts          # typed client used by the dashboard
 mini-services/
@@ -353,24 +506,53 @@ prisma/
 <br/>
 
 <!-- ───────────────────────── TELEGRAM SETUP ───────────────────────── -->
-## Telegram setup
+## Bring Your Own Bot (recommended for production)
 
-The platform works out of the box using the server-side Telegram bot. To route
-storage to your **own** private chat instead:
+Onyx Base works out of the box with a server-side shared bot — but for anything
+beyond tinkering, **bring your own bot**. It costs nothing, takes 30 seconds,
+and gives you dramatically more control:
+
+- **Full control.** You own the bot token. Revoke, rotate, or replace it
+  anytime without coordination.
+- **Private storage.** Every KV mirror message, every uploaded file, and the
+  pinned identity manifest land in **your** Telegram chat — not a shared pool
+  that other tenants can read.
+- **No shared bandwidth.** The default server bot's `getFile` quota is shared
+  across every user on the instance. Your own bot has its own dedicated quota.
+- **No shared rate limits.** Telegram throttles per-bot, so the busier the
+  shared bot gets, the slower everyone's downloads become. With your own bot,
+  you're the only tenant.
+- **Your data stays with you.** Stop using Onyx Base tomorrow and your full
+  database is still sitting in your Telegram chat, fully readable.
+- **2 GB per file unlocks.** Telegram's cloud Bot API caps at ~50 MB upload /
+  ~20 MB `getFile`. Running your own [local Bot API
+  server](https://github.com/tdlib/telegram-bot-api) unlocks the full 2 GB
+  envelope app-side.
+
+### How to set it up
 
 1. Create a bot via [@BotFather](https://t.me/BotFather) → copy the **Bot Token**.
 2. Create a channel or group, add the bot as an **administrator**.
 3. Forward any message from that chat to [@userinfobot](https://t.me/userinfobot) to get the **Chat ID** (it looks like `-1001234567890`).
 4. In the dashboard → **Settings → Storage backend**, paste the Chat ID and Bot Token, and save.
 
+   Or from the CLI:
+
+   ```bash
+   onyx telegram-config --token "<bot_token>" --chat "<chat_id>"
+   ```
+
 From that point, new uploads and KV mirrors go to **your** bot. Existing files
-stay on whichever backend they were uploaded to (each file remembers), so
-downloads and deletes keep working.
+stay on whichever backend they were uploaded to (each file remembers its
+backend), so downloads and deletes keep working seamlessly.
 
 > The cloud Telegram Bot API caps bot uploads at ~50 MB and `getFile` downloads
 > at ~20 MB. The full 2 GB envelope is unlocked by running a
 > [local Bot API server](https://github.com/tdlib/telegram-bot-api). The 2 GB
 > ceiling is enforced app-side either way.
+
+> The server's default bot is **shared** and intended for evaluation / demos
+> only. For production, **bring your own bot.**
 
 <br/>
 

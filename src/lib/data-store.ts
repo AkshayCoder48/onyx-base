@@ -201,6 +201,8 @@ interface StoreShape {
    * the UI. Each entry is `{ userId, name, createdAt }`.
    */
   collectionNames: CollectionNameRecord[]
+  /** Admin keys (`onyxbase_*`) — grant cross-user read access via /admin. */
+  adminKeys: AdminKeyRecord[]
 }
 
 interface CollectionNameRecord {
@@ -209,11 +211,50 @@ interface CollectionNameRecord {
   createdAt: string
 }
 
+// ─── Admin keys ──────────────────────────────────────────────────────────────
+
+/**
+ * Admin keys grant cross-user read access to ALL data in the system — every
+ * user's collections, records, files, and API keys. They are used by the
+ * `/admin` dashboard, which is a separate app surface only reachable with an
+ * `onyxbase_*` key.
+ *
+ * The bootstrap key `onyxbase_8018097297` is hardcoded and cannot be revoked.
+ * Additional admins are created by "promoting" a regular user (via their
+ * `kv_live_*` key) — this mints a new `onyxbase_<hex>` key for them.
+ *
+ * Admin keys ALSO work as a regular Bearer token on /v1/* and /api/* routes —
+ * they map to a virtual admin user (id `admin`, userId `usr_admin`) so the
+ * admin can use the basic storage app too.
+ */
+export interface AdminKeyRecord {
+  id: string
+  /** The full key string, e.g. `onyxbase_8018097297` or `onyxbase_a1b2c3...`. */
+  key: string
+  /** Human-readable label (e.g. "Bootstrap Admin", "Promoted from alice@…"). */
+  label: string
+  createdAt: string
+  /** Who created this key: `'bootstrap'` or the id of the promoting admin key. */
+  createdBy: string
+  /** The dbUserId this admin was promoted from (null for bootstrap). */
+  promotedFromUserId: string | null
+  /** The email of the user this admin was promoted from (for display). */
+  promotedFromUserEmail: string | null
+  revoked: boolean
+}
+
+/** The hardcoded bootstrap admin key — always works, cannot be revoked. */
+export const BOOTSTRAP_ADMIN_KEY = 'onyxbase_8018097297'
+
+/** The virtual admin user's dbUserId (admin can use the regular app too). */
+export const ADMIN_DB_USER_ID = 'admin'
+export const ADMIN_PUBLIC_USER_ID = 'usr_admin'
+
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
 const STORE_PATH = path.join(process.cwd(), 'db', 'cloudkv.json')
 
-const EMPTY_STORE: StoreShape = { users: [], apiKeys: [], records: [], logs: [], telegramConfigs: [], shareTokens: [], files: [], collectionNames: [] }
+const EMPTY_STORE: StoreShape = { users: [], apiKeys: [], records: [], logs: [], telegramConfigs: [], shareTokens: [], files: [], collectionNames: [], adminKeys: [] }
 
 function loadFromDisk(): StoreShape {
   try {
@@ -228,6 +269,7 @@ function loadFromDisk(): StoreShape {
       shareTokens: parsed.shareTokens ?? [],
       files: parsed.files ?? [],
       collectionNames: parsed.collectionNames ?? [],
+      adminKeys: parsed.adminKeys ?? [],
     }
   } catch {
     return { ...EMPTY_STORE }
@@ -247,6 +289,7 @@ function saveToDisk() {
       shareTokens: store.shareTokens,
       files: store.files,
       collectionNames: store.collectionNames,
+      adminKeys: store.adminKeys,
     }
     // Atomic write: write to a temp file in the same directory, then rename.
     // `rename` is atomic on POSIX, so a crash mid-write can never leave a
@@ -289,6 +332,7 @@ function ensureShape(loaded: Partial<StoreShape>): StoreShape {
       linkRevokedAt: f.linkRevokedAt ?? null,
     })),
     collectionNames: loaded.collectionNames ?? [],
+    adminKeys: loaded.adminKeys ?? [],
   }
 }
 
@@ -322,12 +366,17 @@ function backfillInPlace(existing: StoreShape): StoreShape {
     if (f.linkRevokedAt === undefined) f.linkRevokedAt = null
   }
   if (!Array.isArray(existing.collectionNames)) existing.collectionNames = []
+  if (!Array.isArray(existing.adminKeys)) existing.adminKeys = []
   return existing
 }
 
 const store: StoreShape = globalForStore.__cloudkvStore
   ? backfillInPlace(globalForStore.__cloudkvStore)
   : (globalForStore.__cloudkvStore = ensureShape(loadFromDisk()))
+
+// Seed the bootstrap admin key if it's missing (idempotent — runs on every
+// cold boot but only writes once).
+seedBootstrapAdminKey()
 
 // Cold-boot rehydration: if Telegram is configured (env bot token + chat id),
 // pull the pinned identity manifest and restore any users / keys that are
@@ -1705,4 +1754,253 @@ export function fileView(f: FileRecord, origin: string) {
     updatedAt: f.updatedAt,
     downloadUrl: `${origin}/f/${f.fileId}`,
   }
+}
+
+// ─── Admin operations ────────────────────────────────────────────────────────
+
+/** Ensure the virtual admin user exists (so admin can use the regular app). */
+function ensureAdminUser(): UserRecord {
+  let admin = store.users.find((u) => u.id === ADMIN_DB_USER_ID)
+  if (!admin) {
+    admin = {
+      id: ADMIN_DB_USER_ID,
+      userId: ADMIN_PUBLIC_USER_ID,
+      name: 'Administrator',
+      email: null,
+      passwordHash: null,
+      plan: 'admin',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
+    store.users.push(admin)
+    saveToDisk()
+  }
+  return admin
+}
+
+/** Seed the hardcoded bootstrap admin key (idempotent). */
+function seedBootstrapAdminKey() {
+  if (!store.adminKeys.some((k) => k.key === BOOTSTRAP_ADMIN_KEY)) {
+    store.adminKeys.push({
+      id: 'admin_bootstrap',
+      key: BOOTSTRAP_ADMIN_KEY,
+      label: 'Bootstrap Admin',
+      createdAt: new Date().toISOString(),
+      createdBy: 'bootstrap',
+      promotedFromUserId: null,
+      promotedFromUserEmail: null,
+      revoked: false,
+    })
+    saveToDisk()
+  }
+}
+
+/** Look up an admin key by its full token string. Returns null if not found / revoked. */
+export function findAdminKey(key: string): AdminKeyRecord | null {
+  const adminKey = store.adminKeys.find((k) => k.key === key && !k.revoked)
+  return adminKey ?? null
+}
+
+/** Check whether a token string is an admin key (starts with `onyxbase_`). */
+export function isAdminKey(token: string): boolean {
+  return token.startsWith('onyxbase_')
+}
+
+/** Ensure the admin user exists and return it (for authenticate()). */
+export function getOrCreateAdminUser(): UserRecord {
+  return ensureAdminUser()
+}
+
+/** List ALL users (excluding the virtual admin) with summary stats for the admin dashboard. */
+export function adminListAllUsers() {
+  return store.users
+    .filter((u) => u.id !== ADMIN_DB_USER_ID)
+    .map((u) => {
+      const apiKeys = store.apiKeys.filter((k) => k.userId === u.id)
+      const records = store.records.filter((r) => r.userId === u.id)
+      const files = store.files.filter((f) => f.userId === u.id)
+      const collections = listCollections(u.id)
+      return {
+        id: u.id,
+        userId: u.userId,
+        name: u.name,
+        email: u.email,
+        plan: u.plan,
+        createdAt: u.createdAt,
+        stats: {
+          apiKeys: apiKeys.length,
+          activeApiKeys: apiKeys.filter((k) => !k.revoked).length,
+          records: records.length,
+          collections: collections.length,
+          files: files.length,
+          fileBytes: files.reduce((s, f) => s + f.size, 0),
+        },
+      }
+    })
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+}
+
+/** Get a single user's full data (collections, records, files, api keys) for the admin dashboard. */
+export function adminGetUserDetail(dbUserId: string) {
+  const user = store.users.find((u) => u.id === dbUserId)
+  if (!user) return null
+  const apiKeys = listApiKeys(dbUserId)
+  const records = listRecords(dbUserId, undefined)
+  const files = listFileRecords(dbUserId)
+  const collections = listCollections(dbUserId)
+  const telegramConfig = getTelegramConfig(dbUserId)
+  return {
+    user: {
+      id: user.id,
+      userId: user.userId,
+      name: user.name,
+      email: user.email,
+      plan: user.plan,
+      createdAt: user.createdAt,
+    },
+    apiKeys: apiKeys.map((k) => ({
+      id: k.id,
+      name: k.name,
+      keyPrefix: k.key.slice(0, 12) + '…',
+      createdAt: k.createdAt,
+      lastUsedAt: k.lastUsedAt,
+      revoked: k.revoked,
+    })),
+    records: records.map((r) => ({
+      id: r.id,
+      collection: r.collection,
+      key: r.key,
+      value: r.value,
+      valueType: r.valueType,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+    })),
+    files: files.map((f) => ({
+      id: f.id,
+      fileId: f.fileId,
+      fileName: f.fileName,
+      mimeType: f.mimeType,
+      size: f.size,
+      isPublic: f.isPublic,
+      downloads: f.downloads,
+      storageMode: f.storageMode ?? 'server',
+      label: f.label,
+      createdAt: f.createdAt,
+    })),
+    collections: collections.map((c) => ({
+      name: c.name,
+      count: c.count,
+      createdAt: c.createdAt,
+    })),
+    telegramConfig: telegramConfig
+      ? {
+          chatId: telegramConfig.chatId,
+          label: telegramConfig.label,
+          hasCustomBotToken: telegramConfig.hasCustomBotToken,
+        }
+      : null,
+  }
+}
+
+/** List ALL files across ALL users (for the admin file browser). */
+export function adminListAllFiles() {
+  return store.files
+    .filter((f) => f.userId !== ADMIN_DB_USER_ID)
+    .map((f) => {
+      const user = store.users.find((u) => u.id === f.userId)
+      return {
+        id: f.id,
+        fileId: f.fileId,
+        fileName: f.fileName,
+        mimeType: f.mimeType,
+        size: f.size,
+        isPublic: f.isPublic,
+        downloads: f.downloads,
+        storageMode: f.storageMode ?? 'server',
+        label: f.label,
+        createdAt: f.createdAt,
+        owner: {
+          id: f.userId,
+          userId: user?.userId ?? '?',
+          name: user?.name ?? null,
+          email: user?.email ?? null,
+        },
+      }
+    })
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+}
+
+/** Find any file by id (admin override — works across all users). */
+export function adminFindFileById(id: string): FileRecord | null {
+  return store.files.find((f) => f.id === id) ?? null
+}
+
+/** Get aggregate stats across ALL users for the admin dashboard. */
+export function adminGetGlobalStats() {
+  const realUsers = store.users.filter((u) => u.id !== ADMIN_DB_USER_ID)
+  const realFiles = store.files.filter((f) => f.userId !== ADMIN_DB_USER_ID)
+  const realRecords = store.records.filter((r) => r.userId !== ADMIN_DB_USER_ID)
+  const realApiKeys = store.apiKeys.filter((k) => k.userId !== ADMIN_DB_USER_ID)
+  return {
+    users: realUsers.length,
+    records: realRecords.length,
+    files: realFiles.length,
+    fileBytes: realFiles.reduce((s, f) => s + f.size, 0),
+    apiKeys: realApiKeys.length,
+    activeApiKeys: realApiKeys.filter((k) => !k.revoked).length,
+    collections: new Set(realRecords.map((r) => r.collection)).size,
+    adminKeys: store.adminKeys.length,
+  }
+}
+
+/**
+ * Promote a regular user (identified by their kv_live API key) to admin.
+ * Mints a new `onyxbase_<hex>` key for them. Returns null if the kv_live key
+ * is invalid or revoked.
+ */
+export function adminPromoteUser(kvLiveKey: string, label?: string): AdminKeyRecord | null {
+  const apiKey = store.apiKeys.find((k) => k.key === kvLiveKey && !k.revoked)
+  if (!apiKey) return null
+  const user = store.users.find((u) => u.id === apiKey.userId)
+  if (!user) return null
+
+  const newKey = `onyxbase_${crypto.randomBytes(8).toString('hex')}`
+  const adminKey: AdminKeyRecord = {
+    id: cuid(),
+    key: newKey,
+    label: label?.trim() || `Promoted from ${user.email ?? user.userId}`,
+    createdAt: new Date().toISOString(),
+    createdBy: 'promoted',
+    promotedFromUserId: user.id,
+    promotedFromUserEmail: user.email,
+    revoked: false,
+  }
+  store.adminKeys.push(adminKey)
+  saveToDisk()
+  return adminKey
+}
+
+/** List all admin keys (with sensitive fields redacted for display). */
+export function adminListAdminKeys() {
+  return store.adminKeys
+    .map((k) => ({
+      id: k.id,
+      key: k.key,
+      label: k.label,
+      createdAt: k.createdAt,
+      createdBy: k.createdBy,
+      promotedFromUserEmail: k.promotedFromUserEmail,
+      isBootstrap: k.key === BOOTSTRAP_ADMIN_KEY,
+      revoked: k.revoked,
+    }))
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+}
+
+/** Revoke an admin key (the bootstrap key cannot be revoked). */
+export function adminRevokeAdminKey(id: string): AdminKeyRecord | null {
+  const k = store.adminKeys.find((x) => x.id === id && x.key !== BOOTSTRAP_ADMIN_KEY)
+  if (!k) return null
+  k.revoked = true
+  saveToDisk()
+  return k
 }

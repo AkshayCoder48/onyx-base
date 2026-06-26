@@ -13,13 +13,21 @@
  */
 
 import { NextRequest } from 'next/server'
-import { findUserByApiKey, rehydrateFromTelegram } from '@/lib/data-store'
+import {
+  findUserByApiKey,
+  rehydrateFromTelegram,
+  findAdminKey,
+  isAdminKey,
+  getOrCreateAdminUser,
+} from '@/lib/data-store'
 
 export interface AuthenticatedUser {
   userId: string
   dbUserId: string
   apiKeyId: string
   apiKeyName: string
+  /** True when authenticated via an `onyxbase_*` admin key. */
+  isAdmin: boolean
 }
 
 // Re-export the ID generators so routes can import everything from auth.ts.
@@ -42,6 +50,24 @@ export async function authenticate(
   if (!match) return null
   const token = match[1].trim()
 
+  // ─── Admin key path: onyxbase_* keys grant admin access ───────────────────
+  // Admin keys map to a virtual admin user (id `admin`, userId `usr_admin`)
+  // so the admin can also use the regular /v1/* and /api/* routes. The
+  // `isAdmin: true` flag lets /api/admin/* routes gate on it.
+  if (isAdminKey(token)) {
+    const adminKey = findAdminKey(token)
+    if (!adminKey) return null
+    const adminUser = getOrCreateAdminUser()
+    return {
+      userId: adminUser.userId,
+      dbUserId: adminUser.id,
+      apiKeyId: adminKey.id,
+      apiKeyName: adminKey.label,
+      isAdmin: true,
+    }
+  }
+
+  // ─── Regular key path: kv_live_* keys ─────────────────────────────────────
   // Fast path: local lookup.
   let result = findUserByApiKey(token)
   if (result) {
@@ -50,6 +76,7 @@ export async function authenticate(
       dbUserId: result.user.id,
       apiKeyId: result.apiKey.id,
       apiKeyName: result.apiKey.name,
+      isAdmin: false,
     }
   }
 
@@ -66,6 +93,7 @@ export async function authenticate(
           dbUserId: result.user.id,
           apiKeyId: result.apiKey.id,
           apiKeyName: result.apiKey.name,
+          isAdmin: false,
         }
       }
     }
@@ -74,6 +102,18 @@ export async function authenticate(
   }
 
   return null
+}
+
+/**
+ * Authenticate AND require admin privileges. Returns null if the key is
+ * missing, not an admin key, or revoked. Used by all /api/admin/* routes.
+ */
+export async function authenticateAdmin(
+  authHeader: string | null,
+): Promise<AuthenticatedUser | null> {
+  const user = await authenticate(authHeader)
+  if (!user || !user.isAdmin) return null
+  return user
 }
 
 /** Detect the JSON-ish type of a value for storage + display. */

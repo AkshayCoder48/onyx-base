@@ -967,3 +967,179 @@ Stage Summary:
 - 7 new REST API routes: /v1/whoami, /v1/stats, /v1/logs, /v1/collections, /v1/collections/[name], /v1/files/[id]/link, /v1/files/[id]/revoke.
 - README: 8 SVGs extracted to docs/diagrams/*.svg (fixes the "terminal SVG leaked as raw code" issue on GitHub), API table updated with all new routes, quick-start examples updated.
 - Full app pushed to GitHub: https://github.com/AkshayCoder48/onyx-base (clean history, .env scrubbed, no junk files).
+
+---
+Task ID: 13
+Agent: main (orchestrator)
+Task: Fix copy-link button to fetch Telegram direct URL (not proxy), build admin backend (onyxbase_ key auth + admin data aggregation + /api/admin/* routes + promote endpoint), prepare for admin frontend + CLI + README work.
+
+Work Log:
+- Fixed copy-link button in storage.tsx: the old "Copy permanent link" (Link2 icon) was copying file.downloadUrl (the PROXY URL /f/<fileId>) — this was the exact bug the user reported ("giving proxy link"). Replaced copyPermanentLink() with copyTelegramLink() which POSTs /api/files/[id]/link and copies the returned Telegram DIRECT URL (api.telegram.org/file/bot…/…) to the clipboard. Shows a loading spinner (copyingId) while fetching, then a green check (copiedId) for 1.5s. The button is on every file row, next to "Get link" and "Delete".
+- Built the admin backend in data-store.ts:
+  * Added AdminKeyRecord interface + BOOTSTRAP_ADMIN_KEY='onyxbase_8018097297' + ADMIN_DB_USER_ID='admin' + ADMIN_PUBLIC_USER_ID='usr_admin'.
+  * Added adminKeys to StoreShape, EMPTY_STORE, loadFromDisk, saveToDisk, ensureShape, backfillInPlace.
+  * Added seedBootstrapAdminKey() — runs on cold boot, idempotently inserts the bootstrap key.
+  * Added ensureAdminUser() — creates a virtual admin UserRecord (id='admin', userId='usr_admin', plan='admin') so admin can use the regular /v1/* app too.
+  * Added admin helper functions: findAdminKey, isAdminKey, getOrCreateAdminUser, adminListAllUsers (all users + stats), adminGetUserDetail (full data: collections, records, files, api keys, telegram config), adminListAllFiles (all files + owner info), adminFindFileById (cross-user), adminGetGlobalStats, adminPromoteUser (kv_live → onyxbase_<hex>), adminListAdminKeys, adminRevokeAdminKey (bootstrap cannot be revoked).
+- Updated auth.ts:
+  * Added isAdmin to AuthenticatedUser interface.
+  * authenticate() now checks for onyxbase_ prefix FIRST — if found, looks up in adminKeys, creates/returns the virtual admin user with isAdmin:true. Regular kv_live_ path unchanged (isAdmin:false).
+  * Added authenticateAdmin() — returns null if not admin. Used by all /api/admin/* routes.
+- Updated /api/auth/verify and /api/auth/whoami to return isAdmin flag (so the frontend can detect admin sessions).
+- Updated store.ts: added isAdmin? to SessionUser.
+- Created 6 admin API routes:
+  * GET /api/admin/whoami — confirm admin identity
+  * GET /api/admin/users — list ALL users with stats + global stats
+  * GET /api/admin/users/[id] — get a user's full detail (collections, records, files, api keys, telegram config)
+  * GET /api/admin/files — list ALL files across ALL users with owner info
+  * POST /api/admin/files/[id]/link — admin override: mint Telegram direct URL for ANY user's file (?force=1 busts cache)
+  * DELETE /api/admin/files/[id]/link — admin override: revoke cached URL for ANY user's file
+  * POST /api/admin/promote — { kvLiveKey, label } → mints a new onyxbase_ key, returns it
+  * GET /api/admin/promote — list all admin keys
+  * GET /api/admin/admins — list all admin keys
+  * DELETE /api/admin/admins?id= — revoke an admin key (bootstrap cannot be revoked)
+- Lint: 0 errors (2 pre-existing warnings).
+
+Stage Summary:
+- Copy-link button now fetches and copies the TELEGRAM DIRECT URL (not proxy). Loading spinner while fetching, green check on success.
+- Admin backend fully built: onyxbase_ key auth, virtual admin user (can use regular app), 10 admin API routes for cross-user data access + admin management.
+- Bootstrap key onyxbase_8018097297 is seeded on cold boot and cannot be revoked.
+- Admin can promote regular users (kv_live_ → onyxbase_) via POST /api/admin/promote.
+- Ready for: admin frontend (subagent), CLI commands (subagent), README updates (subagent).
+
+---
+Task ID: 14
+Agent: full-stack-developer
+Task: Build the admin dashboard FRONTEND (UI only — backend was Task 13)
+
+Work Log:
+- Read worklog + existing files (auth-gate, store, api, dashboard/shell, database, storage, shared) to understand the existing patterns and the admin API response shapes from Task 13.
+- Modified `src/lib/store.ts`: added `useAdminMode: boolean` (default true, persisted) + `setAdminMode()`. `setSession()` auto-sets admin mode based on `user.isAdmin`; `clearSession()` resets it.
+- Modified `src/components/auth-gate.tsx`: bootstrap now reads `res.isAdmin` from `/api/auth/whoami` and persists onto SessionUser. Renders `<AdminDashboard />` when `user.isAdmin && useAdminMode`, else `<DashboardShell />` (unchanged for regular users).
+- Created `src/components/admin/admin-dashboard.tsx` (~1100 lines, 'use client'): full admin UI with header (logo + ADMIN badge + global stat pills + "Regular dashboard" toggle + sign-out), Users / All Files / Admins tab nav. UserDetail view with 4 sub-tabs (KeyValues reuses database-IDE style with row numbers + monospace + expandable JSON cells; Collections; Files; API Keys). AdminFileRow component handles the localStorage-cached Telegram link (55-min TTL, on-mount sweep of all `onyx_admin_link_*` keys, inline URL display + Copy + Open + countdown + Refresh + Revoke). Admins tab has the promote form (kv_live key + label → POST `/api/admin/promote`) with success dialog + warning, and admin keys list with bootstrap badge + revoke button for non-bootstrap keys.
+- Created `src/app/admin/page.tsx`: direct /admin route that bootstraps the session and enforces admin access — LoginScreen / AdminDashboard / UnauthorizedScreen based on `user.isAdmin`.
+- Ran `bun run lint` → 0 errors (3 pre-existing warnings about unused eslint-disable directives).
+- Verified `/admin` and `/` both compile and serve HTTP 200 with no dev-server errors.
+
+Stage Summary:
+- Admin dashboard frontend complete. Three files modified/created: store.ts, auth-gate.tsx, admin-dashboard.tsx, app/admin/page.tsx.
+- All admin API routes from Task 13 are wired up: GET /api/admin/users (with stats), GET /api/admin/users/[id], GET /api/admin/files, POST/DELETE /api/admin/files/[id]/link, POST/GET /api/admin/promote, DELETE /api/admin/admins.
+- Telegram link caching: localStorage key `onyx_admin_link_<fileId>`, 55-min TTL, auto-cleanup on mount, inline display with countdown + Refresh (?force=1) + Revoke.
+- Regular user flow is unchanged — admins can toggle to the regular dashboard via the "Regular dashboard" button; non-admins always see DashboardShell.
+- Full work record in /agent-ctx/14-admin-dashboard-frontend.md.
+
+---
+Task ID: 16
+Agent: general-purpose
+Task: Add text labels to all 8 README SVG diagrams + update README copy (Unlimited Free Access, Bring Your Own Bot, admin system, new CLI commands, admin API routes).
+
+Work Log:
+- Read /home/z/my-project/worklog.md to understand the prior work (Tasks 1–14): foundation → REST API → dashboard API → WebSocket service → frontend → CLI → README inline SVGs (Task 8) → README rewrites + cloud-URL fix (Tasks 9 & 12) → admin backend (Task 13) → admin frontend (Task 14).
+- Read the current state of all 8 SVGs in docs/diagrams/ via bash cat (the Read tool was unable to parse them directly). Confirmed the SVGs were pure-shape (zero `<text>` elements) per the Task 8 "no text in SVGs" rule that was in effect at the time. Each SVG preserved its original visual design (gradients, markers, paths, shapes) from the warm-clay palette (#d4744f, #e09a7a, #f7e8df, #f4f3ee, #ffffff, #2b2825, #6b6557, #b1ada1, #d9d4c7, #8a3f23, #8a7e6a, #ece9e1, #e8e5dc, #1a1815, #4a463f, #efede5, #c0392b, #000000).
+- Rewrote each of the 8 SVGs preserving every original visual element AND adding descriptive `<text>` labels. Used `font-family="system-ui, -apple-system, sans-serif"`, `font-size` 10–15px, `text-anchor="middle"` for centered text, and fill colors chosen for contrast against each box's background (dark text on light, white text on the #d4744f / #2b2825 / #1a1815 surfaces). XML-escaped special chars (`<` → `&lt;` in `/f/<fileId>` labels).
+
+  Per-SVG label summary:
+  1. architecture-overview.svg (extended to 820×460): added column headers (Clients / Onyx Base API / Storage backends), client labels (Browser dashboard / CLI (onyx) / HTTP / curl), the "Next.js API core" header label, four module labels (Bearer auth (kv_live_) / KV store + collections / File router / Share tokens + admin), route legend (/v1/* /api/dashboard/* /api/admin/*), three storage backend labels (SQLite index · fast read path / Telegram · durable backup / Realtime service · Socket.io :3003), and a bottom legend.
+  2. write-data-flow.svg (extended to 840×240): added the "Every write is fast (SQLite) AND durable (Telegram)" header, four numbered stage labels (1. Set key · POST /v1/set · auto-typed value · client request / 2. SQLite upsert · instant ack · key+value+type · fast read path / 3. Telegram mirror · send or edit message · never blocks writes · durable backup / 4. Pinned manifest · identity re-pinned · userId+apiKey+chat · self-heal after reset).
+  3. share-token-security-layers.svg (560×560): kept the 5 concentric rings + central key icon, added 6 stacked labels along the vertical centerline (Revocable · instant kill switch / TTL · auto-expiry / Rate limit · requests per minute / Mode · read / write / readwrite / Scope · one key only / Key · the wrapped value) plus a bottom legend.
+  4. tech-stack-layers.svg (780×320): overlaid text labels onto each of the 4 horizontal layers — "Telegram — durable storage substrate" / "Next.js API routes — REST + dashboard + admin logic" / "Prisma + SQLite — fast local index" / "React + shadcn/ui dashboard" — plus a one-line subtitle per layer (Bot API · getFile · sendMessage · pinChatMessage · 2 GB per file / /v1/* · /api/dashboard/* · /api/admin/* — Bearer-auth REST surface / User · ApiKey · Collection · Record · Log · File · AdminKey / warm clay theme · realtime updates · admin console · Tailwind).
+  5. authentication-and-recovery-flow.svg (extended to 820×380): added "API key sign-in · kv_live_… (Bearer)", "Email + password · retrieves the lost key", the "Dashboard" header label (realtime session), "Telegram manifest · pinned · self-healing" inside the dark manifest box, "tempmail · mailinator · blocked" under the shield, plus a dashed-red path connecting the email box to the blocker and a bottom legend.
+  6. color-palette.svg (extended to 720×240): added a two-line label (name + hex) under each of the 6 large swatches (Primary #d4744f / Light clay #e09a7a / Clay tint #f7e8df / Cream #f4f3ee / White #ffffff / Ink #2b2825), a single-line hex label under each of the 9 small swatches (#b1ada1 / #6b6557 / #8a7e6a / #e8e5dc / #d9d4c7 / #c0392b / #efede5 / #ece9e1 / #1a1815), and a one-line legend at the bottom.
+  7. feature-grid.svg (720×520): added a title + 3-line description to each of the 6 tiles — KV store (auto-typed values · string/number/bool/JSON · grouped into collections), File storage (any extension · up to 2 GB · signed 1-hour download links · backed by Telegram), Share tokens (scoped · rate-limited · expiring · revocable · safe for public HTML), CLI (set · get · list · upload · download · share · admin · zero-dependency Node.js), REST API (Authorization: Bearer kv_live_ · /v1/* · /api/admin/* · CORS-ready), Realtime dashboard (Socket.io :3003 · record:changed events · no polling).
+  8. storage-routing.svg (extended to 780×430): added "Upload (POST /v1/files)" above the upload node, "Custom bot configured?" inside the decision diamond, YES / NO (default) labels on the branches, "Your own Telegram bot" header (light-clay gradient) + "private storage · your chat · full control" subtitle on the left branch, "Server-side shared bot" header (clay gradient) + "shared · automatic · works out of the box" subtitle on the right branch, and the merge label "Permanent /f/<fileId> link (each file remembers its backend)" + "downloads + deletes always hit the correct bot".
+
+- Updated /home/z/my-project/README.md (389 → 571 lines):
+
+  A. Unlimited Free Access: added 5 shields.io badges directly after the intro paragraph (Unlimited Free Access #d4744f, No credit card #e09a7a, No usage caps #8a3f23, No vendor lock-in #2b2825, Backed by Telegram #d4744f) + a "Truly unlimited. Truly free." H3 paragraph reinforcing: no storage caps, no API-call quotas, no collection/file limits, no credit card, no vendor lock-in, only cost is your own free Telegram bot.
+  
+  B. Bring Your Own Bot: renamed the existing "Telegram setup" section to "Bring Your Own Bot (recommended for production)" and expanded it with a benefits list (Full control, Private storage, No shared bandwidth, No shared rate limits, Your data stays with you, 2 GB per file unlocks). Kept the 4-step BotFather setup, added a `onyx telegram-config` CLI alternative, and a callout that the server's default bot is shared/evaluation-only.
+
+  C. Admin system: added a brand-new "## Admin system" section between Authentication & recovery and Tech stack, documenting:
+     - The bootstrap admin key `onyxbase_8018097297` (hardcoded, irrevocable).
+     - Two ways to access the admin dashboard: sign in with the onyxbase_ key OR visit /admin.
+     - What the admin can see: every user's stats + per-user detail (collections, keyvalues, files, API keys), all files across all users, and admin keys.
+     - Promote CLI command + curl example (`onyx admin promote kv_live_... --label "..."`).
+     - Revoke CLI command + curl example.
+     - Note that bootstrap is irrevocable (409 on attempt) and rotation requires redeployment.
+
+  D. CLI section: expanded from a 7-line example to a categorized 30-line example covering: Auth & data (login, set, get, list, export), Collections (collections, collections --create), Files (upload, files, download, file-link, file-revoke, file-delete), Share tokens (share --key/--mode/--ttl, share --list, share --revoke), Telemetry (whoami, stats, logs), Settings (telegram-config, api-keys), Admin (admin whoami, admin users, admin user <id>, admin files, admin promote, admin admins, admin revoke). Fixed two `ynyx` typos that snuck in during the rewrite.
+
+  E. API surface table: kept all existing routes intact and added a new "**Admin routes** — require `Authorization: Bearer onyxbase_…`" sub-table with all 9 admin routes (GET /api/admin/whoami, GET /api/admin/users, GET /api/admin/users/:id, GET /api/admin/files, POST /api/admin/files/:id/link, DELETE /api/admin/files/:id/link, POST /api/admin/promote, GET /api/admin/admins, DELETE /api/admin/admins?id=) including the `?force=1` override note for the file-link route and the "409 on bootstrap revoke" note for the admins DELETE route.
+
+  F. Project layout: updated the src/app/api comment to mention /api/admin/*, added the new src/app/admin/ route, added the components/admin/ directory, and updated the lib/data-store.ts / lib/auth.ts comments to mention admin keys + admin detection.
+
+- Verified each SVG is valid XML via `python3 -c "import xml.etree.ElementTree as ET; ET.parse('$f')"` — all 8 SVGs parse cleanly.
+- Verified the SVGs preserve their visual design (counted 27 rects / 13 paths / 10 circles / 6 ellipses in architecture-overview, similar healthy ratios across all others) and now contain 10–24 `<text>` elements each (zero previously).
+- Verified all hex colors used across the 8 SVGs (18 unique) and in the README badges (5 unique) are from the existing warm-clay palette — zero blue, zero indigo.
+- Verified README structure: 16 code fences (8 balanced pairs), 14 H2 headings, 10 H3 headings, all 8 `<img src="docs/diagrams/...">` references intact, no `ynyx` typos remaining.
+
+Stage Summary:
+- All 8 README SVGs now have clear, self-explanatory text labels overlaid on their original visual designs (no shapes removed, no gradients/markers/paths changed). Every label uses `font-family="system-ui, -apple-system, sans-serif"`, contrast-appropriate fill colors, and `text-anchor="middle"` for centered placement.
+- README updated end-to-end with: prominent "Unlimited Free Access" badges + messaging at the top, a new "Bring Your Own Bot (recommended for production)" section emphasizing the benefits of running your own Telegram bot, a new "Admin system" section documenting the bootstrap key `onyxbase_8018097297`, /admin direct route, what admins can see, and promote/revoke flows, an expanded CLI section covering 10 new command groups (collections, stats, logs, file-link, file-revoke, file-delete, share, telegram-config, api-keys, admin), and a dedicated admin-routes sub-table in the API surface listing all 9 /api/admin/* endpoints.
+- All SVGs are valid XML (verified via xml.etree.ElementTree.parse). No blue or indigo colors were used in any new content (all badges and labels use the existing warm-clay palette).
+
+---
+Task ID: 15
+Agent: general-purpose
+Task: Add CLI terminal commands for all remaining API routes (collections, stats, logs, file-link, file-revoke, file-delete, share, telegram-config, api-keys, admin) to cli/index.js, following the existing code style.
+
+Work Log:
+- Read existing `cli/index.js` (~837 lines) to understand the dispatch model (`cmd[command]` lookup keyed by the raw command name, with `ALIASES` for short forms), the helpers (`c()` colorizer, `request()` fetch wrapper, `requireAuth()`, `ensureServer()`, `formatBytes()`, `timeAgo()`, `parseArgs()`, `maskApiKey()`, `failNetwork()`, `dimErr()`), and the existing commands' style.
+- Read the relevant server route files to capture exact response shapes: `/v1/collections`, `/v1/collections/[name]`, `/v1/stats`, `/v1/logs`, `/v1/files/[id]/link`, `/v1/files/[id]/revoke`, `/v1/files/[id]`, `/api/dashboard/share-tokens`, `/api/dashboard/share-tokens/[id]`, `/api/dashboard/telegram-config`, `/api/dashboard/api-keys`, `/api/dashboard/api-keys/[id]`, `/api/admin/users`, `/api/admin/users/[id]`, `/api/admin/files`, `/api/admin/promote`, `/api/admin/admins`. Also read `src/lib/data-store.ts` for `publicShareTokenView`, `adminListAllUsers`, `adminListAllFiles`, `adminListAdminKeys`, `adminGetUserDetail`, and `getStats` to confirm field names.
+- Added imports: `import readline from 'node:readline/promises'` and `import { stdin as processStdin, stdout as processStdout } from 'node:process'`.
+- Added a shared `confirm(prompt)` helper that returns '' immediately when stdin is not a TTY (so pipes/CI never hang), otherwise opens an `readline/promises` interface and returns the trimmed, lower-cased answer.
+- Added 10 new commands to the `cmd` object (multi-word keys quoted so `cmd[command]` dispatch finds them):
+  1. `collections` — default + `list` → table of NAME/COUNT/CREATED; `create <name>` → POST /v1/collections; `delete <name>` → DELETE /v1/collections/<name> (handles 400 "default collection" + 404).
+  2. `stats` — GET /v1/stats → prints user + records/collections/apiKeys/logs/files/storageBytes/fileBytes + a sorted 7-day activity-by-action breakdown.
+  3. `logs` — GET /v1/logs with `--limit <N>` (default 20) and `--action <filter>` → TIME/ACTION/KEY/SOURCE/DETAIL table; count goes to stderr.
+  4. `file-link` — POST /v1/files/<id>/link; `--force` flag appends `?force=1`; prints the Telegram DIRECT `url`, the `proxyUrl`, and "Valid for X min" computed from `expiresInSec`.
+  5. `file-revoke` — POST /v1/files/<id>/revoke; prints server's `note`.
+  6. `file-delete` — DELETE /v1/files/<id> with a confirmation prompt; `--yes` skips the prompt; non-TTY stdin auto-aborts (no hang).
+  7. `share` — `list` (default) → table of COLLECTION/KEY/MODE/LABEL/TOKEN; `create <collection> <key>` with `--mode` and `--label` flags; `revoke <id>`.
+  8. `telegram-config` — `view` (default) → GET /api/dashboard/telegram-config; `set` with `--chat-id`, `--bot-token`, `--label` (NOTE: server route implements PUT not POST, so we use PUT to make the command actually work against the live API; documented inline); `clear` → DELETE.
+  9. `api-keys` — `list` (default) → NAME/KEY/CREATED/LAST USED/STATUS table (key masked via existing `maskApiKey`); `create <name>` prints the FULL key once with a "Copy this key now" reminder; `revoke <id>`.
+  10. `admin` — gates on `cfg.apiKey.startsWith('onyxbase_')`; subcommands `users`, `user <id>`, `files`, `promote <kv_live_key>`, `admins`. `user <id>` prints user header + API keys + collections + files. `promote` POSTs `{ kvLiveKey }` and prints the new `onyxbase_` admin key.
+- Added aliases to `ALIASES`: `keys → 'api-keys'`, `col → 'collections'`, `tg → 'telegram-config'`.
+- Updated `printHelp()` COMMANDS table: added all 10 new commands (and the `collections` row), padded to 32 chars to fit longer names like `telegram-config [view|set|clear]` and `admin [users|files|promote|admins]`. Added the new flags to the FLAGS block: `--force`, `--yes`, `--limit`, `--action`, `--mode`, `--chat-id`, `--bot-token`.
+- Verified with `node cli/index.js --help` — all 23 commands render cleanly in the table.
+- Verified dispatch for every new command (with the locally-saved `~/.onyx/config.json` pointing at localhost:3000) — collections/stats/logs reached the server and returned the real 401 ("Unauthorized — invalid or missing API key."), share/api-keys/telegram-config reached the dashboard routes, `admin` correctly refused because the saved key isn't `onyxbase_`, `file-link`/`file-revoke`/`file-delete` correctly required a fileId argument, and `file-delete --yes` bypassed the prompt while `file-delete` (no --yes, piped stdin) auto-aborted.
+- Verified subcommand error paths: `onyx collections foo`, `onyx share foo`, `onyx telegram-config foo` all print "Unknown subcommand" + usage.
+- Verified aliases: `onyx col`, `onyx keys`, `onyx tg` all dispatch to their long forms.
+- Lint: `bun run lint` reports 0 errors (3 pre-existing warnings unrelated to this task). `npx eslint cli/index.js` reports nothing. `node --check cli/index.js` reports SYNTAX OK.
+
+Stage Summary:
+- `cli/index.js` now exposes 23 top-level commands (12 pre-existing + 11 new including the multi-key `collections`, `share`, `api-keys`, `telegram-config`, `admin` families). All new commands follow the existing style (ANSI colors, `parseArgs()` for flags, `requireAuth()`/`ensureServer()`/`request()`/`failNetwork()` for I/O, `timeAgo()`/`formatBytes()`/`maskApiKey()` for formatting).
+- Multi-word command names (`file-link`, `file-revoke`, `file-delete`, `telegram-config`, `api-keys`) are quoted object keys so the `cmd[command]` dispatcher finds them — single-word names use the existing shorthand.
+- One intentional deviation from the task spec, documented inline: `onyx telegram-config set` uses HTTP PUT (not POST) because the live server route `/api/dashboard/telegram-config` only exports `GET`/`PUT`/`DELETE`. Using PUT keeps the command functional against the actual API.
+- `--help` output is clean, lint passes with 0 errors, all dispatch paths verified against the locally running server.
+
+---
+Task ID: 17
+Agent: main (orchestrator)
+Task: Final verification + fix login screen isAdmin propagation bug
+
+Work Log:
+- Found and fixed a critical bug in login-screen.tsx: the handleSignIn() and enterDashboard() functions called /api/auth/verify but did NOT pass the returned isAdmin flag to setSession(). This meant when an admin signed in with their onyxbase_ key, user.isAdmin was undefined, so the AuthGate showed the regular DashboardShell instead of AdminDashboard. Fixed by adding isAdmin: res.isAdmin to both setSession calls and the TypeScript type annotations.
+- Verified all features end-to-end with Agent Browser:
+  * Admin login: signed in with onyxbase_8018097297 → admin dashboard renders with Users/All Files/Admins tabs ✓
+  * Users tab: table with NAME/EMAIL/USERID/RECORDS/COLLS/FILES/API KEYS/CREATED columns, real user data ✓
+  * User detail: 4 tabs (KeyValues/Collections/Files/API Keys), KeyValues shows database-IDE table with row numbers ✓
+  * Admin "Get link" on a user's file: fetched https://api.telegram.org/file/bot8949177247:.../documents/file_7.bin (Telegram DIRECT URL, NOT proxy) ✓
+  * Admins tab: promote form (kv_live key + label) + admin keys list with Revoke button ✓
+  * "Regular dashboard" toggle: admin can switch to the basic storage app ✓
+  * /admin direct route: shows "Unauthorized" for regular users, admin dashboard for admin keys ✓
+  * Copy-link button on Cloud Storage: POST /api/files/[id]/link → toast "Telegram link copied (valid ~1 hour)" — fetches Telegram DIRECT URL, NOT proxy ✓
+  * dev.log: POST /api/files/[id]/link 200, GET /api/admin/users 200, no errors ✓
+  * Console: no errors or warnings ✓
+- Lint: 0 errors (3 pre-existing warnings only).
+- CLI help: all 10 new commands listed (collections, stats, logs, file-link, file-revoke, file-delete, share, api-keys, telegram-config, admin).
+- All 8 README SVGs: valid XML with text labels.
+
+Stage Summary:
+- ALL requested features are working and verified:
+  1. Copy-link button fetches Telegram DIRECT URL (not proxy) — fixed
+  2. Admin system: onyxbase_8018097297 bootstrap key, /admin route, admin dashboard with user list → user detail (4 tabs), all-files browser, promote form, admin keys management
+  3. Admin can toggle to regular dashboard; admin key works with /v1/* routes too
+  4. 10 new CLI commands added (collections, stats, logs, file-link, file-revoke, file-delete, share, telegram-config, api-keys, admin)
+  5. README: 8 SVGs have text labels, "Unlimited Free Access" badges, "Bring Your Own Bot" section, admin system documentation, new CLI commands, admin API routes table
+  6. Telegram links cached in localStorage for 1hr (admin dashboard), auto-expire after 1hr

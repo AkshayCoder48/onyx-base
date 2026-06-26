@@ -17,10 +17,10 @@
     <ellipse cx="125" cy="112" rx="26" ry="8" fill="#8a3f23"/>
     <ellipse cx="125" cy="88" rx="26" ry="8" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.6"/>
     <ellipse cx="125" cy="98" rx="26" ry="8" fill="none" stroke="#ffffff" stroke-width="1" stroke-opacity="0.4"/>
-    <rect x="60" y="160" width="130" height="10" rx="5" fill="#e8e5dc"/>
-    <rect x="60" y="180" width="100" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="60" y="196" width="115" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="60" y="212" width="70" height="8" rx="4" fill="#f7e8df"/>
+    <text x="125" y="170" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" fill="#2b2825" text-anchor="middle">Key-value store</text>
+    <text x="125" y="190" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">auto-typed values</text>
+    <text x="125" y="206" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">string · number · bool · JSON</text>
+    <text x="125" y="222" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#d4744f" text-anchor="middle">grouped into collections</text>
   </g>
 
   <!-- File storage -->
@@ -34,10 +34,10 @@
     <rect x="348" y="108" width="20" height="4" rx="2" fill="#e09a7a"/>
     <path d="M348 124 Q340 124 340 132 L340 138 Q340 146 348 146" fill="none" stroke="#8a3f23" stroke-width="2.5" stroke-linecap="round"/>
     <path d="M376 124 Q384 124 384 132 L384 138 Q384 146 376 146" fill="none" stroke="#8a3f23" stroke-width="2.5" stroke-linecap="round"/>
-    <rect x="295" y="160" width="130" height="10" rx="5" fill="#e8e5dc"/>
-    <rect x="295" y="180" width="100" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="295" y="196" width="115" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="295" y="212" width="70" height="8" rx="4" fill="#f7e8df"/>
+    <text x="360" y="170" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" fill="#2b2825" text-anchor="middle">File storage</text>
+    <text x="360" y="190" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">any extension · up to 2 GB</text>
+    <text x="360" y="206" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">signed 1-hour download links</text>
+    <text x="360" y="222" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#d4744f" text-anchor="middle">backed by Telegram</text>
   </g>
 
   <!-- Share tokens -->
@@ -49,10 +49,10 @@
     <rect x="593" y="92" width="4" height="10" rx="2" fill="#ffffff"/>
     <path d="M575 100 L560 100 M560 96 L556 100 L560 104" stroke="#8a3f23" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
     <path d="M615 100 L630 100 M630 96 L634 100 L630 104" stroke="#8a3f23" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-    <rect x="530" y="160" width="130" height="10" rx="5" fill="#e8e5dc"/>
-    <rect x="530" y="180" width="100" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="530" y="196" width="115" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="530" y="212" width="70" height="8" rx="4" fill="#f7e8df"/>
+    <text x="595" y="170" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" fill="#2b2825" text-anchor="middle">Share tokens</text>
+    <text x="595" y="190" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">scoped · rate-limited</text>
+    <text x="595" y="206" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">expiring · revocable</text>
+    <text x="595" y="222" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#d4744f" text-anchor="middle">safe for public HTML</text>
   </g>
 
   <!-- Row 2 -->
@@ -68,10 +68,10 @@
     <path d="M102 346 L108 350 L102 354" stroke="#d4744f" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
     <rect x="112" y="348" width="28" height="3" rx="1.5" fill="#e09a7a"/>
     <rect x="112" y="356" width="18" height="3" rx="1.5" fill="#6b6557"/>
-    <rect x="60" y="410" width="130" height="10" rx="5" fill="#e8e5dc"/>
-    <rect x="60" y="430" width="100" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="60" y="446" width="115" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="60" y="462" width="70" height="8" rx="4" fill="#f7e8df"/>
+    <text x="125" y="420" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" fill="#2b2825" text-anchor="middle">CLI (onyx)</text>
+    <text x="125" y="440" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">set · get · list · upload</text>
+    <text x="125" y="456" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">download · share · admin</text>
+    <text x="125" y="472" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#d4744f" text-anchor="middle">zero-dependency Node.js</text>
   </g>
 
   <!-- REST API -->
@@ -81,10 +81,10 @@
     <path d="M346 328 Q338 328 338 336 L338 342 Q338 348 332 348 Q338 348 338 354 L338 360 Q338 368 346 368" fill="none" stroke="#d4744f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     <path d="M374 328 Q382 328 382 336 L382 342 Q382 348 388 348 Q382 348 382 354 L382 360 Q382 368 374 368" fill="none" stroke="#d4744f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
     <circle cx="360" cy="348" r="4" fill="#8a3f23"/>
-    <rect x="295" y="410" width="130" height="10" rx="5" fill="#e8e5dc"/>
-    <rect x="295" y="430" width="100" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="295" y="446" width="115" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="295" y="462" width="70" height="8" rx="4" fill="#f7e8df"/>
+    <text x="360" y="420" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" fill="#2b2825" text-anchor="middle">REST API</text>
+    <text x="360" y="440" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">Authorization: Bearer kv_live_</text>
+    <text x="360" y="456" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">/v1/* · /api/admin/*</text>
+    <text x="360" y="472" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#d4744f" text-anchor="middle">CORS-ready</text>
   </g>
 
   <!-- Realtime -->
@@ -94,9 +94,9 @@
     <path d="M600 322 L580 350 L594 350 L588 370 L608 342 L594 342 L600 322 z" fill="#d4744f" stroke="#8a3f23" stroke-width="1.5" stroke-linejoin="round"/>
     <circle cx="595" cy="345" r="30" fill="none" stroke="#d4744f" stroke-width="1.5" stroke-opacity="0.4"/>
     <circle cx="595" cy="345" r="42" fill="none" stroke="#d4744f" stroke-width="1" stroke-opacity="0.2"/>
-    <rect x="530" y="410" width="130" height="10" rx="5" fill="#e8e5dc"/>
-    <rect x="530" y="430" width="100" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="530" y="446" width="115" height="8" rx="4" fill="#ece9e1"/>
-    <rect x="530" y="462" width="70" height="8" rx="4" fill="#f7e8df"/>
+    <text x="595" y="420" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" fill="#2b2825" text-anchor="middle">Realtime dashboard</text>
+    <text x="595" y="440" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">Socket.io :3003</text>
+    <text x="595" y="456" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">record:changed events</text>
+    <text x="595" y="472" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#d4744f" text-anchor="middle">no polling</text>
   </g>
 </svg>

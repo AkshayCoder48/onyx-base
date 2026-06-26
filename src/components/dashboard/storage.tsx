@@ -133,8 +133,11 @@ export function CloudStorageView() {
   const [label, setLabel] = useState('')
   const [isPublic, setIsPublic] = useState(true)
   const [dragOver, setDragOver] = useState(false)
-  const [copiedId, setCopiedId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<FileView | null>(null)
+  // Which file is currently fetching a Telegram URL for the quick-copy button.
+  const [copyingId, setCopyingId] = useState<string | null>(null)
+  // Which file's Telegram URL was just copied (shows a green check for 1.5s).
+  const [copiedId, setCopiedId] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // ─── On-demand link dialog state ──────────────────────────────────────────
@@ -316,14 +319,28 @@ export function CloudStorageView() {
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  const copyPermanentLink = async (file: FileView) => {
+  /**
+   * Quick-copy button on each file row: fetches the Telegram DIRECT URL
+   * (api.telegram.org/file/bot…/…) from /api/files/[id]/link and copies it to
+   * the clipboard. This is NOT the proxy URL — it's the real Telegram cloud
+   * link, valid ~1 hour, fetched on-demand only when the user taps the button.
+   */
+  const copyTelegramLink = async (file: FileView) => {
+    if (copyingId) return
+    setCopyingId(file.id)
     try {
-      await navigator.clipboard.writeText(file.downloadUrl)
+      const res = await api<{ url: string; expiresAt: number }>(
+        `/api/files/${file.id}/link`,
+        { method: 'POST' },
+      )
+      await navigator.clipboard.writeText(res.url)
       setCopiedId(file.id)
-      toast.success('Permanent public link copied')
+      toast.success('Telegram link copied (valid ~1 hour)')
       setTimeout(() => setCopiedId(null), 1500)
-    } catch {
-      toast.error('Could not copy to clipboard')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not fetch Telegram link')
+    } finally {
+      setCopyingId(null)
     }
   }
 
@@ -456,19 +473,24 @@ export function CloudStorageView() {
                   </div>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">
-                  {/* Copy permanent link — only meaningful for public files (private
-                      files have no tokenless permanent URL). */}
-                  {f.isPublic && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => copyPermanentLink(f)}
-                      className="h-8 px-2"
-                      title="Copy permanent public link (never expires)"
-                    >
-                      {copiedId === f.id ? <Check className="size-3.5 text-green-600" /> : <Link2 className="size-3.5" />}
-                    </Button>
-                  )}
+                  {/* Copy Telegram link — fetches the raw Telegram cloud URL
+                      on tap and copies it to the clipboard. NOT a proxy link. */}
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => copyTelegramLink(f)}
+                    disabled={!!copyingId}
+                    className="h-8 px-2"
+                    title="Fetch & copy Telegram download link (valid ~1 hour)"
+                  >
+                    {copyingId === f.id ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : copiedId === f.id ? (
+                      <Check className="size-3.5 text-green-600" />
+                    ) : (
+                      <Link2 className="size-3.5" />
+                    )}
+                  </Button>
                   {/* Get link — the primary download action. Mints a fresh,
                       1-hour signed URL from Telegram on tap (no auto-refresh). */}
                   <Button

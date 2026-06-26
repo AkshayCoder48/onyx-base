@@ -20,5 +20,6 @@ export async function GET(req: NextRequest) {
     name: dbUser?.name ?? null,
     plan: dbUser?.plan ?? 'unlimited',
     apiKeyName: user.apiKeyName,
+    isAdmin: user.isAdmin,
   })
 }

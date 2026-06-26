@@ -51,6 +51,7 @@ export async function POST(req: NextRequest) {
     name: dbUser?.name ?? null,
     plan: dbUser?.plan ?? 'unlimited',
     apiKeyName: user.apiKeyName,
+    isAdmin: user.isAdmin,
     createdAt: dbUser?.createdAt,
     counts: {
       records: countRecords(user.dbUserId),

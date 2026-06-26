@@ -4,20 +4,31 @@ import { useEffect, useState } from 'react'
 import { useOnyxBase } from '@/lib/store'
 import { api } from '@/lib/api'
 import { LoginScreen } from '@/components/login-screen'
-import { DashboardShell } from '@/components/dashboard/shell'
 import { AdminDashboard } from '@/components/admin/admin-dashboard'
-import { Loader2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { ShieldAlert, ArrowLeft, Loader2 } from 'lucide-react'
+import Link from 'next/link'
 
-/** Decides between the login screen and the dashboard. */
-export function AuthGate() {
+/**
+ * /admin route — direct URL access to the admin dashboard.
+ *
+ * Flow:
+ *   - No session → LoginScreen (with a hint that an admin key is required)
+ *   - Session but isAdmin=false → UnauthorizedScreen
+ *   - Session + isAdmin=true → AdminDashboard
+ *
+ * Mirrors AuthGate's bootstrap (re-validates the persisted apiKey via /whoami
+ * so we pick up the latest isAdmin flag).
+ */
+export default function AdminPage() {
   const apiKey = useOnyxBase((s) => s.apiKey)
   const user = useOnyxBase((s) => s.user)
-  const useAdminMode = useOnyxBase((s) => s.useAdminMode)
   const setSession = useOnyxBase((s) => s.setSession)
   const clearSession = useOnyxBase((s) => s.clearSession)
+  const setAdminMode = useOnyxBase((s) => s.setAdminMode)
   const [bootstrapping, setBootstrapping] = useState(true)
 
-  // On first load, if we have a persisted apiKey, re-validate it via /whoami.
   useEffect(() => {
     let cancelled = false
     async function bootstrap() {
@@ -36,7 +47,6 @@ export function AuthGate() {
         if (cancelled) return
         const isAdmin = !!res.isAdmin
         if (user) {
-          // refresh identity fields but keep counts
           setSession(apiKey, {
             ...user,
             userId: res.userId,
@@ -56,6 +66,8 @@ export function AuthGate() {
             isAdmin,
           })
         }
+        // Force admin mode on when navigating directly to /admin.
+        if (isAdmin) setAdminMode(true)
       } catch {
         if (!cancelled) clearSession()
       } finally {
@@ -79,11 +91,31 @@ export function AuthGate() {
 
   if (!apiKey || !user) return <LoginScreen />
 
-  // Admins can toggle between the admin dashboard and the regular dashboard.
-  // Regular users always see the regular dashboard.
-  if (user.isAdmin && useAdminMode) {
-    return <AdminDashboard />
+  if (!user.isAdmin) {
+    return <UnauthorizedScreen />
   }
 
-  return <DashboardShell />
+  return <AdminDashboard />
+}
+
+function UnauthorizedScreen() {
+  return (
+    <div className="min-h-screen flex items-center justify-center p-4 bg-background">
+      <Card className="max-w-md w-full p-8 text-center bg-card/40 border-border/60">
+        <div className="size-14 rounded-xl bg-red-500/10 border border-red-500/20 grid place-items-center mx-auto mb-4">
+          <ShieldAlert className="size-7 text-red-600" />
+        </div>
+        <h1 className="text-xl font-semibold mb-2">Unauthorized</h1>
+        <p className="text-sm text-muted-foreground mb-6">
+          An <code className="font-mono text-foreground/80">onyxbase_…</code> admin key is required to
+          access this page. Your current session is a regular developer account.
+        </p>
+        <Link href="/">
+          <Button variant="outline" className="w-full">
+            <ArrowLeft className="size-4" /> Back to dashboard
+          </Button>
+        </Link>
+      </Card>
+    </div>
+  )
 }

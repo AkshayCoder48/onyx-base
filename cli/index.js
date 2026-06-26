@@ -9,6 +9,8 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import crypto from 'node:crypto'
+import readline from 'node:readline/promises'
+import { stdin as processStdin, stdout as processStdout } from 'node:process'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ANSI color helpers — kept tiny so the file stays dependency-free.
@@ -709,11 +711,728 @@ const cmd = {
         (data.telegram.bot ? `  (bot: ${data.telegram.bot})` : ''))
     }
   },
+
+  // ─── Collections ──────────────────────────────────────────────────────────
+  //   onyx collections                    → list (name, count, created)
+  //   onyx collections create <name>      → POST /v1/collections
+  //   onyx collections delete <name>      → DELETE /v1/collections/<name>
+  async collections(args) {
+    const { positional } = parseArgs(args)
+    const cfg = await requireAuth()
+    if (!cfg) return
+    const server = ensureServer(cfg)
+    const sub = positional[0]
+
+    // Default + explicit `list` → list all collections.
+    if (!sub || sub === 'list') {
+      let data
+      try {
+        data = await request('GET', server, '/v1/collections', { apiKey: cfg.apiKey })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      const cols = data?.collections ?? []
+      if (cols.length === 0) {
+        console.log(c('dim', '  No collections yet. Run `onyx collections create <name>` to add one.'))
+        return
+      }
+      const nameW = Math.max(4, ...cols.map((x) => (x.name || '').length))
+      console.log(`  ${'NAME'.padEnd(nameW)}  COUNT  CREATED`)
+      for (const x of cols) {
+        console.log(`  ${c('cyan', (x.name || '').padEnd(nameW))}  ${String(x.records ?? 0).padStart(5)}  ${c('dim', timeAgo(x.createdAt))}`)
+      }
+      process.stderr.write(dimErr(`# ${data?.count ?? cols.length} collections\n`))
+      return
+    }
+
+    if (sub === 'create') {
+      const name = positional[1]
+      if (!name) {
+        console.error(c('red', '✗ Usage: onyx collections create <name>'))
+        process.exit(1)
+      }
+      try {
+        await request('POST', server, '/v1/collections', {
+          body: { name },
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      console.log(c('green', `✓ Created collection ${name}`))
+      return
+    }
+
+    if (sub === 'delete') {
+      const name = positional[1]
+      if (!name) {
+        console.error(c('red', '✗ Usage: onyx collections delete <name>'))
+        process.exit(1)
+      }
+      let data
+      try {
+        data = await request('DELETE', server, `/v1/collections/${encodeURIComponent(name)}`, {
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        if (err.status === 400 || err.status === 404) {
+          console.error(c('red', `✗ ${err.message}`))
+          process.exit(1)
+        }
+        return failNetwork(err, server)
+      }
+      const removed = data?.removed ? c('dim', ` (${data.removed} records removed)`) : ''
+      console.log(c('green', `✓ Deleted collection ${name}`) + removed)
+      return
+    }
+
+    console.error(c('red', `✗ Unknown subcommand: onyx collections ${sub}`))
+    console.error(c('dim', `  Usage: onyx collections [list|create <name>|delete <name>]`))
+    process.exit(1)
+  },
+
+  // ─── Stats ─────────────────────────────────────────────────────────────────
+  //   onyx stats → GET /v1/stats → print each stat with colored label
+  async stats() {
+    const cfg = await requireAuth()
+    if (!cfg) return
+    const server = ensureServer(cfg)
+    let data
+    try {
+      data = await request('GET', server, '/v1/stats', { apiKey: cfg.apiKey })
+    } catch (err) {
+      return failNetwork(err, server)
+    }
+    const s = data?.stats || {}
+    console.log(c('bold', '  Account statistics'))
+    console.log(`  ${c('cyan', 'User'.padEnd(16))} ${data?.user ?? ''}`)
+    const rows = [
+      ['records', s.records ?? 0],
+      ['collections', s.collections ?? 0],
+      ['apiKeys', s.apiKeys ?? 0],
+      ['logs', s.logs ?? 0],
+      ['files', s.files ?? 0],
+      ['storageBytes', formatBytes(s.storageBytes ?? 0)],
+      ['fileBytes', formatBytes(s.fileBytes ?? 0)],
+    ]
+    for (const [k, v] of rows) {
+      console.log(`  ${c('cyan', k.padEnd(16))} ${v}`)
+    }
+    const byAction = s.activityByAction || {}
+    const keys = Object.keys(byAction)
+    if (keys.length) {
+      console.log()
+      console.log(c('dim', '  Activity (last 7d, by action):'))
+      for (const k of keys.sort((a, b) => byAction[b] - byAction[a])) {
+        console.log(`  ${c('yellow', k.padEnd(20))} ${byAction[k]}`)
+      }
+    }
+  },
+
+  // ─── Logs ──────────────────────────────────────────────────────────────────
+  //   onyx logs [--limit N] [--action filter] → GET /v1/logs
+  async logs(args) {
+    const { flags } = parseArgs(args)
+    const cfg = await requireAuth()
+    if (!cfg) return
+    const server = ensureServer(cfg)
+    const limitN = Number(flags.limit)
+    const limit = Number.isFinite(limitN) && limitN > 0 ? Math.floor(limitN) : 20
+    const actionFilter = typeof flags.action === 'string' ? flags.action : null
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (actionFilter) params.set('action', actionFilter)
+
+    let data
+    try {
+      data = await request('GET', server, `/v1/logs?${params}`, { apiKey: cfg.apiKey })
+    } catch (err) {
+      return failNetwork(err, server)
+    }
+    const logs = data?.logs ?? []
+    if (logs.length === 0) {
+      console.log(c('dim', '  No log entries yet.'))
+      return
+    }
+    console.log(
+      `  ${'TIME'.padEnd(11)}  ${'ACTION'.padEnd(18)}  ${'KEY'.padEnd(18)}  ${'SOURCE'.padEnd(9)}  DETAIL`,
+    )
+    for (const l of logs) {
+      const t = timeAgo(l.createdAt).padEnd(11)
+      const a = (l.action ?? '').padEnd(18)
+      const k = (l.key ?? '-').padEnd(18)
+      const src = (l.source ?? '').padEnd(9)
+      console.log(`  ${c('dim', t)}  ${c('yellow', a)}  ${c('cyan', k)}  ${c('gray', src)}  ${l.detail ?? ''}`)
+    }
+    const suffix = actionFilter ? ` (filter: ${actionFilter})` : ''
+    process.stderr.write(dimErr(`# ${data?.count ?? logs.length} entries${suffix}\n`))
+  },
+
+  // ─── File link / revoke / delete ──────────────────────────────────────────
+  //
+  //   onyx file-link <fileId> [--force]      → POST /v1/files/<id>/link
+  //   onyx file-revoke <fileId>              → POST /v1/files/<id>/revoke
+  //   onyx file-delete <fileId> [--yes]      → DELETE /v1/files/<id>
+  'file-link': async function fileLink(args) {
+    const { positional, flags } = parseArgs(args)
+    const cfg = await requireAuth()
+    if (!cfg) return
+    const fileId = positional[0]
+    if (!fileId) {
+      console.error(c('red', '✗ Usage: onyx file-link <fileId> [--force]'))
+      process.exit(1)
+    }
+    const server = ensureServer(cfg)
+    const qs = flags.force === true ? '?force=1' : ''
+    let data
+    try {
+      data = await request('POST', server, `/v1/files/${encodeURIComponent(fileId)}/link${qs}`, {
+        apiKey: cfg.apiKey,
+      })
+    } catch (err) {
+      if (err.status === 404) {
+        console.error(c('red', `✗ File not found: ${fileId}`))
+        process.exit(1)
+      }
+      return failNetwork(err, server)
+    }
+    console.log(c('green', `✓ Link minted for ${data?.file?.fileName ?? fileId}`))
+    console.log(`  ${c('dim', 'url:')}     ${data?.url ?? '(none)'}`)
+    if (data?.proxyUrl) console.log(`  ${c('dim', 'proxy:')}   ${data.proxyUrl}`)
+    const mins = data?.expiresInSec ? Math.max(1, Math.ceil(data.expiresInSec / 60)) : '?'
+    console.log(`  ${c('dim', 'expires:')} Valid for ${mins} min`)
+    if (data?.file) console.log(`  ${c('dim', 'size:')}    ${formatBytes(data.file.size ?? 0)}`)
+  },
+
+  'file-revoke': async function fileRevoke(args) {
+    const { positional } = parseArgs(args)
+    const cfg = await requireAuth()
+    if (!cfg) return
+    const fileId = positional[0]
+    if (!fileId) {
+      console.error(c('red', '✗ Usage: onyx file-revoke <fileId>'))
+      process.exit(1)
+    }
+    const server = ensureServer(cfg)
+    let data
+    try {
+      data = await request('POST', server, `/v1/files/${encodeURIComponent(fileId)}/revoke`, {
+        apiKey: cfg.apiKey,
+      })
+    } catch (err) {
+      if (err.status === 404) {
+        console.error(c('red', `✗ File not found: ${fileId}`))
+        process.exit(1)
+      }
+      return failNetwork(err, server)
+    }
+    console.log(c('green', `✓ Revoked cached link for ${fileId}`))
+    if (data?.note) console.log(c('dim', `  ${data.note}`))
+  },
+
+  'file-delete': async function fileDelete(args) {
+    const { positional, flags } = parseArgs(args)
+    const cfg = await requireAuth()
+    if (!cfg) return
+    const fileId = positional[0]
+    if (!fileId) {
+      console.error(c('red', '✗ Usage: onyx file-delete <fileId> [--yes]'))
+      process.exit(1)
+    }
+    const server = ensureServer(cfg)
+    if (flags.yes !== true) {
+      const answer = await confirm(`Permanently delete file ${fileId}? (y/N) `)
+      if (answer !== 'y' && answer !== 'yes') {
+        console.log(c('dim', '  Aborted.'))
+        return
+      }
+    }
+    try {
+      await request('DELETE', server, `/v1/files/${encodeURIComponent(fileId)}`, {
+        apiKey: cfg.apiKey,
+      })
+    } catch (err) {
+      if (err.status === 404) {
+        console.error(c('red', `✗ File not found: ${fileId}`))
+        process.exit(1)
+      }
+      return failNetwork(err, server)
+    }
+    console.log(c('green', `✓ Deleted file ${fileId}`))
+  },
+
+  // ─── Share tokens ──────────────────────────────────────────────────────────
+  //   onyx share                                    → list
+  //   onyx share list                               → GET /api/dashboard/share-tokens
+  //   onyx share create <collection> <key>          → POST
+  //   onyx share revoke <id>                        → DELETE
+  async share(args) {
+    const { positional, flags } = parseArgs(args)
+    const cfg = await requireAuth()
+    if (!cfg) return
+    const server = ensureServer(cfg)
+    const sub = positional[0]
+
+    if (!sub || sub === 'list') {
+      let data
+      try {
+        data = await request('GET', server, '/api/dashboard/share-tokens', { apiKey: cfg.apiKey })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      const tokens = data?.shareTokens ?? []
+      if (tokens.length === 0) {
+        console.log(c('dim', '  No share tokens yet. Run `onyx share create <collection> <key>` to add one.'))
+        return
+      }
+      console.log(
+        `  ${'COLLECTION'.padEnd(14)}  ${'KEY'.padEnd(20)}  ${'MODE'.padEnd(11)}  ${'LABEL'.padEnd(20)}  TOKEN`,
+      )
+      for (const t of tokens) {
+        console.log(
+          `  ${c('cyan', (t.collection ?? '').padEnd(14))}  ` +
+          `${c('yellow', (t.key ?? '').padEnd(20))}  ` +
+          `${(t.mode ?? '').padEnd(11)}  ` +
+          `${(t.label ?? '-').padEnd(20)}  ` +
+          `${c('gray', t.token ?? '')}`,
+        )
+      }
+      process.stderr.write(dimErr(`# ${tokens.length} share token(s)\n`))
+      return
+    }
+
+    if (sub === 'create') {
+      const collection = positional[1]
+      const key = positional[2]
+      if (!collection || !key) {
+        console.error(c('red', '✗ Usage: onyx share create <collection> <key> [--mode read|write|readwrite] [--label "note"]'))
+        process.exit(1)
+      }
+      const body = { collection, key }
+      if (typeof flags.mode === 'string') body.mode = flags.mode
+      if (typeof flags.label === 'string') body.label = flags.label
+      let data
+      try {
+        data = await request('POST', server, '/api/dashboard/share-tokens', {
+          body,
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      const t = data?.shareToken
+      console.log(c('green', '✓ Created share token'))
+      console.log(`  ${c('dim', 'token:')}      ${t?.token ?? ''}`)
+      console.log(`  ${c('dim', 'collection:')} ${t?.collection ?? collection}`)
+      console.log(`  ${c('dim', 'key:')}        ${t?.key ?? key}`)
+      console.log(`  ${c('dim', 'mode:')}       ${t?.mode ?? 'read'}`)
+      if (t?.label) console.log(`  ${c('dim', 'label:')}      ${t.label}`)
+      return
+    }
+
+    if (sub === 'revoke') {
+      const id = positional[1]
+      if (!id) {
+        console.error(c('red', '✗ Usage: onyx share revoke <id>'))
+        process.exit(1)
+      }
+      try {
+        await request('DELETE', server, `/api/dashboard/share-tokens/${encodeURIComponent(id)}`, {
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        if (err.status === 404) {
+          console.error(c('red', `✗ Share token not found: ${id}`))
+          process.exit(1)
+        }
+        return failNetwork(err, server)
+      }
+      console.log(c('green', `✓ Revoked share token ${id}`))
+      return
+    }
+
+    console.error(c('red', `✗ Unknown subcommand: onyx share ${sub}`))
+    console.error(c('dim', `  Usage: onyx share [list|create <collection> <key>|revoke <id>]`))
+    process.exit(1)
+  },
+
+  // ─── Telegram config ───────────────────────────────────────────────────────
+  //   onyx telegram-config              → view
+  //   onyx telegram-config set          → set (--chat-id, --bot-token, --label)
+  //   onyx telegram-config clear        → clear custom config
+  //
+  // NOTE: the server route implements PUT (not POST) for set — we use PUT so
+  // the command actually works against the live API.
+  'telegram-config': async function telegramConfig(args) {
+    const { positional, flags } = parseArgs(args)
+    const cfg = await requireAuth()
+    if (!cfg) return
+    const server = ensureServer(cfg)
+    const sub = positional[0]
+
+    if (!sub || sub === 'view') {
+      let data
+      try {
+        data = await request('GET', server, '/api/dashboard/telegram-config', { apiKey: cfg.apiKey })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      console.log(`  ${c('cyan', 'Env Chat ID'.padEnd(22))}        ${data?.envChatId || '(none)'}`)
+      console.log(`  ${c('cyan', 'Effective Chat ID'.padEnd(22))}  ${data?.effectiveChatId || '(none)'}`)
+      console.log(`  ${c('cyan', 'Env Bot Configured'.padEnd(22))} ${data?.envBotConfigured ? c('green', 'yes') : c('red', 'no')}`)
+      console.log(`  ${c('cyan', 'Custom Bot Token'.padEnd(22))}   ${data?.hasCustomBotToken ? c('green', 'yes') : c('dim', 'no')}`)
+      if (data?.customConfig) {
+        console.log(`  ${c('cyan', 'Custom Chat ID'.padEnd(22))}   ${data.customConfig.chatId}`)
+        if (data.customConfig.label) console.log(`  ${c('cyan', 'Custom Label'.padEnd(22))}    ${data.customConfig.label}`)
+        console.log(`  ${c('cyan', 'Updated'.padEnd(22))}          ${timeAgo(data.customConfig.updatedAt)}`)
+      }
+      return
+    }
+
+    if (sub === 'set') {
+      const chatId = typeof flags['chat-id'] === 'string' ? flags['chat-id'].trim() : null
+      const botToken = typeof flags['bot-token'] === 'string' ? flags['bot-token'].trim() : undefined
+      const label = typeof flags.label === 'string' ? flags.label.trim() : null
+      if (!chatId) {
+        console.error(c('red', '✗ Usage: onyx telegram-config set --chat-id <id> [--bot-token <token>] [--label "note"]'))
+        process.exit(1)
+      }
+      const body = { chatId }
+      if (botToken !== undefined) body.botToken = botToken
+      if (label) body.label = label
+      let data
+      try {
+        data = await request('PUT', server, '/api/dashboard/telegram-config', {
+          body,
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      console.log(c('green', '✓ Telegram config saved'))
+      console.log(`  ${c('dim', 'chat id:')}  ${data?.customConfig?.chatId ?? chatId}`)
+      if (data?.customConfig?.label) console.log(`  ${c('dim', 'label:')}    ${data.customConfig.label}`)
+      if (data?.telegram?.ok) console.log(`  ${c('dim', 'ping:')}     ${c('green', 'ok')}`)
+      return
+    }
+
+    if (sub === 'clear') {
+      try {
+        await request('DELETE', server, '/api/dashboard/telegram-config', {
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      console.log(c('green', '✓ Telegram config cleared (reverted to env defaults)'))
+      return
+    }
+
+    console.error(c('red', `✗ Unknown subcommand: onyx telegram-config ${sub}`))
+    console.error(c('dim', `  Usage: onyx telegram-config [view|set|clear]`))
+    process.exit(1)
+  },
+
+  // ─── API keys ──────────────────────────────────────────────────────────────
+  //   onyx api-keys                       → list
+  //   onyx api-keys create <name>         → POST (prints FULL key)
+  //   onyx api-keys revoke <id>           → DELETE
+  'api-keys': async function apiKeys(args) {
+    const { positional } = parseArgs(args)
+    const cfg = await requireAuth()
+    if (!cfg) return
+    const server = ensureServer(cfg)
+    const sub = positional[0]
+
+    if (!sub || sub === 'list') {
+      let data
+      try {
+        data = await request('GET', server, '/api/dashboard/api-keys', { apiKey: cfg.apiKey })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      const keys = data?.apiKeys ?? []
+      if (keys.length === 0) {
+        console.log(c('dim', '  No API keys yet. Run `onyx api-keys create <name>` to add one.'))
+        return
+      }
+      console.log(
+        `  ${'NAME'.padEnd(20)}  ${'KEY'.padEnd(28)}  ${'CREATED'.padEnd(11)}  ${'LAST USED'.padEnd(11)}  STATUS`,
+      )
+      for (const k of keys) {
+        const status = k.revoked ? c('red', 'revoked') : c('green', 'active')
+        const last = k.lastUsedAt ? timeAgo(k.lastUsedAt) : '-'
+        console.log(
+          `  ${c('cyan', (k.name ?? '').padEnd(20))}  ` +
+          `${c('yellow', maskApiKey(k.key).padEnd(28))}  ` +
+          `${c('dim', timeAgo(k.createdAt).padEnd(11))}  ` +
+          `${c('dim', last.padEnd(11))}  ${status}`,
+        )
+      }
+      process.stderr.write(dimErr(`# ${keys.length} API key(s)\n`))
+      return
+    }
+
+    if (sub === 'create') {
+      const name = positional[1]
+      if (!name) {
+        console.error(c('red', '✗ Usage: onyx api-keys create <name>'))
+        process.exit(1)
+      }
+      let data
+      try {
+        data = await request('POST', server, '/api/dashboard/api-keys', {
+          body: { name },
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      const k = data?.apiKey
+      console.log(c('green', '✓ Created API key'))
+      console.log(`  ${c('dim', 'name:')}    ${k?.name ?? name}`)
+      console.log(`  ${c('dim', 'id:')}      ${k?.id ?? ''}`)
+      console.log(`  ${c('yellow', 'key:')}     ${k?.key ?? ''}`)
+      console.log(c('dim', '  (Copy this key now — it will not be shown in full again.)'))
+      return
+    }
+
+    if (sub === 'revoke') {
+      const id = positional[1]
+      if (!id) {
+        console.error(c('red', '✗ Usage: onyx api-keys revoke <id>'))
+        process.exit(1)
+      }
+      try {
+        await request('DELETE', server, `/api/dashboard/api-keys/${encodeURIComponent(id)}`, {
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        if (err.status === 404) {
+          console.error(c('red', `✗ API key not found: ${id}`))
+          process.exit(1)
+        }
+        return failNetwork(err, server)
+      }
+      console.log(c('green', `✓ Revoked API key ${id}`))
+      return
+    }
+
+    console.error(c('red', `✗ Unknown subcommand: onyx api-keys ${sub}`))
+    console.error(c('dim', `  Usage: onyx api-keys [list|create <name>|revoke <id>]`))
+    process.exit(1)
+  },
+
+  // ─── Admin (requires an onyxbase_ key) ─────────────────────────────────────
+  //   onyx admin users                       → GET /api/admin/users
+  //   onyx admin user <id>                   → GET /api/admin/users/<id>
+  //   onyx admin files                       → GET /api/admin/files
+  //   onyx admin promote <kv_live_key>       → POST /api/admin/promote
+  //   onyx admin admins                      → GET /api/admin/admins
+  async admin(args) {
+    const { positional } = parseArgs(args)
+    const cfg = await requireAuth()
+    if (!cfg) return
+    const server = ensureServer(cfg)
+    const sub = positional[0]
+
+    // All admin endpoints require an onyxbase_ key.
+    if (!cfg.apiKey || !cfg.apiKey.startsWith('onyxbase_')) {
+      console.error(c('red', '✗ Admin commands require an onyxbase_ key.'))
+      console.error(c('dim', `  Run \`onyx login --key onyxbase_…\` to connect an admin key.`))
+      process.exit(1)
+    }
+
+    if (sub === 'users') {
+      let data
+      try {
+        data = await request('GET', server, '/api/admin/users', { apiKey: cfg.apiKey })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      const users = data?.users ?? []
+      if (users.length === 0) {
+        console.log(c('dim', '  No users yet.'))
+        return
+      }
+      console.log(
+        `  ${'USER ID'.padEnd(20)}  ${'NAME'.padEnd(18)}  ${'EMAIL'.padEnd(28)}  ${'PLAN'.padEnd(8)}  RECORDS  CREATED`,
+      )
+      for (const u of users) {
+        const rec = u.stats?.records ?? 0
+        console.log(
+          `  ${c('cyan', (u.userId ?? '').padEnd(20))}  ` +
+          `${(u.name ?? '-').padEnd(18)}  ` +
+          `${(u.email ?? '-').padEnd(28)}  ` +
+          `${(u.plan ?? '-').padEnd(8)}  ` +
+          `${String(rec).padStart(7)}  ` +
+          `${c('dim', timeAgo(u.createdAt))}`,
+        )
+      }
+      process.stderr.write(dimErr(`# ${users.length} user(s)\n`))
+      return
+    }
+
+    if (sub === 'user') {
+      const id = positional[1]
+      if (!id) {
+        console.error(c('red', '✗ Usage: onyx admin user <id>'))
+        process.exit(1)
+      }
+      let data
+      try {
+        data = await request('GET', server, `/api/admin/users/${encodeURIComponent(id)}`, {
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        if (err.status === 404) {
+          console.error(c('red', `✗ User not found: ${id}`))
+          process.exit(1)
+        }
+        return failNetwork(err, server)
+      }
+      const u = data?.user
+      console.log(c('bold', '  User details'))
+      console.log(`  ${c('cyan', 'User ID'.padEnd(12))} ${u?.userId ?? ''}`)
+      console.log(`  ${c('cyan', 'Name'.padEnd(12))}     ${u?.name ?? '-'}`)
+      console.log(`  ${c('cyan', 'Email'.padEnd(12))}    ${u?.email ?? '-'}`)
+      console.log(`  ${c('cyan', 'Plan'.padEnd(12))}     ${u?.plan ?? '-'}`)
+      console.log(`  ${c('cyan', 'Created'.padEnd(12))}  ${u?.createdAt ? timeAgo(u.createdAt) : '-'}`)
+      if (Array.isArray(data?.apiKeys) && data.apiKeys.length) {
+        console.log()
+        console.log(c('dim', `  API keys (${data.apiKeys.length}):`))
+        for (const k of data.apiKeys) {
+          const status = k.revoked ? c('red', 'revoked') : c('green', 'active')
+          console.log(`    ${c('yellow', k.keyPrefix ?? '')}  ${k.name ?? ''}  ${status}`)
+        }
+      }
+      if (Array.isArray(data?.collections) && data.collections.length) {
+        console.log()
+        console.log(c('dim', `  Collections (${data.collections.length}):`))
+        for (const col of data.collections) {
+          console.log(`    ${c('cyan', col.name ?? col.id ?? '')}  ${col.records ?? 0} records`)
+        }
+      }
+      if (Array.isArray(data?.files) && data.files.length) {
+        console.log()
+        console.log(c('dim', `  Files (${data.files.length}):`))
+        for (const f of data.files) {
+          console.log(`    ${c('cyan', f.fileName ?? f.fileId ?? '')}  ${formatBytes(f.size ?? 0)}`)
+        }
+      }
+      return
+    }
+
+    if (sub === 'files') {
+      let data
+      try {
+        data = await request('GET', server, '/api/admin/files', { apiKey: cfg.apiKey })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      const files = data?.files ?? []
+      if (files.length === 0) {
+        console.log(c('dim', '  No files yet.'))
+        return
+      }
+      console.log(
+        `  ${'FILE ID'.padEnd(20)}  ${'NAME'.padEnd(28)}  ${'SIZE'.padEnd(10)}  ${'OWNER'.padEnd(20)}  CREATED`,
+      )
+      let total = 0
+      for (const f of files) {
+        total += f.size ?? 0
+        const owner = f.owner?.userId ?? '-'
+        console.log(
+          `  ${c('cyan', (f.fileId ?? '').padEnd(20))}  ` +
+          `${(f.fileName ?? '-').padEnd(28)}  ` +
+          `${formatBytes(f.size ?? 0).padEnd(10)}  ` +
+          `${owner.padEnd(20)}  ` +
+          `${c('dim', timeAgo(f.createdAt))}`,
+        )
+      }
+      process.stderr.write(dimErr(`# ${files.length} file(s) · ${formatBytes(total)} total\n`))
+      return
+    }
+
+    if (sub === 'promote') {
+      const kvLiveKey = positional[1]
+      if (!kvLiveKey) {
+        console.error(c('red', '✗ Usage: onyx admin promote <kv_live_key>'))
+        process.exit(1)
+      }
+      let data
+      try {
+        data = await request('POST', server, '/api/admin/promote', {
+          body: { kvLiveKey },
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        if (err.status === 404) {
+          console.error(c('red', `✗ Invalid or revoked API key: ${kvLiveKey}`))
+          process.exit(1)
+        }
+        return failNetwork(err, server)
+      }
+      console.log(c('green', '✓ User promoted to admin'))
+      console.log(`  ${c('yellow', 'admin key:')}  ${data?.adminKey ?? ''}`)
+      if (data?.label) console.log(`  ${c('dim', 'label:')}     ${data.label}`)
+      console.log(c('dim', '  Share this onyxbase_ key with the promoted user.'))
+      return
+    }
+
+    if (sub === 'admins') {
+      let data
+      try {
+        data = await request('GET', server, '/api/admin/admins', { apiKey: cfg.apiKey })
+      } catch (err) {
+        return failNetwork(err, server)
+      }
+      const admins = data?.admins ?? []
+      if (admins.length === 0) {
+        console.log(c('dim', '  No admin keys yet.'))
+        return
+      }
+      console.log(
+        `  ${'ADMIN KEY'.padEnd(28)}  ${'LABEL'.padEnd(20)}  ${'CREATED'.padEnd(11)}  STATUS`,
+      )
+      for (const a of admins) {
+        let status
+        if (a.revoked) status = c('red', 'revoked')
+        else if (a.isBootstrap) status = c('yellow', 'bootstrap')
+        else status = c('green', 'active')
+        console.log(
+          `  ${c('yellow', maskApiKey(a.key).padEnd(28))}  ` +
+          `${(a.label ?? '-').padEnd(20)}  ` +
+          `${c('dim', timeAgo(a.createdAt).padEnd(11))}  ${status}`,
+        )
+      }
+      process.stderr.write(dimErr(`# ${admins.length} admin key(s)\n`))
+      return
+    }
+
+    console.error(c('red', `✗ Unknown subcommand: onyx admin ${sub}`))
+    console.error(c('dim', `  Usage: onyx admin [users|user <id>|files|promote <kv_live_key>|admins]`))
+    process.exit(1)
+  },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Prompt the user for a yes/no answer on stdin.
+ * Returns the trimmed, lower-cased answer (e.g. "y", "yes", "n", "").
+ * Returns '' immediately when stdin is not a TTY (so scripts/CI don't hang).
+ */
+async function confirm(prompt) {
+  if (!processStdin.isTTY) return ''
+  const rl = readline.createInterface({ input: processStdin, output: processStdout })
+  try {
+    return (await rl.question(prompt)).trim().toLowerCase()
+  } finally {
+    rl.close()
+  }
+}
 
 async function requireAuth() {
   const cfg = await readConfig()
@@ -767,31 +1486,48 @@ function printHelp() {
     ['get <key>', 'Read a value'],
     ['delete <key>', 'Remove a value'],
     ['list', 'List all keys'],
+    ['collections [create|delete <n>]', 'Manage collections'],
     ['export', 'Export the whole database as JSON'],
+    ['stats', 'Show account statistics'],
+    ['logs', 'Show recent audit log entries'],
     ['upload <path>', 'Upload a file (any type, up to 2 GB) → permanent link'],
     ['files', 'List stored files + their permanent links'],
     ['download <f_xxx|url>', 'Download a file by id or link'],
+    ['file-link <fileId> [--force]', 'Mint a fresh Telegram direct URL for a file'],
+    ['file-revoke <fileId>', 'Revoke a file\'s cached download link'],
+    ['file-delete <fileId> [--yes]', 'Permanently delete a file'],
+    ['share [list|create|revoke]', 'Manage public share tokens'],
+    ['api-keys [list|create|revoke]', 'Manage API keys'],
+    ['telegram-config [view|set|clear]', 'View / set / clear custom Telegram config'],
     ['whoami', 'Show current credentials'],
     ['health', 'Check service + Telegram status'],
+    ['admin [users|files|promote|admins]', 'Admin commands (requires onyxbase_ key)'],
     ['logout', 'Clear saved credentials'],
   ]
   for (const [name, desc] of rows) {
-    console.log(`  ${c('cyan', name.padEnd(28))}${desc}`)
+    console.log(`  ${c('cyan', name.padEnd(32))}${desc}`)
   }
   console.log()
   console.log(c('bold', 'FLAGS'))
-  console.log(`  ${c('gray', '--key <kv_live_…>')}      Connect an existing account by API key`)
-  console.log(`  ${c('gray', '--collection <name>')}   Target a non-default collection`)
-  console.log(`  ${c('gray', '--name <name>')}         Name your account on login`)
-  console.log(`  ${c('gray', '--email <email>')}       Attach an email to the account`)
-  console.log(`  ${c('gray', '--output <file>')}       Write export to a file`)
-  console.log(`  ${c('gray', '--verbose, -v')}         Show a richer table (list)`)
-  console.log(`  ${c('gray', '--new')}                 Force a new account on login`)
-  console.log(`  ${c('gray', '--label "note"')}        Label a file upload`)
-  console.log(`  ${c('gray', '--private')}             Make an uploaded file's link private`)
+  console.log(`  ${c('gray', '--key <kv_live_…>')}        Connect an existing account by API key`)
+  console.log(`  ${c('gray', '--collection <name>')}     Target a non-default collection`)
+  console.log(`  ${c('gray', '--name <name>')}           Name your account on login`)
+  console.log(`  ${c('gray', '--email <email>')}         Attach an email to the account`)
+  console.log(`  ${c('gray', '--output <file>')}         Write export to a file`)
+  console.log(`  ${c('gray', '--verbose, -v')}           Show a richer table (list)`)
+  console.log(`  ${c('gray', '--new')}                   Force a new account on login`)
+  console.log(`  ${c('gray', '--label "note"')}          Label a file upload / share token`)
+  console.log(`  ${c('gray', '--private')}               Make an uploaded file's link private`)
+  console.log(`  ${c('gray', '--force')}                 Bust the cache (file-link)`)
+  console.log(`  ${c('gray', '--yes')}                   Skip confirmation (file-delete)`)
+  console.log(`  ${c('gray', '--limit <N>')}             Max log entries (default 20)`)
+  console.log(`  ${c('gray', '--action <filter>')}       Filter logs by action`)
+  console.log(`  ${c('gray', '--mode read|write|rw')}    Share token mode`)
+  console.log(`  ${c('gray', '--chat-id <id>')}          Telegram chat id (telegram-config set)`)
+  console.log(`  ${c('gray', '--bot-token <token>')}     Telegram bot token (telegram-config set)`)
   console.log()
   console.log(c('bold', 'ENV'))
-  console.log(`  ${c('gray', 'ONYX_URL')}            Override the server URL (default ${DEFAULT_SERVER})`)
+  console.log(`  ${c('gray', 'ONYX_URL')}              Override the server URL (default ${DEFAULT_SERVER})`)
   console.log()
   console.log(c('dim', `  onyx v${VERSION}  ·  config: ~/.onyx/config.json`))
 }
@@ -804,6 +1540,9 @@ const ALIASES = {
   register: 'login',
   rm: 'delete',
   ls: 'list',
+  keys: 'api-keys',
+  col: 'collections',
+  tg: 'telegram-config',
 }
 
 async function main() {
