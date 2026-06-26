@@ -286,7 +286,7 @@ export function AdminDashboard() {
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-background">
+    <div className="h-dvh flex flex-col bg-background overflow-hidden">
       {/* ─── Header bar ─────────────────────────────────────────────── */}
       <header className="sticky top-0 z-40 border-b border-border/60 bg-background/95 backdrop-blur">
         <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-8">

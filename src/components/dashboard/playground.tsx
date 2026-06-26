@@ -18,7 +18,6 @@ import { useIsMobile } from '@/hooks/use-mobile'
 // Endpoint catalog — every Onyx Base API, grouped by category.
 // `authType` controls which Bearer token is injected:
 //   - 'session'  → the logged-in user's kv_live_* key
-//   - 'admin'    → the admin-key input (onyxbase_*)
 //   - 'none'     → no Authorization header (public endpoints)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -33,7 +32,7 @@ interface EndpointDef {
   body?: string
   pathParams?: { name: string; placeholder: string }
   queryParams?: { name: string; default?: string }
-  authType: 'session' | 'admin' | 'none'
+  authType: 'session' | 'none'
 }
 
 interface Category {
@@ -263,24 +262,9 @@ const CATEGORIES: Category[] = [
       { id: 'logs', method: 'GET', path: '/v1/logs', label: 'Logs', desc: 'Recent activity logs.', authType: 'session' },
     ],
   },
-  {
-    id: 'admin',
-    label: 'Admin',
-    endpoints: [
-      { id: 'admin-whoami', method: 'GET', path: '/api/admin/whoami', label: 'Admin whoami', desc: 'Verify an onyxbase_* admin key.', authType: 'admin' },
-      { id: 'admin-users', method: 'GET', path: '/api/admin/users', label: 'List users', desc: 'List all users (admin only).', authType: 'admin' },
-      { id: 'admin-files', method: 'GET', path: '/api/admin/files', label: 'List all files', desc: 'List files across all users (admin only).', authType: 'admin' },
-      {
-        id: 'admin-promote',
-        method: 'POST',
-        path: '/api/admin/promote',
-        label: 'Promote to admin',
-        desc: 'Convert a kv_live_* key into an onyxbase_* admin key.',
-        authType: 'admin',
-        body: '{\n  "apiKey": "kv_live_xxx"\n}',
-      },
-    ],
-  },
+  // Admin endpoints are intentionally excluded from the public playground.
+  // They are accessible only via the /admin dashboard (separate app) with
+  // the onyxbase_* bootstrap key.
 ]
 
 const METHOD_COLORS: Record<Method, string> = {
@@ -298,7 +282,6 @@ export function PlaygroundView() {
   const [pathParam, setPathParam] = useState('coins')
   const [queryParam, setQueryParam] = useState('default')
   const [body, setBody] = useState('{\n  "key": "coins",\n  "value": 500\n}')
-  const [adminKey, setAdminKey] = useState('')
   const [response, setResponse] = useState<string | null>(null)
   const [status, setStatus] = useState<number | null>(null)
   const [duration, setDuration] = useState<number | null>(null)
@@ -334,13 +317,13 @@ export function PlaygroundView() {
     return p
   }, [endpoint, pathParam, queryParam])
 
-  const tokenForRequest = endpoint.authType === 'admin' ? adminKey : endpoint.authType === 'session' ? apiKey : null
+  const tokenForRequest = endpoint.authType === 'session' ? apiKey : null
 
   const buildCurl = useCallback(() => {
     const path = buildPath()
     const curl: string[] = [`curl -X ${endpoint.method} \\`, `  '${path}' \\`]
     if (tokenForRequest) {
-      const masked = endpoint.authType === 'admin' ? maskKey(adminKey) || 'onyxbase_xxx' : maskKey(apiKey ?? '')
+      const masked = maskKey(apiKey ?? '')
       curl.push(`  -H 'Authorization: Bearer ${masked}' \\`)
     }
     if (endpoint.method === 'POST' && body.trim()) {
@@ -350,13 +333,9 @@ export function PlaygroundView() {
       curl[curl.length - 1] = curl[curl.length - 1].replace(/ \\$/, '')
     }
     return curl.join('\n')
-  }, [buildPath, endpoint, tokenForRequest, adminKey, apiKey, body])
+  }, [buildPath, endpoint, tokenForRequest, apiKey, body])
 
   const run = useCallback(async () => {
-    if (endpoint.authType === 'admin' && !adminKey) {
-      toast.error('Enter an admin key (onyxbase_*) above to test admin endpoints.')
-      return
-    }
     setLoading(true)
     setResponse(null)
     const path = buildPath()
@@ -384,7 +363,7 @@ export function PlaygroundView() {
     } finally {
       setLoading(false)
     }
-  }, [endpoint, adminKey, tokenForRequest, buildPath, body])
+  }, [endpoint, tokenForRequest, buildPath, body])
 
   const copyCurl = useCallback(async () => {
     await navigator.clipboard.writeText(buildCurl())
@@ -401,24 +380,8 @@ export function PlaygroundView() {
     <div>
       <PageHeader
         title="API Playground"
-        description="Try every Onyx Base API live. Auth is injected from your session — or paste an admin key for admin endpoints."
+        description="Try every Onyx Base API live. Auth is injected from your session key."
       />
-
-      {/* Admin key input (only shown when admin category is active) */}
-      {categoryId === 'admin' && (
-        <Card className="p-3 mb-4 bg-amber-500/5 border-amber-500/30">
-          <label className="text-xs font-medium uppercase tracking-wide text-amber-600 dark:text-amber-400 mb-1.5 block">
-            Admin key (onyxbase_*) — required for admin endpoints
-          </label>
-          <Input
-            value={adminKey}
-            onChange={(e) => setAdminKey(e.target.value)}
-            placeholder="onyxbase_xxxxxxxxxxxxxxxx"
-            className="font-mono text-sm h-9"
-            type="password"
-          />
-        </Card>
-      )}
 
       {/* Category tabs */}
       <Tabs value={categoryId} onValueChange={(v) => selectEndpoint(v, CATEGORIES.find((c) => c.id === v)!.endpoints[0].id)}>

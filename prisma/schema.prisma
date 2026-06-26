@@ -81,3 +81,52 @@ model Log {
   @@index([userId])
   @@index([createdAt])
 }
+
+// ─── Named, server-defined projections over a collection ────────────────────
+// A "view" stores { collection, projection (columns), filter (WHERE clause) }
+// and executing it returns the matching records for the owning user. The
+// `userId` is the dbUserId from the data-store (mirrors Record.userId).
+model View {
+  id          Int      @id @default(autoincrement())
+  userId      String
+  name        String
+  collection  String
+  projection  String   // comma-separated column list, "*" = all
+  filter      String?  // optional WHERE clause on key/value (best-effort)
+  createdAt   DateTime @default(now())
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+// ─── Server-side JS handlers (PL/pgSQL equivalent) ─────────────────────────
+// Functions store user-defined JS code as a string. When triggered they run
+// in a sandboxed `new Function('ctx', code)` context with access to a
+// restricted context object { record, db, user }.
+model Function {
+  id        Int      @id @default(autoincrement())
+  userId    String
+  name      String
+  code      String
+  trigger   String   @default("manual") // manual | set | delete | ...
+  createdAt DateTime @default(now())
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+// ─── Pre-computed aggregations (Materialized Views) ────────────────────────
+// Stores a SELECT query, runs it on create/refresh, and caches the JSON
+// result. Reading is O(1) — no query execution at read time.
+model MaterializedView {
+  id              Int      @id @default(autoincrement())
+  userId          String
+  name            String
+  query           String   // SQL (executed via the user-scoped SQL Editor engine)
+  result          String   // JSON-encoded cached result
+  lastRefreshedAt DateTime
+  createdAt       DateTime @default(now())
+
+  @@unique([userId, name])
+  @@index([userId])
+}

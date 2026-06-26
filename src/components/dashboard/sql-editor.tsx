@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useCallback } from 'react'
-import { Play, Loader2, Database, Trash2, Clock } from 'lucide-react'
+import { Play, Loader2, Database, Trash2, Clock, AlertTriangle, CheckCircle2 } from 'lucide-react'
 import { useApi } from '@/lib/api'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -21,41 +21,75 @@ import {
 interface SqlResult {
   rows: Record<string, unknown>[]
   count: number
+  affected?: number
   truncated: boolean
-  virtualTables: string[]
+  type?: 'select' | 'write' | 'ddl'
+  target?: string
+  message?: string
+  virtualTables?: string[]
 }
 
 /** Pre-built query templates — click to load into the editor. */
-const SNIPPETS: { label: string; sql: string; desc: string }[] = [
+const SNIPPETS: { label: string; sql: string; desc: string; kind: 'read' | 'write' }[] = [
   {
     label: 'Recent records',
     desc: 'Last 20 records by updatedAt',
     sql: 'SELECT key, value, valueType, updatedAt\nFROM records\nORDER BY updatedAt DESC\nLIMIT 20',
+    kind: 'read',
   },
   {
     label: 'Records by type',
     desc: 'Count records grouped by valueType',
     sql: 'SELECT valueType, COUNT(*) as count\nFROM records\nGROUP BY valueType\nORDER BY count DESC',
+    kind: 'read',
   },
   {
     label: 'Collections + counts',
     desc: 'How many records per collection',
     sql: 'SELECT c.name, COUNT(r.id) as records\nFROM collections c\nLEFT JOIN records r ON r.collectionId = c.id\nGROUP BY c.name\nORDER BY records DESC',
+    kind: 'read',
   },
   {
     label: 'Recent logs',
     desc: 'Last 30 activity log entries',
     sql: 'SELECT action, key, source, createdAt\nFROM logs\nORDER BY createdAt DESC\nLIMIT 30',
+    kind: 'read',
   },
   {
     label: 'API keys',
     desc: 'List your API keys (masked)',
     sql: 'SELECT name, key, revoked, lastUsedAt, createdAt\nFROM api_keys\nORDER BY createdAt DESC',
+    kind: 'read',
   },
   {
     label: 'My profile',
     desc: 'Your user record',
     sql: 'SELECT userId, name, email, plan, createdAt\nFROM users',
+    kind: 'read',
+  },
+  {
+    label: 'Insert a record',
+    desc: 'Add a new key-value pair',
+    sql: "INSERT INTO records (key, value, valueType)\nVALUES ('test_key', 'test_value', 'string')",
+    kind: 'write',
+  },
+  {
+    label: 'Update a record',
+    desc: 'Modify an existing value',
+    sql: "UPDATE records\nSET value = 'updated_value', updatedAt = CURRENT_TIMESTAMP\nWHERE key = 'test_key'",
+    kind: 'write',
+  },
+  {
+    label: 'Delete records',
+    desc: 'Remove records by condition',
+    sql: "DELETE FROM records\nWHERE key = 'test_key'",
+    kind: 'write',
+  },
+  {
+    label: 'Create custom table',
+    desc: 'Make your own usr_* table',
+    sql: 'CREATE TABLE usr_notes (\n  id INTEGER PRIMARY KEY AUTOINCREMENT,\n  title TEXT NOT NULL,\n  body TEXT,\n  created_at DATETIME DEFAULT CURRENT_TIMESTAMP\n)',
+    kind: 'write',
   },
 ]
 
@@ -83,6 +117,9 @@ export function SqlEditorView() {
   const [duration, setDuration] = useState<number | null>(null)
   const [history, setHistory] = useState<string[]>(() => loadHistory())
 
+  // Detect if the current query is a write (for the confirmation + button label)
+  const isWriteQuery = /^\s*(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)/i.test(sql)
+
   const run = useCallback(async () => {
     if (!sql.trim()) {
       toast.error('Enter a query first')
@@ -101,7 +138,13 @@ export function SqlEditorView() {
       setDuration(Math.round(performance.now() - start))
       saveHistory(sql.trim())
       setHistory(loadHistory())
-      toast.success(`${res.count} row${res.count === 1 ? '' : 's'} returned`)
+      if (res.type === 'write') {
+        toast.success(`${res.affected} row${res.affected === 1 ? '' : 's'} affected`)
+      } else if (res.type === 'ddl') {
+        toast.success(res.message || 'DDL executed')
+      } else {
+        toast.success(`${res.count} row${res.count === 1 ? '' : 's'} returned`)
+      }
     } catch (err) {
       setDuration(Math.round(performance.now() - start))
       setError(err instanceof Error ? err.message : 'Query failed')
@@ -117,10 +160,10 @@ export function SqlEditorView() {
     <div>
       <PageHeader
         title="SQL Editor"
-        description="Run read-only SELECT queries against your data. Virtual tables are pre-filtered to your account — you can only see your own rows."
+        description="Run read & write queries against your data. Virtual tables are pre-filtered to your account — you can only see and modify your own rows."
       />
 
-      {/* Virtual tables reference */}
+      {/* Virtual tables reference + write warning */}
       <Card className="p-3 mb-4 bg-card/40 border-border/60">
         <div className="flex flex-wrap items-center gap-2 text-xs">
           <span className="font-medium text-muted-foreground uppercase tracking-wide">Virtual tables:</span>
@@ -129,8 +172,18 @@ export function SqlEditorView() {
               {t}
             </Badge>
           ))}
-          <span className="text-muted-foreground/60 ml-2">· capped at 1000 rows · keys masked</span>
+          <span className="text-muted-foreground/60 ml-2">· reads capped at 1000 rows · keys masked · writes userId-scoped</span>
         </div>
+        {isWriteQuery && (
+          <div className="mt-2 flex items-start gap-2 text-[11px] text-amber-600 bg-amber-500/5 border border-amber-500/20 rounded-md px-2.5 py-1.5">
+            <AlertTriangle className="size-3.5 shrink-0 mt-0.5" />
+            <span>
+              This is a <strong>write query</strong>. It will modify your data. INSERT/UPDATE/DELETE on virtual tables are
+              scoped to your account — you cannot affect other users. Custom tables must be prefixed with{' '}
+              <code className="font-mono">usr_</code>.
+            </span>
+          </div>
+        )}
       </Card>
 
       <div className="grid lg:grid-cols-[1fr_200px] gap-4">
@@ -162,7 +215,7 @@ export function SqlEditorView() {
               }}
             />
             <div className="px-3 py-1.5 border-t border-border/40 text-[10px] text-muted-foreground/50 font-mono">
-              ⌘/Ctrl + Enter to run
+              ⌘/Ctrl + Enter to run · SELECT (read) · INSERT / UPDATE / DELETE (write) · CREATE / DROP / ALTER (usr_* only)
             </div>
           </Card>
 
@@ -173,8 +226,33 @@ export function SqlEditorView() {
             </Card>
           )}
 
-          {/* Results */}
-          {result && (
+          {/* Write result (no rows) */}
+          {result && result.type !== 'select' && !error && (
+            <Card className="p-4 bg-emerald-500/5 border-emerald-500/30">
+              <div className="flex items-start gap-3">
+                <CheckCircle2 className="size-5 text-emerald-600 shrink-0 mt-0.5" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium text-foreground">
+                    {result.type === 'ddl' ? 'Statement executed' : `${result.affected} row${result.affected === 1 ? '' : 's'} affected`}
+                  </div>
+                  {result.message && (
+                    <div className="text-xs text-muted-foreground mt-1 font-mono break-all">{result.message}</div>
+                  )}
+                  {result.target && (
+                    <div className="text-[11px] text-muted-foreground/70 mt-1">
+                      Target: <code className="font-mono">{result.target}</code>
+                    </div>
+                  )}
+                </div>
+                {duration !== null && (
+                  <Badge variant="outline" className="text-[10px] font-mono">{duration}ms</Badge>
+                )}
+              </div>
+            </Card>
+          )}
+
+          {/* Results (SELECT) */}
+          {result && result.type === 'select' && (
             <Card className="bg-card/40 border-border/60 overflow-hidden">
               <div className="flex items-center justify-between px-3 py-2 border-b border-border/40">
                 <span className="text-xs font-mono uppercase tracking-wider text-muted-foreground/70">
@@ -232,7 +310,14 @@ export function SqlEditorView() {
                   onClick={() => { setSql(s.sql); setError(null); setResult(null) }}
                   className="w-full text-left rounded-md px-2 py-1.5 hover:bg-muted/50 transition-colors border border-transparent hover:border-border/40"
                 >
-                  <div className="text-xs font-medium text-foreground/90">{s.label}</div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-medium text-foreground/90">{s.label}</span>
+                    {s.kind === 'write' && (
+                      <Badge variant="outline" className="text-[8px] px-1 py-0 h-3.5 border-amber-500/40 text-amber-600 font-mono">
+                        WRITE
+                      </Badge>
+                    )}
+                  </div>
                   <div className="text-[10px] text-muted-foreground/60">{s.desc}</div>
                 </button>
               ))}
