@@ -1,0 +1,83 @@
+// Onyx Base — Telegram-backed key-value developer platform
+// SQLite is used as a fast index/cache; Telegram chat is the durable backup.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String    @id @default(cuid())
+  userId      String    @unique // public id, e.g. usr_8d72a
+  name        String?
+  email       String?
+  plan        String    @default("free") // free | pro | team
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  apiKeys     ApiKey[]
+  records     Record[]
+  collections Collection[]
+  logs        Log[]
+}
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  key        String    @unique // kv_live_xxxxxxxxx
+  name       String    @default("default")
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  revoked    Boolean   @default(false)
+
+  @@index([userId])
+}
+
+model Collection {
+  id        String   @id @default(cuid())
+  name      String
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  records   Record[]
+  createdAt DateTime @default(now())
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+model Record {
+  id                 String   @id @default(cuid())
+  userId             String
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  collectionId       String
+  collection         Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  key                String
+  value              String // JSON-encoded value
+  valueType          String   @default("string") // string|number|boolean|object|array
+  telegramMessageId  Int?     // reference to the backup message in Telegram
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@unique([collectionId, key])
+  @@index([userId])
+  @@index([collectionId, key])
+}
+
+model Log {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    String   // set|get|delete|login|apikey.create|apikey.revoke|export|...
+  key       String?
+  detail    String?
+  source    String   @default("api") // api|cli|dashboard|system
+  ip        String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([createdAt])
+}

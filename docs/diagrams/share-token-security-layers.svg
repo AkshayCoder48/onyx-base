@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="560" height="560" viewBox="0 0 560 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Share token security layers">
+  <defs>
+    <radialGradient id="ringGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f7e8df"/>
+    </radialGradient>
+  </defs>
+
+  <circle cx="280" cy="280" r="250" fill="none" stroke="#d4744f" stroke-width="3" stroke-dasharray="2 10" stroke-linecap="round" opacity="0.5"/>
+  <circle cx="280" cy="280" r="210" fill="none" stroke="#e09a7a" stroke-width="14" opacity="0.85"/>
+  <circle cx="280" cy="280" r="210" fill="none" stroke="#8a3f23" stroke-width="2" stroke-dasharray="30 18" opacity="0.6"/>
+  <circle cx="280" cy="280" r="168" fill="none" stroke="#b1ada1" stroke-width="12" opacity="0.9"/>
+  <circle cx="280" cy="280" r="128" fill="none" stroke="#8a7e6a" stroke-width="10"/>
+  <circle cx="280" cy="280" r="92" fill="#f7e8df" stroke="#d4744f" stroke-width="3"/>
+  <circle cx="280" cy="280" r="92" fill="url(#ringGlow)"/>
+
+  <g transform="translate(280 280)">
+    <circle cx="0" cy="-14" r="20" fill="none" stroke="#d4744f" stroke-width="6"/>
+    <circle cx="0" cy="-14" r="6" fill="#d4744f"/>
+    <rect x="-4" y="0" width="8" height="36" rx="2" fill="#d4744f"/>
+    <rect x="-4" y="24" width="14" height="6" rx="2" fill="#d4744f"/>
+    <rect x="-4" y="32" width="10" height="6" rx="2" fill="#d4744f"/>
+  </g>
+
+  <circle cx="280" cy="70" r="6" fill="#d4744f"/>
+  <circle cx="280" cy="490" r="6" fill="#d4744f"/>
+  <circle cx="70" cy="280" r="6" fill="#e09a7a"/>
+  <circle cx="490" cy="280" r="6" fill="#e09a7a"/>
+</svg>

@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Onyx Base — External HTML Test</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 720px;
+      margin: 40px auto;
+      padding: 0 20px;
+      background: #0a0a0a;
+      color: #e5e5e5;
+      line-height: 1.6;
+    }
+    h1 { color: #10b981; }
+    .card {
+      background: #18181b;
+      border: 1px solid #27272a;
+      border-radius: 8px;
+      padding: 20px;
+      margin: 16px 0;
+    }
+    input, button {
+      font-family: monospace;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid #3f3f46;
+      background: #09090b;
+      color: #e5e5e5;
+      font-size: 13px;
+    }
+    button {
+      cursor: pointer;
+      background: #10b981;
+      color: #022c22;
+      border: none;
+      font-weight: 600;
+    }
+    button:hover { background: #34d399; }
+    pre {
+      background: #09090b;
+      padding: 12px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 12px;
+      border: 1px solid #27272a;
+    }
+    .ok { color: #10b981; }
+    .err { color: #ef4444; }
+    .label { font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px; }
+  </style>
+</head>
+<body>
+  <h1>Onyx Base — External HTML Test</h1>
+  <p>This page proves the Onyx Base REST API works from any external HTML page via CORS. No backend needed — just fetch() + your API key.</p>
+
+  <div class="card">
+    <div class="label">API Base URL</div>
+    <input id="apiBase" value="http://localhost:3000" style="width:100%;box-sizing:border-box;margin-bottom:12px">
+    <div class="label">API Key (kv_live_…)</div>
+    <input id="apiKey" value="" style="width:100%;box-sizing:border-box;margin-bottom:12px" placeholder="Paste your kv_live_… key here">
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button onclick="setKey()">Set key</button>
+      <button onclick="getKey()">Get key</button>
+      <button onclick="listKeys()">List keys</button>
+      <button onclick="health()">Health</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="label">Set a key</div>
+    <input id="setKey" placeholder="key" style="width:120px">
+    <input id="setValue" placeholder="value" style="width:200px">
+    <button onclick="setKey()">Set</button>
+  </div>
+
+  <div class="card">
+    <div class="label">Get a key</div>
+    <input id="getKey" placeholder="key" style="width:120px">
+    <button onclick="getKey()">Get</button>
+  </div>
+
+  <div class="card">
+    <div class="label">Result</div>
+    <pre id="result">Ready. Click a button above.</pre>
+  </div>
+
+  <script>
+    // ─── Configuration ────────────────────────────────────────────────────
+    // The API base URL is where your Onyx Base server is hosted.
+    // When deployed, this is your public URL (e.g. https://your-cloudkv.example.com).
+    // For local development, it's http://localhost:3000.
+    function getApiBase() {
+      return document.getElementById('apiBase').value.replace(/\/$/, '')
+    }
+    function getApiKey() {
+      return document.getElementById('apiKey').value.trim()
+    }
+
+    function log(msg, isError = false) {
+      const el = document.getElementById('result')
+      const cls = isError ? 'err' : 'ok'
+      el.innerHTML = `<span class="${cls}">${new Date().toISOString()}</span>\n${msg}`
+    }
+
+    async function setKey() {
+      const base = getApiBase()
+      const key = getApiKey()
+      const setKeyVal = document.getElementById('setKey').value.trim()
+      const setValueVal = document.getElementById('setValue').value
+      if (!key) return log('Enter your API key first', true)
+      if (!setKeyVal) return log('Enter a key name', true)
+      try {
+        const res = await fetch(`${base}/v1/set`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${key}`,
+          },
+          body: JSON.stringify({ key: setKeyVal, value: setValueVal, collection: 'default' }),
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        log(`✓ Set ${data.key} = ${JSON.stringify(data.value)} (${data.type})`)
+      } catch (err) {
+        log(`✗ ${err.message}`, true)
+      }
+    }
+
+    async function getKey() {
+      const base = getApiBase()
+      const key = getApiKey()
+      const getKeyVal = document.getElementById('getKey').value.trim()
+      if (!key) return log('Enter your API key first', true)
+      if (!getKeyVal) return log('Enter a key name to get', true)
+      try {
+        const res = await fetch(`${base}/v1/get/${encodeURIComponent(getKeyVal)}?collection=default`, {
+          headers: { 'Authorization': `Bearer ${key}` },
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        log(`✓ ${getKeyVal} = ${JSON.stringify(data.value)} (${data.type})`)
+      } catch (err) {
+        log(`✗ ${err.message}`, true)
+      }
+    }
+
+    async function listKeys() {
+      const base = getApiBase()
+      const key = getApiKey()
+      if (!key) return log('Enter your API key first', true)
+      try {
+        const res = await fetch(`${base}/v1/list?collection=default`, {
+          headers: { 'Authorization': `Bearer ${key}` },
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        log(`✓ ${data.count} keys:\n${JSON.stringify(data.keys, null, 2)}`)
+      } catch (err) {
+        log(`✗ ${err.message}`, true)
+      }
+    }
+
+    async function health() {
+      const base = getApiBase()
+      const key = getApiKey()
+      if (!key) return log('Enter your API key first', true)
+      try {
+        const res = await fetch(`${base}/v1/health`, {
+          headers: { 'Authorization': `Bearer ${key}` },
+        })
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+        log(`✓ Status: ${data.status}\nUser: ${data.user}\nRecords: ${data.storage.records}\nTelegram: ${data.telegram.configured ? '✓' : '✗'} (bot: ${data.telegram.bot})`)
+      } catch (err) {
+        log(`✗ ${err.message}`, true)
+      }
+    }
+  </script>
+</body>
+</html>

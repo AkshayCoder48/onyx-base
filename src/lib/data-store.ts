@@ -1,0 +1,1708 @@
+/**
+ * Onyx Base — Telegram-only in-memory store with JSON cache.
+ *
+ * This replaces the previous Prisma/SQLite layer. Telegram is the durable
+ * backup (every write is mirrored as a structured message). A flat JSON file
+ * (`db/cloudkv.json`) is used as a local cache so the index survives process
+ * restarts — it mirrors exactly what's in Telegram and contains no data that
+ * isn't also in the channel.
+ *
+ * Data model (mirrors the old Prisma schema):
+ *   - User       { id, userId, name, email, plan, createdAt, updatedAt }
+ *   - ApiKey     { id, key, name, userId, createdAt, lastUsedAt, revoked }
+ *   - Record     { id, userId, collection, key, value, valueType, telegramMessageId, createdAt, updatedAt }
+ *   - Log        { id, userId, action, key, detail, source, ip, createdAt }
+ *
+ * Collections are derived (distinct collection names per user from records).
+ */
+
+import crypto from 'crypto'
+import fs from 'fs'
+import path from 'path'
+import {
+  sendKvMessage,
+  editKvMessage,
+  deleteKvMessage,
+  sendAndPinManifest,
+  fetchPinnedManifest,
+  sendDocumentFile,
+  deleteFileMessage,
+  type TelegramPayload,
+  type SentDocument,
+} from '@/lib/telegram'
+import { hashPassword, verifyPassword } from '@/lib/password'
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+export interface UserRecord {
+  id: string
+  userId: string
+  name: string | null
+  email: string | null
+  /**
+   * Scrypt password hash (format: `scrypt$<saltHex>$<hashHex>`).
+   * Set when the user signs up with a password. Optional because legacy /
+   * CLI-created accounts may not have one — those accounts can only be
+   * accessed via their API key. The hash is mirrored to the Telegram
+   * identity manifest alongside the rest of the user record so it survives
+   * full local-store wipes.
+   */
+  passwordHash: string | null
+  plan: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ApiKeyRecord {
+  id: string
+  key: string
+  name: string
+  userId: string
+  createdAt: string
+  lastUsedAt: string | null
+  revoked: boolean
+}
+
+export interface RecordEntry {
+  id: string
+  userId: string
+  collection: string
+  key: string
+  value: string
+  valueType: string
+  telegramMessageId: number | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface LogEntry {
+  id: string
+  userId: string
+  action: string
+  key: string | null
+  detail: string | null
+  source: string
+  ip: string | null
+  createdAt: string
+}
+
+interface TelegramConfigRecord {
+  /** The dbUserId this config belongs to. */
+  userId: string
+  /** Custom Telegram chat ID (e.g. -1001234567890) — overrides the env default. */
+  chatId: string
+  /** Optional label for the user's own reference (e.g. "My channel"). */
+  label: string | null
+  /** Optional custom bot token — overrides the env default for this user's writes. */
+  botToken: string | null
+  /** Whether the bot token was set by the user (for display; the token itself is never returned to the client). */
+  hasCustomBotToken: boolean
+  updatedAt: string
+}
+
+/**
+ * Public share token — a scoped, revocable, rate-limited credential that is
+ * SAFE to embed in public HTML (CodePen, static sites, etc.).
+ *
+ * Unlike a master API key (which grants full read/write/delete on every key),
+ * a share token is bound to ONE (collection, key) pair and a single mode.
+ * Leaking it only exposes that one value; the owner can revoke/rotate anytime.
+ */
+export interface ShareTokenRecord {
+  id: string
+  /** The public token string, e.g. `st_a1b2c3...`. Safe to put in HTML. */
+  token: string
+  /** Owner's dbUserId. */
+  userId: string
+  collection: string
+  key: string
+  /** read | write | readwrite — what the public token can do. */
+  mode: 'read' | 'write' | 'readwrite'
+  /** Optional human label for the dashboard list. */
+  label: string | null
+  /** ISO timestamp; null = never expires. */
+  expiresAt: string | null
+  /** Max requests per minute per IP; null = unlimited. */
+  rateLimitPerMin: number | null
+  /** For write tokens: which ops are permitted. */
+  allowedOps: ('set' | 'incr' | 'append')[]
+  /** For write tokens: max length of a `set` value (bytes). null = no limit. */
+  maxValueLength: number | null
+  /** For `incr`: clamp the resulting counter to [incrMin, incrMax]. null = unbounded. */
+  incrMin: number | null
+  incrMax: number | null
+  createdAt: string
+  lastUsedAt: string | null
+  revoked: boolean
+}
+
+export interface FileRecord {
+  id: string
+  /** Public, unguessable id used in the permanent download link, e.g. `f_a1b2c3...`. */
+  fileId: string
+  /** Owner's dbUserId. */
+  userId: string
+  /** Original filename (sanitised). ALL extensions accepted — exe, txt, png, jpg, anything. */
+  fileName: string
+  /** Detected / declared MIME type. */
+  mimeType: string
+  /** Size in bytes (as reported by the uploader). */
+  size: number
+  /** Telegram message id holding the document (for deletion). */
+  telegramMessageId: number | null
+  /** Stable Telegram file_id — used by getFile to resolve a fresh download URL. */
+  telegramFileId: string
+  /** Telegram file_unique_id (stable across bots). */
+  telegramFileUniqueId: string
+  /**
+   * Which Telegram backend the file was uploaded to.
+   * - `'server'` → the operator's env-configured bot (TELEGRAM_BOT_TOKEN +
+   *   TELEGRAM_CHAT_ID). Used AUTOMATICALLY when the user has no full custom
+   *   config. This is the "server-sided telegram storage automatically when
+   *   custom not set up" default.
+   * - `'custom'` → the user's own bot + chat (set via Settings). Used only
+   *   when the user has provided BOTH a custom chatId AND a custom botToken.
+   *
+   * A Telegram file_id is bot-specific, so the download proxy MUST use the
+   * same bot that uploaded the file — even if the user later changes their
+   * custom config. `storageMode` is what lets us resolve the right bot.
+   */
+  storageMode: 'server' | 'custom'
+  /** Optional human label. */
+  label: string | null
+  /** Whether the permanent link works without authentication. Default true. */
+  isPublic: boolean
+  /** Download counter (incremented on each proxy download). */
+  downloads: number
+  /**
+   * Epoch-ms of the most recent "Revoke link" action. When set, the cached
+   * Telegram URL has been explicitly invalidated server-side; the next
+   * "Get link" call will mint a BRAND-NEW URL from Telegram (the previous URL
+   * remains valid for Telegram's natural ~1-hour expiry, which we cannot
+   * shorten — but we no longer serve or cache it).
+   */
+  linkRevokedAt: number | null
+  createdAt: string
+  updatedAt: string
+}
+
+interface StoreShape {
+  users: UserRecord[]
+  apiKeys: ApiKeyRecord[]
+  records: RecordEntry[]
+  logs: LogEntry[]
+  telegramConfigs: TelegramConfigRecord[]
+  shareTokens: ShareTokenRecord[]
+  files: FileRecord[]
+  /**
+   * Explicitly-named collections created via the dashboard / API. Collections
+   * are ALSO implicitly derived from records — but without this list, an
+   * empty collection (just created, no records yet) would be invisible in
+   * the UI. Each entry is `{ userId, name, createdAt }`.
+   */
+  collectionNames: CollectionNameRecord[]
+}
+
+interface CollectionNameRecord {
+  userId: string
+  name: string
+  createdAt: string
+}
+
+// ─── Persistence ─────────────────────────────────────────────────────────────
+
+const STORE_PATH = path.join(process.cwd(), 'db', 'cloudkv.json')
+
+const EMPTY_STORE: StoreShape = { users: [], apiKeys: [], records: [], logs: [], telegramConfigs: [], shareTokens: [], files: [], collectionNames: [] }
+
+function loadFromDisk(): StoreShape {
+  try {
+    const raw = fs.readFileSync(STORE_PATH, 'utf-8')
+    const parsed = JSON.parse(raw) as StoreShape
+    return {
+      users: parsed.users ?? [],
+      apiKeys: parsed.apiKeys ?? [],
+      records: parsed.records ?? [],
+      logs: parsed.logs ?? [],
+      telegramConfigs: parsed.telegramConfigs ?? [],
+      shareTokens: parsed.shareTokens ?? [],
+      files: parsed.files ?? [],
+      collectionNames: parsed.collectionNames ?? [],
+    }
+  } catch {
+    return { ...EMPTY_STORE }
+  }
+}
+
+function saveToDisk() {
+  try {
+    const dir = path.dirname(STORE_PATH)
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    const data: StoreShape = {
+      users: store.users,
+      apiKeys: store.apiKeys,
+      records: store.records,
+      logs: store.logs,
+      telegramConfigs: store.telegramConfigs,
+      shareTokens: store.shareTokens,
+      files: store.files,
+      collectionNames: store.collectionNames,
+    }
+    // Atomic write: write to a temp file in the same directory, then rename.
+    // `rename` is atomic on POSIX, so a crash mid-write can never leave a
+    // truncated/corrupt cloudkv.json — at worst the old version stays.
+    const tmpPath = STORE_PATH + '.tmp'
+    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8')
+    fs.renameSync(tmpPath, STORE_PATH)
+  } catch (err) {
+    console.error('[store] failed to write JSON cache:', err)
+  }
+}
+
+// ─── In-memory store (survives hot reloads via globalThis) ───────────────────
+
+const globalForStore = globalThis as unknown as { __cloudkvStore?: StoreShape }
+
+// Merge loaded data with the empty shape so newly-added fields (like
+// telegramConfigs, passwordHash) are always present even if the cache file
+// predates them. Legacy users (created before password support) get
+// passwordHash coerced from undefined → null.
+function ensureShape(loaded: Partial<StoreShape>): StoreShape {
+  const users = (loaded.users ?? []).map((u) => ({
+    ...u,
+    passwordHash: u.passwordHash ?? null,
+  }))
+  return {
+    users,
+    apiKeys: loaded.apiKeys ?? [],
+    records: loaded.records ?? [],
+    logs: loaded.logs ?? [],
+    telegramConfigs: loaded.telegramConfigs ?? [],
+    shareTokens: loaded.shareTokens ?? [],
+    // Backfill `storageMode` and `linkRevokedAt` on legacy file records
+    // (created before these fields existed). Old files defaulted to the env
+    // bot, so we treat them as 'server' — correct for any file uploaded before
+    // the server-vs-custom split, since the only path was env fallback.
+    files: (loaded.files ?? []).map((f) => ({
+      ...f,
+      storageMode: (f.storageMode ?? 'server') as 'server' | 'custom',
+      linkRevokedAt: f.linkRevokedAt ?? null,
+    })),
+    collectionNames: loaded.collectionNames ?? [],
+  }
+}
+
+/**
+ * Backfill any missing fields on an EXISTING store object IN PLACE — and
+ * return the SAME reference.
+ *
+ * This is critical: in dev mode Turbopack can re-evaluate this module, which
+ * would normally call `ensureShape(globalStore)` and return a NEW object. If
+ * that happened, route handlers that imported the module before the
+ * re-evaluation would keep mutating the OLD store, while freshly-imported
+ * handlers (e.g. `/f/[id]` after an edit) would read from the NEW (stale)
+ * copy. The symptom: a file is uploaded (written to store-A + disk), the
+ * `/v1/files` list sees it, but `/f/<id>` returns 404 because it searches
+ * store-B. Mutating in place guarantees every module instance shares one
+ * mutable store object.
+ */
+function backfillInPlace(existing: StoreShape): StoreShape {
+  if (!Array.isArray(existing.users)) existing.users = []
+  for (const u of existing.users) {
+    if (u.passwordHash === undefined) u.passwordHash = null
+  }
+  if (!Array.isArray(existing.apiKeys)) existing.apiKeys = []
+  if (!Array.isArray(existing.records)) existing.records = []
+  if (!Array.isArray(existing.logs)) existing.logs = []
+  if (!Array.isArray(existing.telegramConfigs)) existing.telegramConfigs = []
+  if (!Array.isArray(existing.shareTokens)) existing.shareTokens = []
+  if (!Array.isArray(existing.files)) existing.files = []
+  for (const f of existing.files) {
+    if (f.storageMode === undefined) f.storageMode = 'server'
+    if (f.linkRevokedAt === undefined) f.linkRevokedAt = null
+  }
+  if (!Array.isArray(existing.collectionNames)) existing.collectionNames = []
+  return existing
+}
+
+const store: StoreShape = globalForStore.__cloudkvStore
+  ? backfillInPlace(globalForStore.__cloudkvStore)
+  : (globalForStore.__cloudkvStore = ensureShape(loadFromDisk()))
+
+// Cold-boot rehydration: if Telegram is configured (env bot token + chat id),
+// pull the pinned identity manifest and restore any users / keys that are
+// missing from the local cache (e.g. after a sandbox reset wiped
+// db/cloudkv.json). Fire-and-forget — never blocks startup. The actual fetch
+// happens on the next tick so module loading isn't delayed.
+if (store.users.length === 0 || store.apiKeys.length === 0) {
+  setImmediate(() => {
+    void rehydrateFromTelegram().catch((err) =>
+      console.error('[store] cold-boot rehydrate failed:', err),
+    )
+  })
+}
+
+// ─── ID helpers ──────────────────────────────────────────────────────────────
+
+function cuid(): string {
+  return (
+    Date.now().toString(36) +
+    crypto.randomBytes(8).toString('hex')
+  )
+}
+
+export function generateUserId(): string {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789'
+  const bytes = crypto.randomBytes(6)
+  let out = 'usr_'
+  for (let i = 0; i < 6; i++) out += alphabet[bytes[i] % alphabet.length]
+  return out
+}
+
+export function generateApiKey(): string {
+  return 'kv_live_' + crypto.randomBytes(28).toString('hex').slice(0, 28)
+}
+
+// ─── User operations ─────────────────────────────────────────────────────────
+
+export function createUser(opts: {
+  userId: string
+  name?: string | null
+  email?: string | null
+  /** Plaintext password — hashed before storage. Optional (CLI accounts may omit). */
+  password?: string | null
+  plan?: string
+}): { user: UserRecord; apiKey: ApiKeyRecord; apiKeyRecord: ApiKeyRecord } {
+  const now = new Date().toISOString()
+  const user: UserRecord = {
+    id: cuid(),
+    userId: opts.userId,
+    name: opts.name ?? null,
+    email: opts.email ?? null,
+    passwordHash: opts.password ? hashPassword(opts.password) : null,
+    plan: opts.plan ?? 'unlimited',
+    createdAt: now,
+    updatedAt: now,
+  }
+  const apiKey: ApiKeyRecord = {
+    id: cuid(),
+    key: generateApiKey(),
+    name: opts.name ? `${opts.name} · default` : 'default',
+    userId: user.id,
+    createdAt: now,
+    lastUsedAt: null,
+    revoked: false,
+  }
+  store.users.push(user)
+  store.apiKeys.push(apiKey)
+  saveToDisk()
+  // Mirror the new identity (user + key + password hash) to the Telegram
+  // pinned manifest so it survives full local-store resets. Fire-and-forget.
+  // This is the "save keys to Telegram automatically" half of the durability
+  // contract — every key ever created is persisted to the public Telegram DB.
+  void syncIdentityToTelegram()
+  // Also push a per-user manifest to the user's OWN custom chat if they have
+  // one configured (they won't at signup, but this is a no-op then).
+  void syncUserIdentityToTelegram(user.id)
+  return { user, apiKey, apiKeyRecord: apiKey }
+}
+
+export function findUserByDbId(dbUserId: string): UserRecord | undefined {
+  return store.users.find((u) => u.id === dbUserId)
+}
+
+export function findUserByPublicId(userId: string): UserRecord | undefined {
+  return store.users.find((u) => u.userId === userId)
+}
+
+/** Find a user by their (case-insensitive) email. Returns undefined if not found or email is null. */
+export function findUserByEmail(email: string): UserRecord | undefined {
+  const normalized = email.trim().toLowerCase()
+  if (!normalized) return undefined
+  return store.users.find((u) => u.email && u.email.toLowerCase() === normalized)
+}
+
+/**
+ * Verify an email + password pair and return the matching user.
+ * Used by the email+password recovery login flow: when a user has lost their
+ * API key, they can sign back in with the email + password they registered
+ * with to retrieve a working key. Returns null on any mismatch.
+ */
+export function findUserByCredentials(
+  email: string,
+  password: string,
+): UserRecord | null {
+  const user = findUserByEmail(email)
+  if (!user) return null
+  if (!verifyPassword(password, user.passwordHash)) return null
+  return user
+}
+
+/**
+ * Set or update a user's password. Used by an authenticated "set password"
+ * flow so legacy accounts (created without a password) can add one later.
+ * Returns the updated user, or null if the user doesn't exist.
+ */
+export function setUserPassword(
+  dbUserId: string,
+  password: string,
+): UserRecord | null {
+  const user = store.users.find((u) => u.id === dbUserId)
+  if (!user) return null
+  user.passwordHash = hashPassword(password)
+  user.updatedAt = new Date().toISOString()
+  saveToDisk()
+  // Re-sync the identity manifest so the new password hash is persisted to
+  // the Telegram public database.
+  void syncIdentityToTelegram()
+  void syncUserIdentityToTelegram(user.id)
+  return user
+}
+
+export function findUserByApiKey(key: string): {
+  user: UserRecord
+  apiKey: ApiKeyRecord
+} | null {
+  const apiKey = store.apiKeys.find((k) => k.key === key && !k.revoked)
+  if (!apiKey) return null
+  const user = store.users.find((u) => u.id === apiKey.userId)
+  if (!user) return null
+  // Touch lastUsedAt (fire-and-forget save)
+  apiKey.lastUsedAt = new Date().toISOString()
+  saveToDisk()
+  return { user, apiKey }
+}
+
+// ─── ApiKey operations ───────────────────────────────────────────────────────
+
+export function listApiKeys(dbUserId: string): ApiKeyRecord[] {
+  return store.apiKeys
+    .filter((k) => k.userId === dbUserId)
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+}
+
+export function createApiKey(
+  dbUserId: string,
+  name: string,
+): ApiKeyRecord {
+  const now = new Date().toISOString()
+  const apiKey: ApiKeyRecord = {
+    id: cuid(),
+    key: generateApiKey(),
+    name,
+    userId: dbUserId,
+    createdAt: now,
+    lastUsedAt: null,
+    revoked: false,
+  }
+  store.apiKeys.push(apiKey)
+  saveToDisk()
+  void syncIdentityToTelegram()
+  void syncUserIdentityToTelegram(dbUserId)
+  return apiKey
+}
+
+export function revokeApiKey(
+  dbUserId: string,
+  keyId: string,
+): ApiKeyRecord | null {
+  const apiKey = store.apiKeys.find(
+    (k) => k.id === keyId && k.userId === dbUserId,
+  )
+  if (!apiKey) return null
+  apiKey.revoked = true
+  saveToDisk()
+  void syncIdentityToTelegram()
+  void syncUserIdentityToTelegram(dbUserId)
+  return apiKey
+}
+
+// ─── Identity manifest (Telegram-backed recovery) ────────────────────────────
+//
+// Every identity mutation (createUser / createApiKey / revokeApiKey) mirrors
+// the full identity state to the Telegram chat's PINNED message. Because
+// `getChat` returns the pinned message text, we can read it back on cold boot
+// or on an auth miss — making API keys survive full local-store resets.
+
+interface IdentityManifest {
+  cloudkv: true
+  version: 1
+  exportedAt: string
+  users: UserRecord[]
+  apiKeys: ApiKeyRecord[]
+}
+
+/** Build the full identity manifest (all users + all apikeys) as JSON. */
+export function buildIdentityManifest(): string {
+  const manifest: IdentityManifest = {
+    cloudkv: true,
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    users: store.users,
+    apiKeys: store.apiKeys,
+  }
+  return JSON.stringify(manifest)
+}
+
+/**
+ * Push the current identity manifest to Telegram as the chat's pinned message.
+ * Fire-and-forget — never blocks the caller. Uses env Telegram creds by
+ * default (the shared platform vault). This is the "save keys to telegram
+ * automatically" half of the durability contract.
+ *
+ * NOTE: this writes to the SERVER's env Telegram chat. That chat is private
+ * to the operator and NOT accessible to end users — so a key that exists
+ * only here cannot be recovered by pasting a manifest (the user can't read
+ * this chat). Real user-facing recovery happens via the PER-USER manifest
+ * (syncUserIdentityToTelegram) which is pushed to the user's OWN custom
+ * chat + bot token, or via email+password login.
+ */
+export function syncIdentityToTelegram(chatId?: string, botToken?: string): Promise<number | null> {
+  const json = buildIdentityManifest()
+  return sendAndPinManifest(json, chatId, botToken)
+}
+
+// ─── Per-user manifest (custom-chat recovery) ────────────────────────────────
+//
+// When a user configures their OWN Telegram chat ID + bot token (Settings →
+// Telegram chat ID), we push a manifest containing ONLY that user's record +
+// their API keys + their password hash to THEIR chat as the pinned message.
+// This is the user-facing recovery path: they can open their own Telegram
+// chat, copy the pinned CLOUDKV_IDENTITY_MANIFEST message, and paste it into
+// the "Lost your key?" box to restore. It also lets us auto-rehydrate their
+// keys on email+password login (we know which chat belongs to them).
+
+interface UserManifest {
+  cloudkv: true
+  version: 1
+  scope: 'user'
+  exportedAt: string
+  user: UserRecord
+  apiKeys: ApiKeyRecord[]
+}
+
+/** Build a manifest containing ONLY one user + their keys (for their chat). */
+export function buildUserManifest(dbUserId: string): string | null {
+  const user = store.users.find((u) => u.id === dbUserId)
+  if (!user) return null
+  const apiKeys = store.apiKeys.filter((k) => k.userId === dbUserId)
+  const manifest: UserManifest = {
+    cloudkv: true,
+    version: 1,
+    scope: 'user',
+    exportedAt: new Date().toISOString(),
+    user,
+    apiKeys,
+  }
+  return JSON.stringify(manifest)
+}
+
+/**
+ * Push the per-user manifest to the user's OWN custom Telegram chat (if they
+ * have one configured). No-op when the user has no custom chat/bot token.
+ * Fire-and-forget — never blocks the caller.
+ */
+export async function syncUserIdentityToTelegram(dbUserId: string): Promise<number | null> {
+  const config = getTelegramConfig(dbUserId)
+  // Need BOTH a custom chat id AND a custom bot token for the user to own
+  // and be able to read back the manifest. With only a chat id (and the
+  // server's env bot token), the bot can write but the user can't pin/read
+  // via their own bot — so we skip the per-user push in that case.
+  if (!config || !config.chatId.trim() || !config.hasCustomBotToken || !config.botToken) {
+    return null
+  }
+  const json = buildUserManifest(dbUserId)
+  if (!json) return null
+  return sendAndPinManifest(json, config.chatId.trim(), config.botToken.trim())
+}
+
+/**
+ * Fetch + restore the per-user manifest from the user's OWN custom Telegram
+ * chat. Used on email+password login to recover any keys that aren't in the
+ * local store (e.g. after a sandbox reset wiped db/cloudkv.json but the user
+ * had configured their own chat). Best-effort, never throws.
+ */
+export async function rehydrateUserFromTelegram(dbUserId: string): Promise<{
+  attempted: boolean
+  usersRestored: number
+  keysRestored: number
+  error?: string
+}> {
+  const config = getTelegramConfig(dbUserId)
+  if (!config || !config.chatId.trim() || !config.hasCustomBotToken || !config.botToken) {
+    return { attempted: false, usersRestored: 0, keysRestored: 0 }
+  }
+  const json = await fetchPinnedManifest(config.chatId.trim(), config.botToken.trim())
+  if (json === null) {
+    return { attempted: false, usersRestored: 0, keysRestored: 0 }
+  }
+  // A user manifest has scope:'user' and a single `user` field. Wrap it into
+  // the array shape restoreIdentityFromBackup expects so we can reuse the
+  // dedup + insert logic.
+  try {
+    const parsed = JSON.parse(json) as Partial<UserManifest> & { users?: UserRecord[]; apiKeys?: ApiKeyRecord[] }
+    if (parsed && parsed.cloudkv === true && parsed.scope === 'user' && parsed.user) {
+      const wrapped = JSON.stringify({
+        cloudkv: true,
+        version: 1,
+        exportedAt: parsed.exportedAt ?? new Date().toISOString(),
+        users: [parsed.user],
+        apiKeys: parsed.apiKeys ?? [],
+      })
+      const result = restoreIdentityFromBackup(wrapped)
+      if (result.ok && (result.usersRestored || result.keysRestored)) {
+        console.log(`[store] rehydrated user ${dbUserId}: +${result.usersRestored} user(s), +${result.keysRestored} key(s) from their custom Telegram chat`)
+      }
+      return {
+        attempted: true,
+        usersRestored: result.usersRestored,
+        keysRestored: result.keysRestored,
+        error: result.error,
+      }
+    }
+    // Fall through to the standard array-shape restore (env manifest format).
+    const result = restoreIdentityFromBackup(json)
+    return {
+      attempted: true,
+      usersRestored: result.usersRestored,
+      keysRestored: result.keysRestored,
+      error: result.error,
+    }
+  } catch (err) {
+    return { attempted: true, usersRestored: 0, keysRestored: 0, error: (err as Error).message }
+  }
+}
+
+interface ParsedManifest {
+  cloudkv?: boolean
+  version?: number
+  users?: Array<Partial<UserRecord> & { id?: string; userId?: string }>
+  apiKeys?: Array<Partial<ApiKeyRecord> & { id?: string; key?: string; userId?: string }>
+}
+
+/**
+ * Rehydrate the local store from a Telegram pinned manifest (or a pasted
+ * backup blob). Idempotent: users / keys that already exist locally are left
+ * untouched; only missing ones are inserted. Returns a summary of what was
+ * restored. This is the "fetch and match whenever it's needed" half.
+ */
+export function restoreIdentityFromBackup(rawJson: string): {
+  ok: boolean
+  usersRestored: number
+  keysRestored: number
+  error?: string
+} {
+  let parsed: ParsedManifest
+  try {
+    parsed = JSON.parse(rawJson) as ParsedManifest
+  } catch (err) {
+    return { ok: false, usersRestored: 0, keysRestored: 0, error: 'Invalid JSON: ' + (err as Error).message }
+  }
+  if (!parsed || parsed.cloudkv !== true || !Array.isArray(parsed.users) || !Array.isArray(parsed.apiKeys)) {
+    return { ok: false, usersRestored: 0, keysRestored: 0, error: 'Not a Onyx Base identity manifest.' }
+  }
+
+  let usersRestored = 0
+  let keysRestored = 0
+
+  for (const u of parsed.users) {
+    if (!u.id || !u.userId) continue
+    const exists = store.users.some((x) => x.id === u.id || x.userId === u.userId)
+    if (exists) {
+      // If the local user is missing a password hash but the backup has one,
+      // backfill it so the user can still do email+password recovery after a
+      // partial restore.
+      if (u.passwordHash) {
+        const local = store.users.find((x) => x.id === u.id || x.userId === u.userId)
+        if (local && !local.passwordHash) {
+          local.passwordHash = u.passwordHash
+          local.updatedAt = new Date().toISOString()
+          usersRestored++
+        }
+      }
+      continue
+    }
+    store.users.push({
+      id: u.id,
+      userId: u.userId,
+      name: u.name ?? null,
+      email: u.email ?? null,
+      passwordHash: u.passwordHash ?? null,
+      plan: u.plan ?? 'unlimited',
+      createdAt: u.createdAt ?? new Date().toISOString(),
+      updatedAt: u.updatedAt ?? u.createdAt ?? new Date().toISOString(),
+    })
+    usersRestored++
+  }
+
+  for (const k of parsed.apiKeys) {
+    if (!k.id || !k.key || !k.userId) continue
+    const exists = store.apiKeys.some((x) => x.id === k.id || x.key === k.key)
+    if (exists) continue
+    store.apiKeys.push({
+      id: k.id,
+      key: k.key,
+      name: k.name ?? 'restored',
+      userId: k.userId,
+      createdAt: k.createdAt ?? new Date().toISOString(),
+      lastUsedAt: k.lastUsedAt ?? null,
+      revoked: k.revoked ?? false,
+    })
+    keysRestored++
+  }
+
+  if (usersRestored || keysRestored) saveToDisk()
+  return { ok: true, usersRestored, keysRestored }
+}
+
+/**
+ * Fetch the pinned identity manifest from Telegram (via getChat) and restore
+ * any missing users / keys into the local store. Best-effort: returns a
+ * summary but never throws. Used on cold boot and on auth miss.
+ */
+export async function rehydrateFromTelegram(chatId?: string, botToken?: string): Promise<{
+  attempted: boolean
+  usersRestored: number
+  keysRestored: number
+  error?: string
+}> {
+  const json = await fetchPinnedManifest(chatId, botToken)
+  if (json === null) {
+    return { attempted: false, usersRestored: 0, keysRestored: 0 }
+  }
+  const result = restoreIdentityFromBackup(json)
+  if (result.ok && (result.usersRestored || result.keysRestored)) {
+    console.log(`[store] rehydrated ${result.usersRestored} user(s) + ${result.keysRestored} apikey(s) from Telegram pinned manifest`)
+  }
+  return {
+    attempted: true,
+    usersRestored: result.usersRestored,
+    keysRestored: result.keysRestored,
+    error: result.error,
+  }
+}
+
+// ─── Record (KV) operations ──────────────────────────────────────────────────
+
+export function findRecord(
+  dbUserId: string,
+  collection: string,
+  key: string,
+): RecordEntry | undefined {
+  return store.records.find(
+    (r) => r.userId === dbUserId && r.collection === collection && r.key === key,
+  )
+}
+
+export function upsertRecord(
+  dbUserId: string,
+  publicUserId: string,
+  opts: {
+    collection: string
+    key: string
+    value: string
+    valueType: string
+    chatId?: string
+    botToken?: string
+  },
+): { record: RecordEntry; created: boolean } {
+  const existing = findRecord(dbUserId, opts.collection, opts.key)
+  const now = new Date().toISOString()
+  const chatId = opts.chatId
+  const botToken = opts.botToken
+
+  if (existing) {
+    existing.value = opts.value
+    existing.valueType = opts.valueType
+    existing.updatedAt = now
+    saveToDisk()
+
+    // Edit the existing Telegram backup message.
+    const payload: TelegramPayload = {
+      owner: publicUserId,
+      collection: opts.collection,
+      key: opts.key,
+      value: JSON.parse(opts.value),
+      valueType: opts.valueType,
+      updatedAt: Math.floor(Date.now() / 1000),
+      op: 'SET',
+    }
+    if (existing.telegramMessageId) {
+      void editKvMessage(existing.telegramMessageId, payload, chatId, botToken)
+    } else {
+      void sendKvMessage(payload, chatId, botToken).then((msgId) => {
+        if (msgId) {
+          existing.telegramMessageId = msgId
+          saveToDisk()
+        }
+      })
+    }
+    return { record: existing, created: false }
+  }
+
+  const record: RecordEntry = {
+    id: cuid(),
+    userId: dbUserId,
+    collection: opts.collection,
+    key: opts.key,
+    value: opts.value,
+    valueType: opts.valueType,
+    telegramMessageId: null,
+    createdAt: now,
+    updatedAt: now,
+  }
+  store.records.push(record)
+  saveToDisk()
+
+  // Send a new Telegram backup message, then store the message_id.
+  const payload: TelegramPayload = {
+    owner: publicUserId,
+    collection: opts.collection,
+    key: opts.key,
+    value: JSON.parse(opts.value),
+    valueType: opts.valueType,
+    updatedAt: Math.floor(Date.now() / 1000),
+    op: 'SET',
+  }
+  void sendKvMessage(payload, chatId, botToken).then((msgId) => {
+    if (msgId) {
+      record.telegramMessageId = msgId
+      saveToDisk()
+    }
+  })
+
+  return { record, created: true }
+}
+
+export function deleteRecord(
+  dbUserId: string,
+  collection: string,
+  key: string,
+  chatId?: string,
+  botToken?: string,
+): RecordEntry | null {
+  const idx = store.records.findIndex(
+    (r) => r.userId === dbUserId && r.collection === collection && r.key === key,
+  )
+  if (idx === -1) return null
+  const [removed] = store.records.splice(idx, 1)
+  saveToDisk()
+  if (removed.telegramMessageId) {
+    void deleteKvMessage(removed.telegramMessageId, chatId, botToken)
+  }
+  return removed
+}
+
+export function listRecords(
+  dbUserId: string,
+  collection?: string,
+): RecordEntry[] {
+  return store.records
+    .filter(
+      (r) =>
+        r.userId === dbUserId &&
+        (collection === undefined || r.collection === collection),
+    )
+    .sort((a, b) => (a.key < b.key ? -1 : 1))
+}
+
+export function countRecords(dbUserId: string): number {
+  return store.records.filter((r) => r.userId === dbUserId).length
+}
+
+// ─── Collection operations ───────────────────────────────────────────────────
+//
+// Collections are derived from records — BUT we also keep an explicit
+// `collectionNames` list per user so that an empty collection (just created,
+// no records yet) is still visible in the dashboard and selectable in the
+// record-creation dropdown. Without this, "create collection" was a no-op
+// and the new collection vanished as soon as the dialog closed.
+
+export function listCollections(dbUserId: string): {
+  name: string
+  records: number
+  createdAt: string
+}[] {
+  const byName = new Map<string, { records: number; createdAt: string }>()
+  // 1. Records-derived collections (the source of truth for counts).
+  for (const r of store.records) {
+    if (r.userId !== dbUserId) continue
+    const existing = byName.get(r.collection)
+    if (existing) {
+      existing.records++
+      if (r.createdAt < existing.createdAt) existing.createdAt = r.createdAt
+    } else {
+      byName.set(r.collection, { records: 1, createdAt: r.createdAt })
+    }
+  }
+  // 2. Explicitly-created collections (may have 0 records — they must still
+  //    show up in the UI). Don't overwrite a records-derived entry's count.
+  for (const c of store.collectionNames) {
+    if (c.userId !== dbUserId) continue
+    if (!byName.has(c.name)) {
+      byName.set(c.name, { records: 0, createdAt: c.createdAt })
+    }
+  }
+  return Array.from(byName.entries())
+    .map(([name, info]) => ({ name, ...info }))
+    .sort((a, b) => (a.name < b.name ? -1 : 1))
+}
+
+/**
+ * Persist an explicitly-named collection so it shows up in the UI even before
+ * any records are written to it. Idempotent — creating the same name twice is
+ * a no-op. The special name `default` is reserved and rejected.
+ *
+ * Validates the name: 1–64 chars, `[a-zA-Z0-9_-]` only, must start with a
+ * letter or underscore. Returns `{ ok: true }` on success or `{ error }` on
+ * validation failure.
+ */
+export function createCollectionName(
+  dbUserId: string,
+  name: string,
+): { ok: true } | { ok: false; error: string } {
+  const trimmed = name.trim()
+  if (!trimmed) return { ok: false, error: 'Collection name is required.' }
+  if (trimmed.length > 64) return { ok: false, error: 'Collection name must be 64 characters or fewer.' }
+  if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(trimmed)) {
+    return { ok: false, error: 'Collection name must start with a letter or underscore and contain only letters, digits, underscores, or hyphens.' }
+  }
+  if (trimmed === 'default') return { ok: false, error: 'The name "default" is reserved.' }
+  // Idempotent: if the name already exists (explicit OR derived from records),
+  // treat as success — the collection is already there.
+  const existsExplicit = store.collectionNames.some(
+    (c) => c.userId === dbUserId && c.name === trimmed,
+  )
+  const existsDerived = store.records.some(
+    (r) => r.userId === dbUserId && r.collection === trimmed,
+  )
+  if (existsExplicit || existsDerived) return { ok: true }
+  store.collectionNames.push({
+    userId: dbUserId,
+    name: trimmed,
+    createdAt: new Date().toISOString(),
+  })
+  saveToDisk()
+  return { ok: true }
+}
+
+/** Remove the explicit collection-name entry (used when deleting a collection). */
+function removeCollectionName(dbUserId: string, name: string): void {
+  store.collectionNames = store.collectionNames.filter(
+    (c) => !(c.userId === dbUserId && c.name === name),
+  )
+}
+
+export function countCollections(dbUserId: string): number {
+  const names = new Set<string>()
+  for (const r of store.records) if (r.userId === dbUserId) names.add(r.collection)
+  for (const c of store.collectionNames) if (c.userId === dbUserId) names.add(c.name)
+  return names.size
+}
+
+/**
+ * Delete a collection: remove all its records (from the store AND from the
+ * Telegram chat) and remove the explicit collection-name entry.
+ *
+ * Returns the number of records removed, or `null` if the collection doesn't
+ * exist (neither in records nor in the explicit collectionNames list). This
+ * distinguishes "found but empty" (0) from "not found" (null), so the route
+ * can return the correct 404.
+ */
+export function deleteCollection(dbUserId: string, name: string, chatId?: string, botToken?: string): number | null {
+  const existsInRecords = store.records.some(
+    (r) => r.userId === dbUserId && r.collection === name,
+  )
+  const existsInNames = store.collectionNames.some(
+    (c) => c.userId === dbUserId && c.name === name,
+  )
+  if (!existsInRecords && !existsInNames) return null
+
+  const toRemove = store.records.filter(
+    (r) => r.userId === dbUserId && r.collection === name,
+  )
+  for (const r of toRemove) {
+    if (r.telegramMessageId) void deleteKvMessage(r.telegramMessageId, chatId, botToken)
+  }
+  store.records = store.records.filter((r) => !(r.userId === dbUserId && r.collection === name))
+  removeCollectionName(dbUserId, name)
+  saveToDisk()
+  return toRemove.length
+}
+
+// ─── Log operations ──────────────────────────────────────────────────────────
+
+export function addLog(opts: {
+  dbUserId: string
+  action: string
+  key?: string | null
+  detail?: string | null
+  source?: string
+  ip?: string | null
+}): LogEntry {
+  const entry: LogEntry = {
+    id: cuid(),
+    userId: opts.dbUserId,
+    action: opts.action,
+    key: opts.key ?? null,
+    detail: opts.detail ?? null,
+    source: opts.source ?? 'api',
+    ip: opts.ip ?? null,
+    createdAt: new Date().toISOString(),
+  }
+  store.logs.push(entry)
+  // Cap logs at 1000 per user to avoid unbounded growth.
+  const userLogs = store.logs.filter((l) => l.userId === opts.dbUserId)
+  if (userLogs.length > 1000) {
+    const keep = userLogs.slice(-1000).map((l) => l.id)
+    store.logs = store.logs.filter((l) => l.userId !== opts.dbUserId || keep.includes(l.id))
+  }
+  saveToDisk()
+  return entry
+}
+
+export function listLogs(
+  dbUserId: string,
+  opts: { limit?: number; action?: string } = {},
+): LogEntry[] {
+  let items = store.logs.filter((l) => l.userId === dbUserId)
+  if (opts.action) items = items.filter((l) => l.action === opts.action)
+  items = items.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+  if (opts.limit) items = items.slice(0, opts.limit)
+  return items
+}
+
+export function countLogs(dbUserId: string): number {
+  return store.logs.filter((l) => l.userId === dbUserId).length
+}
+
+// ─── Stats ───────────────────────────────────────────────────────────────────
+
+export function getStats(dbUserId: string) {
+  const userRecords = store.records.filter((r) => r.userId === dbUserId)
+  const userLogs = store.logs.filter((l) => l.userId === dbUserId)
+  const userApiKeys = store.apiKeys.filter(
+    (k) => k.userId === dbUserId && !k.revoked,
+  )
+
+  // 7-day activity
+  const since = Date.now() - 6 * 24 * 60 * 60 * 1000
+  const recentLogs = userLogs.filter(
+    (l) => new Date(l.createdAt).getTime() >= since,
+  )
+  const activityByDay: Record<string, number> = {}
+  const activityByAction: Record<string, number> = {}
+  for (const l of recentLogs) {
+    const day = l.createdAt.slice(0, 10)
+    activityByDay[day] = (activityByDay[day] || 0) + 1
+    activityByAction[l.action] = (activityByAction[l.action] || 0) + 1
+  }
+
+  const storageBytes = userRecords.reduce(
+    (sum, r) => sum + r.value.length + r.key.length,
+    0,
+  )
+
+  const collections = new Set(userRecords.map((r) => r.collection)).size
+
+  const fileStats = countFiles(dbUserId)
+
+  return {
+    records: userRecords.length,
+    collections,
+    apiKeys: userApiKeys.length,
+    logs: userLogs.length,
+    storageBytes,
+    files: fileStats.count,
+    fileBytes: fileStats.bytes,
+    activityByDay,
+    activityByAction,
+  }
+}
+
+export function getAnalytics(dbUserId: string) {
+  const userRecords = store.records.filter((r) => r.userId === dbUserId)
+
+  // By collection
+  const byCollectionMap = new Map<string, number>()
+  const byTypeMap = new Map<string, number>()
+  for (const r of userRecords) {
+    byCollectionMap.set(r.collection, (byCollectionMap.get(r.collection) || 0) + 1)
+    byTypeMap.set(r.valueType, (byTypeMap.get(r.valueType) || 0) + 1)
+  }
+
+  // 14-day series + top keys
+  const since = Date.now() - 13 * 24 * 60 * 60 * 1000
+  const recentLogs = store.logs.filter(
+    (l) => l.userId === dbUserId && new Date(l.createdAt).getTime() >= since,
+  )
+  const seriesMap: Record<string, number> = {}
+  const topKeysMap: Record<string, number> = {}
+  for (const l of recentLogs) {
+    const day = l.createdAt.slice(0, 10)
+    seriesMap[day] = (seriesMap[day] || 0) + 1
+    if (l.key) topKeysMap[l.key] = (topKeysMap[l.key] || 0) + 1
+  }
+
+  return {
+    byCollection: Array.from(byCollectionMap.entries())
+      .map(([name, records]) => ({ name, records }))
+      .sort((a, b) => b.records - a.records),
+    byType: Array.from(byTypeMap.entries()).map(([type, count]) => ({ type, count })),
+    series: Object.entries(seriesMap)
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([day, count]) => ({ day, count })),
+    topKeys: Object.entries(topKeysMap)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([key, count]) => ({ key, count })),
+    totalEvents: recentLogs.length,
+  }
+}
+
+// ─── Telegram config (per-user custom chat ID) ──────────────────────────────
+
+/**
+ * Get the Telegram config for a user. Returns the custom chat ID + label if
+ * the user has set one, otherwise null (caller falls back to env default).
+ */
+export function getTelegramConfig(dbUserId: string): TelegramConfigRecord | null {
+  if (!store.telegramConfigs) {
+    store.telegramConfigs = []
+    saveToDisk()
+  }
+  return store.telegramConfigs.find((c) => c.userId === dbUserId) ?? null
+}
+
+/**
+ * Resolve the effective chat ID for a user: custom config if set, else env.
+ * Returns '' if neither is configured.
+ */
+export function resolveChatId(dbUserId: string): string {
+  const custom = getTelegramConfig(dbUserId)
+  if (custom && custom.chatId.trim()) return custom.chatId.trim()
+  return process.env.TELEGRAM_CHAT_ID || ''
+}
+
+/**
+ * Resolve the effective bot token for a user: custom config if set, else env.
+ * Returns '' if neither is configured.
+ */
+export function resolveBotToken(dbUserId: string): string {
+  const custom = getTelegramConfig(dbUserId)
+  if (custom && custom.botToken && custom.botToken.trim()) return custom.botToken.trim()
+  return process.env.TELEGRAM_BOT_TOKEN || ''
+}
+
+/**
+ * Whether a user has a FULL custom Telegram config — i.e. BOTH a custom chat
+ * ID AND a custom bot token. Only a full custom config routes storage to the
+ * user's own bot/chat; a partial config (chatId only, or token only) would mix
+ * bots and chats and fail, so we treat it as "not set up" and fall back to the
+ * server-side (env) Telegram storage automatically.
+ */
+export function hasCustomTelegramConfig(dbUserId: string): boolean {
+  const c = getTelegramConfig(dbUserId)
+  return Boolean(c && c.chatId.trim() && c.botToken && c.botToken.trim())
+}
+
+/**
+ * Resolve the storage mode for a NEW upload:
+ * - `'custom'` if the user has a full custom config (chatId + botToken).
+ * - `'server'` otherwise — the operator's env Telegram bot is used.
+ *
+ * This is the "uploading to server-sided telegram storage automatically when
+ * custom not set up" rule.
+ */
+export function resolveStorageMode(dbUserId: string): 'server' | 'custom' {
+  return hasCustomTelegramConfig(dbUserId) ? 'custom' : 'server'
+}
+
+/**
+ * Resolve the chat ID for an EXISTING file based on its `storageMode` — NOT the
+ * user's current config (which may have changed since upload). Files uploaded to
+ * the server bot stay on the server bot; files uploaded to a custom bot stay on
+ * that custom bot's chat (as long as the user still has a custom config; if
+ * they removed it, the file is orphaned and we fall back to env to at least try
+ * the delete).
+ */
+export function resolveFileChatId(file: FileRecord): string {
+  if (file.storageMode === 'custom') {
+    const custom = getTelegramConfig(file.userId)
+    if (custom && custom.chatId.trim()) return custom.chatId.trim()
+  }
+  return process.env.TELEGRAM_CHAT_ID || ''
+}
+
+/**
+ * Resolve the bot token for an EXISTING file based on its `storageMode`. A
+ * Telegram file_id is bot-specific — it can ONLY be resolved by the bot that
+ * originally received the document. So we MUST use the same bot that uploaded
+ * the file, even if the user later configures a custom bot.
+ */
+export function resolveFileBotToken(file: FileRecord): string {
+  if (file.storageMode === 'custom') {
+    const custom = getTelegramConfig(file.userId)
+    if (custom && custom.botToken && custom.botToken.trim()) return custom.botToken.trim()
+  }
+  return process.env.TELEGRAM_BOT_TOKEN || ''
+}
+
+/** Set or update the per-user Telegram chat ID and/or bot token. */
+export function setTelegramConfig(
+  dbUserId: string,
+  chatId: string,
+  label?: string | null,
+  botToken?: string | null,
+): TelegramConfigRecord {
+  const trimmed = chatId.trim()
+  const trimmedToken = botToken?.trim() || null
+  const existing = store.telegramConfigs.find((c) => c.userId === dbUserId)
+  const now = new Date().toISOString()
+  let record: TelegramConfigRecord
+  if (existing) {
+    existing.chatId = trimmed
+    existing.label = label ?? existing.label
+    // Only overwrite the bot token if a new value is explicitly provided.
+    // botToken === undefined means "don't touch the token"; botToken === null means "clear it".
+    if (botToken !== undefined) {
+      existing.botToken = trimmedToken
+      existing.hasCustomBotToken = !!trimmedToken
+    }
+    existing.updatedAt = now
+    saveToDisk()
+    record = existing
+  } else {
+    record = {
+      userId: dbUserId,
+      chatId: trimmed,
+      label: label ?? null,
+      botToken: trimmedToken,
+      hasCustomBotToken: !!trimmedToken,
+      updatedAt: now,
+    }
+    store.telegramConfigs.push(record)
+    saveToDisk()
+  }
+  // Now that the user has a custom chat (+ optionally their own bot token),
+  // push a per-user manifest to their chat so they can recover keys later.
+  // Fire-and-forget — syncUserIdentityToTelegram is a no-op when the user
+  // doesn't have BOTH a chat id and a custom bot token.
+  void syncUserIdentityToTelegram(dbUserId)
+  return record
+}
+
+/** Clear just the custom bot token (keep the chat ID). */
+export function clearBotToken(dbUserId: string): boolean {
+  const existing = store.telegramConfigs.find((c) => c.userId === dbUserId)
+  if (!existing || !existing.hasCustomBotToken) return false
+  existing.botToken = null
+  existing.hasCustomBotToken = false
+  existing.updatedAt = new Date().toISOString()
+  saveToDisk()
+  return true
+}
+
+/** Clear the per-user Telegram chat ID (revert to env default). */
+export function clearTelegramConfig(dbUserId: string): boolean {
+  const idx = store.telegramConfigs.findIndex((c) => c.userId === dbUserId)
+  if (idx === -1) return false
+  store.telegramConfigs.splice(idx, 1)
+  saveToDisk()
+  return true
+}
+
+// ─── Public share tokens (source-safe scoped credentials) ────────────────────
+
+/** Generate a public share token: `st_<28 hex>`. */
+export function generateShareToken(): string {
+  return 'st_' + crypto.randomBytes(14).toString('hex').slice(0, 28)
+}
+
+/** In-memory per-IP rate-limit tracker: token -> { ip -> [timestamps] }. Not persisted. */
+const shareRateBuckets = new Map<string, Map<string, number[]>>()
+
+/**
+ * Check the per-IP rate limit for a share token. Returns true if the request
+ * is allowed (and records the hit), false if the limit is exceeded.
+ */
+function checkRateLimit(token: string, ip: string, limitPerMin: number | null): boolean {
+  if (!limitPerMin || limitPerMin <= 0) return true // unlimited
+  const now = Date.now()
+  const windowMs = 60_000
+  let ipMap = shareRateBuckets.get(token)
+  if (!ipMap) {
+    ipMap = new Map()
+    shareRateBuckets.set(token, ipMap)
+  }
+  let hits = ipMap.get(ip) ?? []
+  // Drop entries older than the 60s window.
+  hits = hits.filter((t) => now - t < windowMs)
+  if (hits.length >= limitPerMin) {
+    ipMap.set(ip, hits)
+    return false
+  }
+  hits.push(now)
+  ipMap.set(ip, hits)
+  return true
+}
+
+export interface CreateShareTokenOpts {
+  dbUserId: string
+  collection: string
+  key: string
+  mode: 'read' | 'write' | 'readwrite'
+  label?: string | null
+  /** Minutes until expiry; null/0 = never. */
+  ttlMinutes?: number | null
+  rateLimitPerMin?: number | null
+  allowedOps?: ('set' | 'incr' | 'append')[]
+  maxValueLength?: number | null
+  incrMin?: number | null
+  incrMax?: number | null
+}
+
+export function createShareToken(opts: CreateShareTokenOpts): ShareTokenRecord {
+  const now = new Date().toISOString()
+  const expiresAt =
+    opts.ttlMinutes && opts.ttlMinutes > 0
+      ? new Date(Date.now() + opts.ttlMinutes * 60_000).toISOString()
+      : null
+  const record: ShareTokenRecord = {
+    id: cuid(),
+    token: generateShareToken(),
+    userId: opts.dbUserId,
+    collection: opts.collection || 'default',
+    key: opts.key,
+    mode: opts.mode,
+    label: opts.label?.trim() || null,
+    expiresAt,
+    rateLimitPerMin: opts.rateLimitPerMin ?? null,
+    allowedOps: opts.allowedOps && opts.allowedOps.length > 0 ? opts.allowedOps : ['set', 'incr', 'append'],
+    maxValueLength: opts.maxValueLength ?? null,
+    incrMin: opts.incrMin ?? null,
+    incrMax: opts.incrMax ?? null,
+    createdAt: now,
+    lastUsedAt: null,
+    revoked: false,
+  }
+  store.shareTokens.push(record)
+  saveToDisk()
+  return record
+}
+
+export function listShareTokens(dbUserId: string): ShareTokenRecord[] {
+  return store.shareTokens
+    .filter((t) => t.userId === dbUserId)
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+}
+
+export function findShareToken(token: string): ShareTokenRecord | undefined {
+  return store.shareTokens.find((t) => t.token === token && !t.revoked)
+}
+
+export function findShareTokenById(dbUserId: string, id: string): ShareTokenRecord | undefined {
+  return store.shareTokens.find((t) => t.id === id && t.userId === dbUserId)
+}
+
+export function revokeShareToken(dbUserId: string, id: string): ShareTokenRecord | null {
+  const t = store.shareTokens.find((t) => t.id === id && t.userId === dbUserId)
+  if (!t) return null
+  t.revoked = true
+  saveToDisk()
+  return t
+}
+
+/**
+ * Validate + consume a share-token request. Returns either the token record
+ * (valid, allowed) or a reason string for the caller to turn into an HTTP error.
+ *
+ * Checks: existence, revocation, expiry, mode permission, rate limit.
+ * Mutates lastUsedAt on success.
+ */
+export function resolveShareToken(
+  token: string,
+  ip: string,
+  requiredMode: 'read' | 'write',
+): { ok: true; record: ShareTokenRecord } | { ok: false; reason: string; status: number } {
+  const rec = store.shareTokens.find((t) => t.token === token)
+  if (!rec || rec.revoked) {
+    return { ok: false, reason: 'Invalid or revoked share token.', status: 404 }
+  }
+  if (rec.expiresAt && new Date(rec.expiresAt).getTime() < Date.now()) {
+    return { ok: false, reason: 'This share token has expired.', status: 410 }
+  }
+  const canRead = rec.mode === 'read' || rec.mode === 'readwrite'
+  const canWrite = rec.mode === 'write' || rec.mode === 'readwrite'
+  if (requiredMode === 'read' && !canRead) {
+    return { ok: false, reason: 'This token is write-only.', status: 403 }
+  }
+  if (requiredMode === 'write' && !canWrite) {
+    return { ok: false, reason: 'This token is read-only.', status: 403 }
+  }
+  if (!checkRateLimit(rec.token, ip, rec.rateLimitPerMin)) {
+    return {
+      ok: false,
+      reason: `Rate limit exceeded (${rec.rateLimitPerMin} req/min). Try again shortly.`,
+      status: 429,
+    }
+  }
+  rec.lastUsedAt = new Date().toISOString()
+  saveToDisk()
+  return { ok: true, record: rec }
+}
+
+/** Public-safe projection of a share token (never leaks beyond what's needed). */
+export function publicShareTokenView(t: ShareTokenRecord, origin: string) {
+  return {
+    id: t.id,
+    token: t.token,
+    collection: t.collection,
+    key: t.key,
+    mode: t.mode,
+    label: t.label,
+    expiresAt: t.expiresAt,
+    rateLimitPerMin: t.rateLimitPerMin,
+    allowedOps: t.allowedOps,
+    maxValueLength: t.maxValueLength,
+    incrMin: t.incrMin,
+    incrMax: t.incrMax,
+    createdAt: t.createdAt,
+    lastUsedAt: t.lastUsedAt,
+    revoked: t.revoked,
+    readUrl: `${origin}/v1/share/${t.token}`,
+    writeUrl: `${origin}/v1/write/${t.token}`,
+  }
+}
+
+// ─── File storage (documents up to 2 GB, any extension) ──────────────────────
+//
+// Files live as Telegram document messages. We keep a local FileRecord index
+// with the Telegram file_id (stable) so the public download proxy can call
+// `getFile` to resolve a fresh temporary URL and stream the bytes back. The
+// Telegram download URL itself is NEVER exposed to end users — only the
+// permanent `/f/<fileId>` link is.
+
+/** Generate a public, unguessable file id: `f_<28 hex>`. */
+export function generatePublicFileId(): string {
+  return 'f_' + crypto.randomBytes(14).toString('hex').slice(0, 28)
+}
+
+/** Hard upper bound on a single upload: 2 GiB (Telegram's absolute ceiling). */
+export const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024
+
+/**
+ * Persist a file record AFTER the Telegram upload succeeded. The caller is
+ * responsible for uploading via `sendDocumentFile` and passing the returned
+ * SentDocument. Returns the stored record.
+ */
+export function createFileRecord(
+  dbUserId: string,
+  opts: {
+    sent: SentDocument
+    fileName: string
+    mimeType: string
+    size: number
+    label?: string | null
+    isPublic?: boolean
+    /** Which Telegram backend was used — 'server' (env) or 'custom' (user's own). */
+    storageMode?: 'server' | 'custom'
+  },
+): FileRecord {
+  const now = new Date().toISOString()
+  const record: FileRecord = {
+    id: cuid(),
+    fileId: generatePublicFileId(),
+    userId: dbUserId,
+    fileName: opts.fileName,
+    mimeType: opts.mimeType || 'application/octet-stream',
+    size: opts.size,
+    telegramMessageId: opts.sent.messageId,
+    telegramFileId: opts.sent.fileId,
+    telegramFileUniqueId: opts.sent.fileUniqueId,
+    storageMode: opts.storageMode ?? 'server',
+    label: opts.label?.trim() || null,
+    isPublic: opts.isPublic ?? true,
+    downloads: 0,
+    linkRevokedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  }
+  store.files.push(record)
+  saveToDisk()
+  return record
+}
+
+/** List all files owned by a user, newest first. */
+export function listFileRecords(dbUserId: string): FileRecord[] {
+  return store.files
+    .filter((f) => f.userId === dbUserId)
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+}
+
+/** Find a file by its public file id (used by the download proxy — no auth). */
+export function findFileByPublicId(fileId: string): FileRecord | undefined {
+  return store.files.find((f) => f.fileId === fileId)
+}
+
+/** Find a file by its internal id, scoped to the owner (used by the dashboard). */
+export function findFileById(dbUserId: string, id: string): FileRecord | undefined {
+  return store.files.find((f) => f.id === id && f.userId === dbUserId)
+}
+
+/**
+ * Delete a file: remove the Telegram message (best-effort) and drop the local
+ * record. Returns the removed record, or null if not found / not owned.
+ *
+ * The chatId + botToken are resolved from the FILE's `storageMode` (not the
+ * user's current config) — this is critical because the Telegram message lives
+ * in whichever bot/chat received the upload, which may differ from the user's
+ * current settings if they changed (or removed) their custom config after
+ * uploading.
+ */
+export function deleteFileRecord(dbUserId: string, id: string): FileRecord | null {
+  const idx = store.files.findIndex((f) => f.id === id && f.userId === dbUserId)
+  if (idx === -1) return null
+  const [removed] = store.files.splice(idx, 1)
+  saveToDisk()
+  if (removed.telegramMessageId) {
+    const chatId = resolveFileChatId(removed)
+    const botToken = resolveFileBotToken(removed)
+    void deleteFileMessage(removed.telegramMessageId, chatId, botToken)
+  }
+  return removed
+}
+
+/** Increment the download counter for a file (fire-and-forget save). */
+export function incrementFileDownload(fileId: string): void {
+  const f = store.files.find((x) => x.fileId === fileId)
+  if (!f) return
+  f.downloads++
+  f.updatedAt = new Date().toISOString()
+  saveToDisk()
+}
+
+/**
+ * Mark a file's most-recently-minted Telegram download URL as revoked. This
+ * drops our server-side cache for that URL (so we never re-serve it) and
+ * records a `linkRevokedAt` timestamp on the record.
+ *
+ * IMPORTANT: Telegram's `getFile` URLs cannot be manually revoked — they
+ * expire naturally ~1 hour after being minted. "Revoke" here means we stop
+ * caching and re-serving the URL on our side; the underlying Telegram URL
+ * remains valid until Telegram's own 1-hour timer runs out. The next
+ * "Get link" call will mint a BRAND-NEW URL (a fresh `getFile` call).
+ *
+ * Returns the updated file (or null if not found / not owned).
+ */
+export function markFileLinkRevoked(dbUserId: string, id: string): FileRecord | null {
+  const f = store.files.find((x) => x.id === id && x.userId === dbUserId)
+  if (!f) return null
+  f.linkRevokedAt = Date.now()
+  f.updatedAt = new Date().toISOString()
+  saveToDisk()
+  return f
+}
+
+/** Count + total bytes for a user's files (used by the dashboard stats). */
+export function countFiles(dbUserId: string): { count: number; bytes: number } {
+  const userFiles = store.files.filter((f) => f.userId === dbUserId)
+  return {
+    count: userFiles.length,
+    bytes: userFiles.reduce((sum, f) => sum + (f.size || 0), 0),
+  }
+}
+
+/**
+ * Upload a file to the user's effective Telegram chat and persist a FileRecord.
+ * This is the single entry point used by both the dashboard and the REST API.
+ * ALL file extensions are accepted (the OS / Telegram decide what's storable).
+ */
+export async function uploadFile(
+  dbUserId: string,
+  payload: {
+    file: Blob
+    fileName: string
+    mimeType: string
+    size: number
+    label?: string | null
+    isPublic?: boolean
+  },
+): Promise<{ record: FileRecord } | { error: string }> {
+  if (payload.size <= 0) return { error: 'File is empty.' }
+  if (payload.size > MAX_FILE_SIZE) {
+    return { error: `File is ${(payload.size / 1024 / 1024).toFixed(1)} MB — the 2 GB per-file limit was exceeded.` }
+  }
+  // ─── Storage routing: the "server-sided telegram storage automatically when
+  // custom not set up" rule. ────────────────────────────────────────────────
+  //
+  // - If the user has a FULL custom config (both chatId AND botToken), we use
+  //   THEIR own Telegram bot + chat → `storageMode = 'custom'`.
+  // - Otherwise (no custom config, OR a partial one that can't work), we fall
+  //   back to the operator's env-configured Telegram bot + chat →
+  //   `storageMode = 'server'`. This is the automatic default.
+  //
+  // We never mix a custom chatId with the env bot token (or vice-versa) — that
+  // would always fail because the env bot isn't a member of the user's chat.
+  const storageMode = resolveStorageMode(dbUserId)
+  let chatId: string
+  let botToken: string
+  if (storageMode === 'custom') {
+    const custom = getTelegramConfig(dbUserId)!
+    chatId = custom.chatId.trim()
+    botToken = custom.botToken!.trim()
+  } else {
+    chatId = process.env.TELEGRAM_CHAT_ID || ''
+    botToken = process.env.TELEGRAM_BOT_TOKEN || ''
+  }
+  if (!chatId || !botToken) {
+    return {
+      error:
+        storageMode === 'custom'
+          ? 'Your custom Telegram configuration is incomplete — set BOTH a Chat ID and a Bot Token in Settings, or clear them to use the server-side storage automatically.'
+          : 'Telegram storage is not available. The server operator has not configured the server-side Telegram bot, and you have not set up a custom Bot Token + Chat ID in Settings.',
+    }
+  }
+  const sent = await sendDocumentFile(
+    {
+      file: payload.file,
+      fileName: payload.fileName,
+      mimeType: payload.mimeType,
+      caption: payload.label ? payload.label.slice(0, 200) : undefined,
+    },
+    chatId,
+    botToken,
+  )
+  if (!sent) {
+    return { error: 'Telegram rejected the upload (the file may exceed the cloud Bot API 50 MB limit — a local Bot API server is required for files up to 2 GB).' }
+  }
+  const record = createFileRecord(dbUserId, {
+    sent,
+    fileName: payload.fileName,
+    mimeType: payload.mimeType,
+    size: payload.size,
+    label: payload.label,
+    isPublic: payload.isPublic,
+    storageMode,
+  })
+  return { record }
+}
+
+/** Public-safe projection of a file for the dashboard / API list. */
+export function fileView(f: FileRecord, origin: string) {
+  return {
+    id: f.id,
+    fileId: f.fileId,
+    fileName: f.fileName,
+    mimeType: f.mimeType,
+    size: f.size,
+    storageMode: f.storageMode ?? 'server',
+    label: f.label,
+    isPublic: f.isPublic,
+    downloads: f.downloads,
+    linkRevokedAt: f.linkRevokedAt ?? null,
+    createdAt: f.createdAt,
+    updatedAt: f.updatedAt,
+    downloadUrl: `${origin}/f/${f.fileId}`,
+  }
+}
