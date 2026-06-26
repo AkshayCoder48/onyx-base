@@ -68,3 +68,5 @@ desktop-*.png
 /dl1b.txt
 /download/
 /upload/
+/db/custom.db
+.zscripts/dev.pid
