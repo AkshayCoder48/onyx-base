@@ -1,11 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg width="720" height="520" viewBox="0 0 720 520" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Feature grid">
+<svg width="720" height="560" viewBox="0 0 720 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Feature grid">
   <defs>
     <linearGradient id="tileBg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#ffffff"/>
       <stop offset="100%" stop-color="#f4f3ee"/>
     </linearGradient>
   </defs>
+
+  <!-- Title bar (Task ID 9: svg-text-enhancer) -->
+  <text x="360" y="22" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#2b2825" text-anchor="middle">Feature Grid</text>
+  <text x="360" y="36" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">KV store · Files · Auth · Events · Queues · Share tokens · Admin console</text>
+
+  <g transform="translate(0 40)">
 
   <!-- Row 1 -->
   <!-- KV store -->
@@ -99,4 +105,6 @@
     <text x="595" y="456" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">record:changed events</text>
     <text x="595" y="472" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#d4744f" text-anchor="middle">no polling</text>
   </g>
+  </g>
+
 </svg>

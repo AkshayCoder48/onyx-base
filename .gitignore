@@ -30,8 +30,13 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
-.env*
+# env files — keep real secrets out of git, but DO track the template.
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+# (intentionally NOT ignoring .env.example — it's the safe template users copy)
 
 # vercel
 .vercel
@@ -70,3 +75,9 @@ desktop-*.png
 /upload/
 /db/custom.db
 .zscripts/dev.pid
+
+# Internal dev narrative — contains real test API keys, bot IDs, and scratch
+# credentials. NEVER commit; clone users should never see this.
+worklog.md
+agent-ctx/
+plan.md

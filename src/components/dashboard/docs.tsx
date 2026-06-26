@@ -871,8 +871,9 @@ source: cli
 detail: CLI Telegram Test · cli-tg@example.com
 at: 2026-06-25T07:40:12.000Z`} />
         <p className="text-[13px] text-muted-foreground">
-          Channel: <strong className="text-foreground">Ai Storage</strong> (@aistorage77). Bot:{' '}
-          <strong className="text-foreground">@OnyxArtificialIntelligenceBot</strong>. Check the{' '}
+          Channel: <strong className="text-foreground">{process.env.NEXT_PUBLIC_TELEGRAM_CHANNEL_NAME ?? 'your-channel'}</strong>{' '}
+          (@{process.env.NEXT_PUBLIC_TELEGRAM_CHANNEL_HANDLE ?? 'your_channel'}). Bot:{' '}
+          <strong className="text-foreground">@{process.env.NEXT_PUBLIC_TELEGRAM_BOT_HANDLE ?? 'your_bot'}</strong>. Check the{' '}
           <strong>Settings → Storage backend</strong> panel for live connection status.
         </p>
       </Section>

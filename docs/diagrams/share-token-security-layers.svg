@@ -1,11 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg width="560" height="560" viewBox="0 0 560 560" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Share token security layers">
+<svg width="660" height="600" viewBox="0 0 660 600" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Share token security layers">
   <defs>
     <radialGradient id="ringGlow" cx="50%" cy="50%" r="50%">
       <stop offset="0%" stop-color="#ffffff"/>
       <stop offset="100%" stop-color="#f7e8df"/>
     </radialGradient>
   </defs>
+
+  <!-- Title bar (Task ID 9: svg-text-enhancer) -->
+  <text x="330" y="22" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#2b2825" text-anchor="middle">Share-Token Security Layers</text>
+  <text x="330" y="36" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">Revocable · TTL · scoped · signed — concentric defenses around every shared record</text>
+
+  <g transform="translate(50 40)">
 
   <!-- concentric protective rings -->
   <circle cx="280" cy="280" r="250" fill="none" stroke="#d4744f" stroke-width="3" stroke-dasharray="2 10" stroke-linecap="round" opacity="0.5"/>
@@ -52,4 +58,12 @@
 
   <!-- side annotations -->
   <text x="280" y="540" font-family="system-ui, -apple-system, sans-serif" font-size="11" font-style="italic" fill="#6b6557" text-anchor="middle">Five concentric layers protect every public share token.</text>
+  </g>
+
+  <text x="50" y="275" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#8a3f23" text-anchor="middle">Signed</text>
+  <text x="50" y="288" font-family="system-ui, -apple-system, sans-serif" font-size="10" fill="#6b6557" text-anchor="middle">HMAC</text>
+  <text x="610" y="275" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#8a3f23" text-anchor="middle">Scoped</text>
+  <text x="610" y="288" font-family="system-ui, -apple-system, sans-serif" font-size="10" fill="#6b6557" text-anchor="middle">collection + key</text>
+  <text x="330" y="548" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#8a3f23" text-anchor="middle">Audit-logged</text>
+  <text x="330" y="561" font-family="system-ui, -apple-system, sans-serif" font-size="10" fill="#6b6557" text-anchor="middle">every read &amp; write</text>
 </svg>
