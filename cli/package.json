@@ -1,0 +1,29 @@
+{
+  "name": "onyx-base",
+  "version": "0.1.0",
+  "description": "Onyx Base — Telegram-backed key-value + file storage for developers. Terminal client.",
+  "type": "module",
+  "bin": {
+    "onyx": "./index.js"
+  },
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  },
+  "files": [
+    "index.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "onyx",
+    "onyx-base",
+    "kv",
+    "key-value",
+    "telegram",
+    "cli",
+    "database",
+    "file-storage"
+  ],
+  "license": "MIT"
+}

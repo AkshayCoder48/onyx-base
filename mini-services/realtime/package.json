@@ -1,0 +1,13 @@
+{
+  "name": "cloudkv-realtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CloudKV realtime WebSocket mini-service — receives /notify pings from Next.js API and pushes record:changed events to subscribed dashboard clients.",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.1"
+  }
+}

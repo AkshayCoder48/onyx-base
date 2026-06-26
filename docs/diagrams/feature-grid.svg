@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="720" height="520" viewBox="0 0 720 520" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Feature grid">
+  <defs>
+    <linearGradient id="tileBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#f4f3ee"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Row 1 -->
+  <!-- KV store -->
+  <g>
+    <rect x="20" y="20" width="210" height="220" rx="16" fill="url(#tileBg)" stroke="#d9d4c7" stroke-width="1.5"/>
+    <circle cx="125" cy="95" r="38" fill="#f7e8df"/>
+    <ellipse cx="125" cy="78" rx="26" ry="8" fill="#d4744f"/>
+    <rect x="99" y="78" width="52" height="34" fill="#d4744f"/>
+    <ellipse cx="125" cy="112" rx="26" ry="8" fill="#8a3f23"/>
+    <ellipse cx="125" cy="88" rx="26" ry="8" fill="none" stroke="#ffffff" stroke-width="1.5" stroke-opacity="0.6"/>
+    <ellipse cx="125" cy="98" rx="26" ry="8" fill="none" stroke="#ffffff" stroke-width="1" stroke-opacity="0.4"/>
+    <rect x="60" y="160" width="130" height="10" rx="5" fill="#e8e5dc"/>
+    <rect x="60" y="180" width="100" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="60" y="196" width="115" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="60" y="212" width="70" height="8" rx="4" fill="#f7e8df"/>
+  </g>
+
+  <!-- File storage -->
+  <g>
+    <rect x="255" y="20" width="210" height="220" rx="16" fill="url(#tileBg)" stroke="#d9d4c7" stroke-width="1.5"/>
+    <circle cx="360" cy="95" r="38" fill="#f7e8df"/>
+    <path d="M340 70 L372 70 L384 82 L384 122 L340 122 z" fill="#ffffff" stroke="#d4744f" stroke-width="2.5" stroke-linejoin="round"/>
+    <path d="M372 70 L372 82 L384 82" fill="none" stroke="#d4744f" stroke-width="2.5" stroke-linejoin="round"/>
+    <rect x="348" y="92" width="28" height="4" rx="2" fill="#e09a7a"/>
+    <rect x="348" y="100" width="28" height="4" rx="2" fill="#e09a7a"/>
+    <rect x="348" y="108" width="20" height="4" rx="2" fill="#e09a7a"/>
+    <path d="M348 124 Q340 124 340 132 L340 138 Q340 146 348 146" fill="none" stroke="#8a3f23" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M376 124 Q384 124 384 132 L384 138 Q384 146 376 146" fill="none" stroke="#8a3f23" stroke-width="2.5" stroke-linecap="round"/>
+    <rect x="295" y="160" width="130" height="10" rx="5" fill="#e8e5dc"/>
+    <rect x="295" y="180" width="100" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="295" y="196" width="115" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="295" y="212" width="70" height="8" rx="4" fill="#f7e8df"/>
+  </g>
+
+  <!-- Share tokens -->
+  <g>
+    <rect x="490" y="20" width="210" height="220" rx="16" fill="url(#tileBg)" stroke="#d9d4c7" stroke-width="1.5"/>
+    <circle cx="595" cy="95" r="38" fill="#f7e8df"/>
+    <path d="M595 70 L615 78 L615 100 Q615 116 595 124 Q575 116 575 100 L575 78 z" fill="#d4744f" stroke="#8a3f23" stroke-width="2" stroke-linejoin="round"/>
+    <circle cx="595" cy="92" r="5" fill="#ffffff"/>
+    <rect x="593" y="92" width="4" height="10" rx="2" fill="#ffffff"/>
+    <path d="M575 100 L560 100 M560 96 L556 100 L560 104" stroke="#8a3f23" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M615 100 L630 100 M630 96 L634 100 L630 104" stroke="#8a3f23" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="530" y="160" width="130" height="10" rx="5" fill="#e8e5dc"/>
+    <rect x="530" y="180" width="100" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="530" y="196" width="115" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="530" y="212" width="70" height="8" rx="4" fill="#f7e8df"/>
+  </g>
+
+  <!-- Row 2 -->
+  <!-- CLI -->
+  <g>
+    <rect x="20" y="270" width="210" height="220" rx="16" fill="url(#tileBg)" stroke="#d9d4c7" stroke-width="1.5"/>
+    <circle cx="125" cy="345" r="38" fill="#2b2825"/>
+    <rect x="95" y="325" width="60" height="44" rx="6" fill="#1a1815" stroke="#d4744f" stroke-width="1.5"/>
+    <rect x="95" y="325" width="60" height="10" rx="6" fill="#2b2825"/>
+    <circle cx="101" cy="330" r="1.5" fill="#d4744f"/>
+    <circle cx="106" cy="330" r="1.5" fill="#e09a7a"/>
+    <circle cx="111" cy="330" r="1.5" fill="#b1ada1"/>
+    <path d="M102 346 L108 350 L102 354" stroke="#d4744f" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="112" y="348" width="28" height="3" rx="1.5" fill="#e09a7a"/>
+    <rect x="112" y="356" width="18" height="3" rx="1.5" fill="#6b6557"/>
+    <rect x="60" y="410" width="130" height="10" rx="5" fill="#e8e5dc"/>
+    <rect x="60" y="430" width="100" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="60" y="446" width="115" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="60" y="462" width="70" height="8" rx="4" fill="#f7e8df"/>
+  </g>
+
+  <!-- REST API -->
+  <g>
+    <rect x="255" y="270" width="210" height="220" rx="16" fill="url(#tileBg)" stroke="#d9d4c7" stroke-width="1.5"/>
+    <circle cx="360" cy="345" r="38" fill="#f7e8df"/>
+    <path d="M346 328 Q338 328 338 336 L338 342 Q338 348 332 348 Q338 348 338 354 L338 360 Q338 368 346 368" fill="none" stroke="#d4744f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M374 328 Q382 328 382 336 L382 342 Q382 348 388 348 Q382 348 382 354 L382 360 Q382 368 374 368" fill="none" stroke="#d4744f" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="360" cy="348" r="4" fill="#8a3f23"/>
+    <rect x="295" y="410" width="130" height="10" rx="5" fill="#e8e5dc"/>
+    <rect x="295" y="430" width="100" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="295" y="446" width="115" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="295" y="462" width="70" height="8" rx="4" fill="#f7e8df"/>
+  </g>
+
+  <!-- Realtime -->
+  <g>
+    <rect x="490" y="270" width="210" height="220" rx="16" fill="url(#tileBg)" stroke="#d9d4c7" stroke-width="1.5"/>
+    <circle cx="595" cy="345" r="38" fill="#f7e8df"/>
+    <path d="M600 322 L580 350 L594 350 L588 370 L608 342 L594 342 L600 322 z" fill="#d4744f" stroke="#8a3f23" stroke-width="1.5" stroke-linejoin="round"/>
+    <circle cx="595" cy="345" r="30" fill="none" stroke="#d4744f" stroke-width="1.5" stroke-opacity="0.4"/>
+    <circle cx="595" cy="345" r="42" fill="none" stroke="#d4744f" stroke-width="1" stroke-opacity="0.2"/>
+    <rect x="530" y="410" width="130" height="10" rx="5" fill="#e8e5dc"/>
+    <rect x="530" y="430" width="100" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="530" y="446" width="115" height="8" rx="4" fill="#ece9e1"/>
+    <rect x="530" y="462" width="70" height="8" rx="4" fill="#f7e8df"/>
+  </g>
+</svg>
