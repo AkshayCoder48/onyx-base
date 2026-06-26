@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server'
 import { ok, fail, isValidEmail } from '@/lib/auth'
 import { findUserByEmail } from '@/lib/data-store'
 import { createOtp, isOtpRateLimited, OTP_PURPOSES, type OtpPurpose } from '@/lib/otp'
-import { sendOtpEmail, isSmtpConfigured } from '@/lib/email'
+import { sendOtpEmail, isEmailConfigured } from '@/lib/email'
 import { verifyEmail } from '@/lib/email-verify'
 
 export const runtime = 'nodejs'
@@ -129,26 +129,20 @@ export async function POST(req: NextRequest) {
 
   // Delivery-failure fallback policy:
   //
-  // If SMTP is configured but delivery FAILS (e.g. Gmail rejects the password
-  // with "535 Username and Password not accepted" because the operator hasn't
-  // generated an App Password), we do NOT block the signup/login flow.
-  // Instead we fall back to dev mode: the code is returned as `devCode` so the
-  // user can complete verification, AND a `warning` field surfaces the SMTP
-  // error so the operator knows email delivery is broken and can fix it.
+  // If the email API is configured but delivery FAILS (e.g. invalid API key,
+  // unverified sender domain, rate limit exceeded), we do NOT block the
+  // signup/login flow. Instead we fall back to dev mode: the code is returned
+  // as `devCode` so the user can complete verification, AND a `warning` field
+  // surfaces the error so the operator knows email delivery is broken and
+  // can fix it.
   //
-  // This matches the user's requirement: "make it real that it send emails" —
-  // when SMTP works, real emails send; when it doesn't, the flow still works
-  // and the operator is told exactly what to fix.
+  // This matches the user's requirement: when the email API works, real
+  // emails send; when it doesn't, the flow still works and the operator is
+  // told exactly what to fix.
   if (!result.delivered && !result.devMode) {
-    // Detect Gmail auth failures and append the App Password guidance.
-    const isAuthFailure = /535|Username and Password not accepted|BadCredentials/i.test(
-      result.message,
-    )
-    const warning = isAuthFailure
-      ? `Email delivery failed — Gmail rejected the SMTP credentials. You likely need to generate an App Password at https://myaccount.google.com/apppasswords (regular Gmail passwords are blocked for SMTP). Original error: ${result.message}`
-      : `Email delivery failed — showing the code inline instead. Fix SMTP config to enable real email delivery. Error: ${result.message}`
+    const warning = `Email delivery failed — showing the code inline instead. Fix your RESEND_API_KEY / RESEND_FROM config in .env to enable real email delivery. Error: ${result.message}`
 
-    console.warn(`[otp] SMTP delivery failed, falling back to dev mode for ${email}: ${result.message}`)
+    console.warn(`[otp] Email delivery failed, falling back to dev mode for ${email}: ${result.message}`)
 
     return ok({
       delivered: false,
@@ -156,7 +150,7 @@ export async function POST(req: NextRequest) {
       expiresInSeconds: 600,
       devCode: code,
       warning,
-      message: 'SMTP delivery failed — verification code shown inline (dev fallback).',
+      message: 'Email delivery failed — verification code shown inline (dev fallback).',
     })
   }
 
@@ -171,17 +165,17 @@ export async function POST(req: NextRequest) {
 }
 
 /**
- * Convenience GET so an operator can probe whether SMTP is configured without
- * sending a code. Returns `{ ok: true, smtpConfigured: boolean, devMode: boolean }`.
+ * Convenience GET so an operator can probe whether the email API is configured
+ * without sending a code. Returns `{ ok: true, emailConfigured: boolean, devMode: boolean }`.
  * Useful for the admin dashboard's "OTP delivery" status indicator.
  */
 export async function GET() {
-  const configured = isSmtpConfigured()
+  const configured = await isEmailConfigured()
   return ok({
-    smtpConfigured: configured,
+    emailConfigured: configured,
     devMode: !configured,
     message: configured
-      ? 'SMTP is configured — OTP codes are delivered via email.'
-      : 'SMTP is NOT configured — OTP codes are returned as devCode in the API response and logged to the server console (local dev mode).',
+      ? 'Email is configured — OTP codes are delivered via email. Provider priority: Gmail OAuth2 > SMTP > Resend.'
+      : 'Email is NOT configured — OTP codes are returned as devCode in the API response and logged to the server console (local dev mode). Connect Gmail in the admin Email tab (no App Password, 500/day free) OR set SMTP_* (Brevo: 300/day free) OR RESEND_API_KEY (100/day free) in .env.',
   })
 }

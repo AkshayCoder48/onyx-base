@@ -314,7 +314,7 @@ export function LoginScreen() {
       } else {
         toast.success(
           res.devMode
-            ? 'Dev mode — code shown below (SMTP not configured).'
+            ? 'Dev mode — code shown below (email API not configured).'
             : 'Verification code sent to your email.',
         )
       }
@@ -362,7 +362,7 @@ export function LoginScreen() {
       } else {
         toast.success(
           res.devMode
-            ? 'Dev mode — code shown below (SMTP not configured).'
+            ? 'Dev mode — code shown below (email API not configured).'
             : 'A sign-in code was sent to your email.',
         )
       }
@@ -440,7 +440,7 @@ export function LoginScreen() {
       } else {
         toast.success(
           res.devMode
-            ? 'Dev mode — code shown below (SMTP not configured).'
+            ? 'Dev mode — code shown below (email API not configured).'
             : 'A reset code was sent to your email.',
         )
       }
@@ -744,7 +744,7 @@ export function LoginScreen() {
                                 <div className="rounded-md border border-amber-400/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
                                   <strong>Dev mode:</strong> your code is{' '}
                                   <code className="font-mono font-bold text-base">{signupDevCode}</code>
-                                  <span className="block text-[10px] mt-0.5 opacity-80">(SMTP not configured — set SMTP_HOST etc. in .env to send real emails.)</span>
+                                  <span className="block text-[10px] mt-0.5 opacity-80">(Email not configured — connect Gmail in the admin Email tab [no App Password] or set SMTP_*/RESEND_API_KEY in .env to send real emails.)</span>
                                 </div>
                               )}
                               <InputOTP
@@ -1001,7 +1001,7 @@ export function LoginScreen() {
                                 <div className="rounded-md border border-amber-400/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
                                   <strong>Dev mode:</strong> your code is{' '}
                                   <code className="font-mono font-bold text-base">{otpLoginDevCode}</code>
-                                  <span className="block text-[10px] mt-0.5 opacity-80">(SMTP not configured — set SMTP_HOST etc. in .env to send real emails.)</span>
+                                  <span className="block text-[10px] mt-0.5 opacity-80">(Email not configured — connect Gmail in the admin Email tab [no App Password] or set SMTP_*/RESEND_API_KEY in .env to send real emails.)</span>
                                 </div>
                               )}
                               <div className="space-y-2">
@@ -1187,7 +1187,7 @@ export function LoginScreen() {
                 <div className="rounded-md border border-amber-400/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-300">
                   <strong>Dev mode:</strong> your code is{' '}
                   <code className="font-mono font-bold text-base">{resetDevCode}</code>
-                  <span className="block text-[10px] mt-0.5 opacity-80">(SMTP not configured.)</span>
+                  <span className="block text-[10px] mt-0.5 opacity-80">(Email not configured — connect Gmail in admin Email tab or set SMTP_*/RESEND_API_KEY in .env.)</span>
                 </div>
               )}
               <div className="space-y-2">
