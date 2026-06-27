@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   BookOpen,
   Copy,
@@ -32,6 +32,11 @@ import {
   Trash2,
   RefreshCw,
   Cpu,
+  Table2,
+  Lightbulb,
+  Rocket,
+  FileText,
+  Loader2,
 } from 'lucide-react'
 import { PageHeader } from './shell'
 import { useOnyxBase } from '@/lib/store'
@@ -121,7 +126,7 @@ function EndpointCard({
   auth,
   children,
 }: {
-  method: 'GET' | 'POST' | 'DELETE'
+  method: 'GET' | 'POST' | 'PATCH' | 'DELETE'
   path: string
   title: string
   description: string
@@ -131,6 +136,7 @@ function EndpointCard({
   const methodColor =
     method === 'GET' ? 'bg-primary/15 text-primary border-primary/30'
     : method === 'POST' ? 'bg-amber-100 text-amber-800 border-amber-300'
+    : method === 'PATCH' ? 'bg-violet-100 text-violet-700 border-violet-300'
     : 'bg-rose-100 text-rose-700 border-rose-300'
   return (
     <div className="rounded-xl border border-border/60 bg-card/30 overflow-hidden">
@@ -227,6 +233,113 @@ function TokenCard(t: TokenDef) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Single-page view — fetches /llms.txt and renders the same combined doc that
+// LLMs see, so the in-app docs literally combine every tab into one page.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function SinglePageView() {
+  const [text, setText] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/llms.txt')
+      .then((r) => {
+        if (!r.ok) throw new Error(`/llms.txt returned ${r.status}`)
+        return r.text()
+      })
+      .then((t) => { if (!cancelled) setText(t) })
+      .catch((e) => { if (!cancelled) setErr(String(e?.message ?? e)) })
+    return () => { cancelled = true }
+  }, [])
+
+  async function copyAll() {
+    if (!text) return
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+      toast.success('Copied — paste into your favourite LLM')
+    } catch {
+      toast.error('Copy failed')
+    }
+  }
+
+  if (err) {
+    return (
+      <Card className="p-5 bg-card/40 border-border/60">
+        <div className="flex items-center gap-2.5 text-rose-700">
+          <FileText className="size-4" />
+          <span className="text-sm font-medium">Failed to load /llms.txt</span>
+        </div>
+        <p className="text-[13px] text-muted-foreground mt-2">{err}</p>
+      </Card>
+    )
+  }
+
+  if (text === null) {
+    return (
+      <Card className="p-8 bg-card/40 border-border/60 grid place-items-center">
+        <div className="flex items-center gap-2.5 text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" />
+          <span className="text-sm">Loading combined doc from /llms.txt…</span>
+        </div>
+      </Card>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card className="p-4 bg-primary/5 border-primary/20">
+        <div className="flex flex-wrap items-center gap-3 justify-between">
+          <div className="flex items-start gap-2.5">
+            <FileText className="size-4 text-primary mt-0.5 shrink-0" />
+            <div className="text-sm space-y-1">
+              <p className="font-medium text-foreground">One page, every tab combined</p>
+              <p className="text-muted-foreground text-[12.5px] leading-relaxed">
+                This is the exact same content served at{' '}
+                <code className="font-mono text-primary">/llms.txt</code> — the llmstxt.org
+                convention. It combines Overview, Keys &amp; Tokens, Features, REST API, CLI,
+                Realtime, Telegram durability, and Roadmap into a single linear doc that&apos;s
+                safe to paste into any AI assistant.
+              </p>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" onClick={copyAll} className="gap-1.5 shrink-0">
+            {copied
+              ? <><Check className="size-3.5 text-emerald-600" /> Copied</>
+              : <><Copy className="size-3.5" /> Copy all</>}
+          </Button>
+        </div>
+      </Card>
+
+      <Card className="p-0 bg-card/40 border-border/60 overflow-hidden">
+        <div className="flex items-center justify-between px-4 py-2 border-b border-border/40 bg-muted/30">
+          <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
+            <FileText className="size-3.5" />
+            <span className="font-mono">/llms.txt</span>
+            <span className="text-muted-foreground/60">·</span>
+            <span>{(text.length / 1024).toFixed(1)} KB · markdown</span>
+          </div>
+          <a
+            href="/llms.txt"
+            target="_blank"
+            rel="noreferrer"
+            className="text-[12px] text-primary hover:underline"
+          >
+            Open raw →
+          </a>
+        </div>
+        <pre className="max-h-[70vh] overflow-auto scroll-slim p-5 text-[12px] leading-relaxed font-mono text-foreground/90 whitespace-pre-wrap break-words">
+{text}
+        </pre>
+      </Card>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main Docs view
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -260,7 +373,7 @@ export function DocsView() {
     <div className="space-y-6">
       <PageHeader
         title="Docs"
-        description="Everything you need to use Onyx Base — keys & tokens, every dashboard feature, the REST API, the CLI, realtime, and Telegram-backed durability."
+        description="Everything you need to use Onyx Base — keys & tokens, every dashboard feature, the REST API, the CLI, realtime, and Telegram-backed durability. Open the Single page tab to see all of it combined into one LLM-friendly doc."
         actions={
           <Button variant="outline" size="sm" onClick={copyForLlms} className="gap-1.5">
             {llmCopied
@@ -273,6 +386,9 @@ export function DocsView() {
       <Tabs defaultValue="overview" className="space-y-6">
         <div className="overflow-x-auto scroll-slim -mx-1 px-1">
           <TabsList className="inline-flex h-10 w-max gap-0.5">
+            <TabsTrigger value="single" className="text-[12px] px-3 whitespace-nowrap gap-1.5 bg-primary/10">
+              <FileText className="size-3.5 text-primary" /> Single page
+            </TabsTrigger>
             <TabsTrigger value="overview" className="text-[12px] px-3 whitespace-nowrap gap-1.5">
               <Globe className="size-3.5" /> Overview
             </TabsTrigger>
@@ -294,8 +410,16 @@ export function DocsView() {
             <TabsTrigger value="telegram" className="text-[12px] px-3 whitespace-nowrap gap-1.5">
               <LifeBuoy className="size-3.5" /> Telegram durability
             </TabsTrigger>
+            <TabsTrigger value="roadmap" className="text-[12px] px-3 whitespace-nowrap gap-1.5">
+              <Rocket className="size-3.5" /> Roadmap
+            </TabsTrigger>
           </TabsList>
         </div>
+
+        {/* ───────────────────────── Single page (combined) ───────────────────────── */}
+        <TabsContent value="single" className="space-y-5">
+          <SinglePageView />
+        </TabsContent>
 
         {/* ───────────────────────── Overview ───────────────────────── */}
         <TabsContent value="overview" className="space-y-5">
@@ -692,9 +816,14 @@ localStorage.removeItem('cloudkv-session')`} />
               body="A real SQL console that runs against virtual tables (records, collections, api_keys, logs, users) pre-filtered to your account. Run SELECT / INSERT / UPDATE / DELETE / CREATE / DROP / ALTER statements, plus create your own usr_* tables for custom schemas. 1000-row cap per result, API keys masked in output, ⌘+Enter to run. The fastest way to do bulk updates or exploratory queries."
             />
             <FeatureCard
+              icon={<Table2 className="size-4" />}
+              title="Tables"
+              body="Account-scoped SQL tables with read-only / write-only / read+write access modes. Define a schema (TEXT / INTEGER / REAL / NUMERIC / BLOB / DATETIME / BOOLEAN columns, primary keys, auto-increment, defaults, nullability), then drive full CRUD from a real database-grid UI in the dashboard, the REST API (/v1/tables/*), or the CLI (onyx tables). Each table gets a unique usr_<name>_<hash> SQLite name so two accounts can both own a 'notes' table without colliding. Toggle the access mode at any time to lock down public-facing tables."
+            />
+            <FeatureCard
               icon={<BookOpen className="size-4" />}
               title="Docs"
-              body="This tab. A comprehensive, in-app reference covering the architecture, every key and token type, every dashboard feature, the full REST API surface, the CLI, the realtime model, and the Telegram durability story. Use it as a quick lookup while you code — copy buttons on every code block, multi-language examples, and a 'Copy for LLMs' button at the top to grab the whole spec for an AI assistant."
+              body="This tab. A comprehensive, in-app reference covering the architecture, every key and token type, every dashboard feature, the full REST API surface, the CLI, the realtime model, and the Telegram durability story. Use it as a quick lookup while you code — copy buttons on every code block, multi-language examples, and a 'Copy for LLMs' button at the top to grab the whole spec for an AI assistant. The 'Single page' tab combines every section into one LLM-friendly document — the exact same content served at /llms.txt."
             />
             <FeatureCard
               icon={<ScrollText className="size-4" />}
@@ -736,6 +865,369 @@ Authorization: Bearer ${keyForCode}
             </div>
           </Card>
 
+          {/* Quick start in any language */}
+          <Card className="p-5 bg-card/40 border-border/60">
+            <div className="flex items-center gap-2.5 mb-3">
+              <Globe className="size-4 text-primary" />
+              <h3 className="font-semibold text-[15px]">Quick start in any language</h3>
+            </div>
+            <p className="text-[13.5px] text-muted-foreground leading-relaxed mb-4">
+              The five core operations below — set, get, upload, create a table, insert a row — cover ~90% of what you&apos;ll
+              do. Each sample uses <code className="font-mono text-primary">https://onyx.example.com</code> and{' '}
+              <code className="font-mono text-primary">kv_live_YOUR_API_KEY</code> as literal placeholders so you can copy,
+              swap, and run. Pick your language and copy the snippet.
+            </p>
+
+            <div className="space-y-6">
+              {/* 1. Set a value */}
+              <div>
+                <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-2">1 · Set a value — <code className="font-mono normal-case">POST /v1/set</code></h4>
+                <MultiLangCode samples={[
+                  { lang: 'bash', label: 'curl', code: `curl -X POST https://onyx.example.com/v1/set \\
+  -H "Authorization: Bearer kv_live_YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"key":"greeting","value":"hello world"}'` },
+                  { lang: 'javascript', label: 'Node', code: `const r = await fetch("https://onyx.example.com/v1/set", {
+  method: "POST",
+  headers: {
+    Authorization: "Bearer kv_live_YOUR_API_KEY",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ key: "greeting", value: "hello world" }),
+});
+console.log(await r.json());` },
+                  { lang: 'python', label: 'Python', code: `import requests
+r = requests.post(
+    "https://onyx.example.com/v1/set",
+    headers={"Authorization": "Bearer kv_live_YOUR_API_KEY"},
+    json={"key": "greeting", "value": "hello world"},
+)
+print(r.json())` },
+                  { lang: 'go', label: 'Go', code: `package main
+
+import ("bytes"; "fmt"; "net/http")
+
+func main() {
+    body := []byte("{\"key\":\"greeting\",\"value\":\"hello world\"}")
+    req, _ := http.NewRequest("POST", "https://onyx.example.com/v1/set", bytes.NewReader(body))
+    req.Header.Set("Authorization", "Bearer kv_live_YOUR_API_KEY")
+    req.Header.Set("Content-Type", "application/json")
+    r, _ := http.DefaultClient.Do(req)
+    defer r.Body.Close()
+    fmt.Println(r.Status)
+}` },
+                  { lang: 'rust', label: 'Rust', code: `use reqwest::blocking::Client;
+
+fn main() -> reqwest::Result<()> {
+    let c = Client::new();
+    let r = c.post("https://onyx.example.com/v1/set")
+        .bearer_auth("kv_live_YOUR_API_KEY")
+        .json(&serde_json::json!({"key":"greeting","value":"hello world"}))
+        .send()?;
+    println!("{}", r.status());
+    Ok(())
+}` },
+                  { lang: 'php', label: 'PHP', code: `<?php
+$ch = curl_init("https://onyx.example.com/v1/set");
+curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+        "Authorization: Bearer kv_live_YOUR_API_KEY",
+        "Content-Type: application/json",
+    ],
+    CURLOPT_POSTFIELDS => json_encode(["key" => "greeting", "value" => "hello world"]),
+]);
+echo curl_exec($ch), "\\n";` },
+                ]} />
+              </div>
+
+              {/* 2. Get a value */}
+              <div>
+                <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-2">2 · Get a value — <code className="font-mono normal-case">GET /v1/get/:key</code></h4>
+                <MultiLangCode samples={[
+                  { lang: 'bash', label: 'curl', code: `curl -H "Authorization: Bearer kv_live_YOUR_API_KEY" \\
+  https://onyx.example.com/v1/get/greeting` },
+                  { lang: 'javascript', label: 'Node', code: `const r = await fetch("https://onyx.example.com/v1/get/greeting", {
+  headers: { Authorization: "Bearer kv_live_YOUR_API_KEY" },
+});
+console.log(await r.json());` },
+                  { lang: 'python', label: 'Python', code: `import requests
+r = requests.get(
+    "https://onyx.example.com/v1/get/greeting",
+    headers={"Authorization": "Bearer kv_live_YOUR_API_KEY"},
+)
+print(r.json())` },
+                  { lang: 'go', label: 'Go', code: `package main
+
+import ("fmt"; "io"; "net/http")
+
+func main() {
+    req, _ := http.NewRequest("GET", "https://onyx.example.com/v1/get/greeting", nil)
+    req.Header.Set("Authorization", "Bearer kv_live_YOUR_API_KEY")
+    r, _ := http.DefaultClient.Do(req)
+    defer r.Body.Close()
+    b, _ := io.ReadAll(r.Body)
+    fmt.Println(string(b))
+}` },
+                  { lang: 'rust', label: 'Rust', code: `use reqwest::blocking::Client;
+
+fn main() -> reqwest::Result<()> {
+    let r = Client::new()
+        .get("https://onyx.example.com/v1/get/greeting")
+        .bearer_auth("kv_live_YOUR_API_KEY")
+        .send()?;
+    println!("{}", r.text()?);
+    Ok(())
+}` },
+                  { lang: 'php', label: 'PHP', code: `<?php
+$ch = curl_init("https://onyx.example.com/v1/get/greeting");
+curl_setopt_array($ch, [
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => ["Authorization: Bearer kv_live_YOUR_API_KEY"],
+]);
+echo curl_exec($ch), "\\n";` },
+                ]} />
+              </div>
+
+              {/* 3. Upload a file */}
+              <div>
+                <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-2">3 · Upload a file — <code className="font-mono normal-case">POST /v1/files</code></h4>
+                <MultiLangCode samples={[
+                  { lang: 'bash', label: 'curl', code: `curl -X POST https://onyx.example.com/v1/files \\
+  -H "Authorization: Bearer kv_live_YOUR_API_KEY" \\
+  -F "file=@./report.pdf" \\
+  -F "label=Q3 report"` },
+                  { lang: 'javascript', label: 'Node', code: `const fd = new FormData();
+fd.append("file", new Blob([await fs.readFile("./report.pdf")]), "report.pdf");
+fd.append("label", "Q3 report");
+const r = await fetch("https://onyx.example.com/v1/files", {
+  method: "POST",
+  headers: { Authorization: "Bearer kv_live_YOUR_API_KEY" },
+  body: fd,
+});
+console.log(await r.json());` },
+                  { lang: 'python', label: 'Python', code: `import requests
+with open("report.pdf", "rb") as f:
+    r = requests.post(
+        "https://onyx.example.com/v1/files",
+        headers={"Authorization": "Bearer kv_live_YOUR_API_KEY"},
+        files={"file": ("report.pdf", f)},
+        data={"label": "Q3 report"},
+    )
+print(r.json())` },
+                  { lang: 'go', label: 'Go', code: `package main
+
+import ("bytes"; "fmt"; "io"; "mime/multipart"; "net/http"; "os")
+
+func main() {
+    f, _ := os.Open("report.pdf")
+    defer f.Close()
+    var buf bytes.Buffer
+    w := multipart.NewWriter(&buf)
+    fw, _ := w.CreateFormFile("file", "report.pdf")
+    io.Copy(fw, f)
+    w.WriteField("label", "Q3 report")
+    w.Close()
+    req, _ := http.NewRequest("POST", "https://onyx.example.com/v1/files", &buf)
+    req.Header.Set("Authorization", "Bearer kv_live_YOUR_API_KEY")
+    req.Header.Set("Content-Type", w.FormDataContentType())
+    r, _ := http.DefaultClient.Do(req)
+    defer r.Body.Close()
+    fmt.Println(r.Status)
+}` },
+                  { lang: 'rust', label: 'Rust', code: `use reqwest::blocking::{Client, multipart};
+
+fn main() -> reqwest::Result<()> {
+    let form = multipart::Form::new()
+        .file("file", "./report.pdf")?
+        .text("label", "Q3 report");
+    let r = Client::new()
+        .post("https://onyx.example.com/v1/files")
+        .bearer_auth("kv_live_YOUR_API_KEY")
+        .multipart(form)
+        .send()?;
+    println!("{}", r.status());
+    Ok(())
+}` },
+                  { lang: 'php', label: 'PHP', code: `<?php
+$ch = curl_init("https://onyx.example.com/v1/files");
+curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => ["Authorization: Bearer kv_live_YOUR_API_KEY"],
+    CURLOPT_POSTFIELDS => [
+        "file" => new CURLFile("report.pdf"),
+        "label" => "Q3 report",
+    ],
+]);
+echo curl_exec($ch), "\\n";` },
+                ]} />
+              </div>
+
+              {/* 4. Create a table */}
+              <div>
+                <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-2">4 · Create a table — <code className="font-mono normal-case">POST /v1/tables</code></h4>
+                <MultiLangCode samples={[
+                  { lang: 'bash', label: 'curl', code: `curl -X POST https://onyx.example.com/v1/tables \\
+  -H "Authorization: Bearer kv_live_YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"tasks","accessMode":"readwrite","columns":[{"name":"id","type":"INTEGER","primary":true,"autoIncrement":true},{"name":"title","type":"TEXT","nullable":false},{"name":"done","type":"BOOLEAN","defaultValue":"0"}]}'` },
+                  { lang: 'javascript', label: 'Node', code: `const r = await fetch("https://onyx.example.com/v1/tables", {
+  method: "POST",
+  headers: {
+    Authorization: "Bearer kv_live_YOUR_API_KEY",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    name: "tasks",
+    accessMode: "readwrite",
+    columns: [
+      { name: "id", type: "INTEGER", primary: true, autoIncrement: true },
+      { name: "title", type: "TEXT", nullable: false },
+      { name: "done", type: "BOOLEAN", defaultValue: "0" },
+    ],
+  }),
+});
+console.log(await r.json());` },
+                  { lang: 'python', label: 'Python', code: `import requests
+r = requests.post(
+    "https://onyx.example.com/v1/tables",
+    headers={"Authorization": "Bearer kv_live_YOUR_API_KEY"},
+    json={
+        "name": "tasks",
+        "accessMode": "readwrite",
+        "columns": [
+            {"name": "id", "type": "INTEGER", "primary": True, "autoIncrement": True},
+            {"name": "title", "type": "TEXT", "nullable": False},
+            {"name": "done", "type": "BOOLEAN", "defaultValue": "0"},
+        ],
+    },
+)
+print(r.json())` },
+                  { lang: 'go', label: 'Go', code: `package main
+
+import ("bytes"; "fmt"; "net/http")
+
+func main() {
+    body := []byte("{\"name\":\"tasks\",\"accessMode\":\"readwrite\",\"columns\":[{\"name\":\"id\",\"type\":\"INTEGER\",\"primary\":true,\"autoIncrement\":true},{\"name\":\"title\",\"type\":\"TEXT\",\"nullable\":false},{\"name\":\"done\",\"type\":\"BOOLEAN\",\"defaultValue\":\"0\"}]}")
+    req, _ := http.NewRequest("POST", "https://onyx.example.com/v1/tables", bytes.NewReader(body))
+    req.Header.Set("Authorization", "Bearer kv_live_YOUR_API_KEY")
+    req.Header.Set("Content-Type", "application/json")
+    r, _ := http.DefaultClient.Do(req)
+    defer r.Body.Close()
+    fmt.Println(r.Status)
+}` },
+                  { lang: 'rust', label: 'Rust', code: `use reqwest::blocking::Client;
+
+fn main() -> reqwest::Result<()> {
+    let body = serde_json::json!({
+        "name": "tasks",
+        "accessMode": "readwrite",
+        "columns": [
+            {"name":"id","type":"INTEGER","primary":true,"autoIncrement":true},
+            {"name":"title","type":"TEXT","nullable":false},
+            {"name":"done","type":"BOOLEAN","defaultValue":"0"},
+        ]
+    });
+    let r = Client::new()
+        .post("https://onyx.example.com/v1/tables")
+        .bearer_auth("kv_live_YOUR_API_KEY")
+        .json(&body)
+        .send()?;
+    println!("{}", r.status());
+    Ok(())
+}` },
+                  { lang: 'php', label: 'PHP', code: `<?php
+$body = json_encode([
+    "name" => "tasks",
+    "accessMode" => "readwrite",
+    "columns" => [
+        ["name" => "id", "type" => "INTEGER", "primary" => true, "autoIncrement" => true],
+        ["name" => "title", "type" => "TEXT", "nullable" => false],
+        ["name" => "done", "type" => "BOOLEAN", "defaultValue" => "0"],
+    ],
+]);
+$ch = curl_init("https://onyx.example.com/v1/tables");
+curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+        "Authorization: Bearer kv_live_YOUR_API_KEY",
+        "Content-Type: application/json",
+    ],
+    CURLOPT_POSTFIELDS => $body,
+]);
+echo curl_exec($ch), "\\n";` },
+                ]} />
+              </div>
+
+              {/* 5. Insert a row */}
+              <div>
+                <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-2">5 · Insert a row — <code className="font-mono normal-case">POST /v1/tables/:name/rows</code></h4>
+                <MultiLangCode samples={[
+                  { lang: 'bash', label: 'curl', code: `curl -X POST https://onyx.example.com/v1/tables/tasks/rows \\
+  -H "Authorization: Bearer kv_live_YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"row":{"title":"Buy milk","done":false}}'` },
+                  { lang: 'javascript', label: 'Node', code: `const r = await fetch("https://onyx.example.com/v1/tables/tasks/rows", {
+  method: "POST",
+  headers: {
+    Authorization: "Bearer kv_live_YOUR_API_KEY",
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ row: { title: "Buy milk", done: false } }),
+});
+console.log(await r.json());` },
+                  { lang: 'python', label: 'Python', code: `import requests
+r = requests.post(
+    "https://onyx.example.com/v1/tables/tasks/rows",
+    headers={"Authorization": "Bearer kv_live_YOUR_API_KEY"},
+    json={"row": {"title": "Buy milk", "done": False}},
+)
+print(r.json())` },
+                  { lang: 'go', label: 'Go', code: `package main
+
+import ("bytes"; "fmt"; "net/http")
+
+func main() {
+    body := []byte("{\"row\":{\"title\":\"Buy milk\",\"done\":false}}")
+    req, _ := http.NewRequest("POST", "https://onyx.example.com/v1/tables/tasks/rows", bytes.NewReader(body))
+    req.Header.Set("Authorization", "Bearer kv_live_YOUR_API_KEY")
+    req.Header.Set("Content-Type", "application/json")
+    r, _ := http.DefaultClient.Do(req)
+    defer r.Body.Close()
+    fmt.Println(r.Status)
+}` },
+                  { lang: 'rust', label: 'Rust', code: `use reqwest::blocking::Client;
+
+fn main() -> reqwest::Result<()> {
+    let body = serde_json::json!({"row": {"title": "Buy milk", "done": false}});
+    let r = Client::new()
+        .post("https://onyx.example.com/v1/tables/tasks/rows")
+        .bearer_auth("kv_live_YOUR_API_KEY")
+        .json(&body)
+        .send()?;
+    println!("{}", r.status());
+    Ok(())
+}` },
+                  { lang: 'php', label: 'PHP', code: `<?php
+$ch = curl_init("https://onyx.example.com/v1/tables/tasks/rows");
+curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER => [
+        "Authorization: Bearer kv_live_YOUR_API_KEY",
+        "Content-Type: application/json",
+    ],
+    CURLOPT_POSTFIELDS => json_encode(["row" => ["title" => "Buy milk", "done" => false]]),
+]);
+echo curl_exec($ch), "\\n";` },
+                ]} />
+              </div>
+            </div>
+          </Card>
+
           {/* Key-value endpoints */}
           <div className="space-y-3">
             <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">Key-value</h4>
@@ -773,6 +1265,48 @@ Authorization: Bearer ${keyForCode}
             <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">Collections</h4>
             <EndpointCard method="GET" path="/v1/collections" title="List collections" auth="required" description="Returns every collection with its record count." />
             <EndpointCard method="GET" path="/v1/collections/:name" title="Collection detail" auth="required" description="Returns metadata for one collection." />
+          </div>
+
+          {/* Tables endpoints */}
+          <div className="space-y-3">
+            <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">Tables</h4>
+            <Card className="p-4 bg-card/40 border-border/60">
+              <p className="text-[13px] text-muted-foreground leading-relaxed">
+                Account-scoped SQL tables. Each table you create gets a unique{' '}
+                <code className="font-mono text-primary">usr_&lt;name&gt;_&lt;hash&gt;</code> SQLite name so two accounts can both
+                own a <code className="font-mono">notes</code> table without colliding. Each table has an{' '}
+                <strong>access mode</strong> that controls what the public API can do:{' '}
+                <code className="font-mono">read</code> → GET only;{' '}
+                <code className="font-mono">write</code> → POST / PATCH / DELETE only;{' '}
+                <code className="font-mono">readwrite</code> → everything. The dashboard owner can always do everything
+                regardless of mode — the <code className="font-mono">/api/dashboard/tables/*</code> routes have the same
+                shape but skip the access-mode check.
+              </p>
+            </Card>
+            <EndpointCard method="GET" path="/v1/tables" title="List your tables" auth="required" description="Returns every table owned by the calling account, with name, accessMode, rowCount, schema, and timestamps." />
+            <EndpointCard method="POST" path="/v1/tables" title="Create a table" auth="required" description={'Body: { name, columns: ColumnDef[], accessMode?: "read"|"write"|"readwrite" }. ColumnDef = { name, type: "TEXT"|"INTEGER"|"REAL"|"NUMERIC"|"BLOB"|"DATETIME"|"BOOLEAN", primary?, autoIncrement?, nullable?, defaultValue? }. accessMode defaults to "readwrite".'}>
+              <CodeBlock lang="bash" code={`# Create a "tasks" table (read+write via the public API)
+curl -X POST ${apiBase}/v1/tables \\
+  -H "Authorization: Bearer ${keyForCode}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"tasks","accessMode":"readwrite","columns":[{"name":"id","type":"INTEGER","primary":true,"autoIncrement":true},{"name":"title","type":"TEXT","nullable":false},{"name":"done","type":"BOOLEAN","defaultValue":"0"}]}'
+
+# Insert a row
+curl -X POST ${apiBase}/v1/tables/tasks/rows \\
+  -H "Authorization: Bearer ${keyForCode}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"row":{"title":"Buy milk","done":false}}'
+
+# List rows
+curl -H "Authorization: Bearer ${keyForCode}" ${apiBase}/v1/tables/tasks/rows`} />
+            </EndpointCard>
+            <EndpointCard method="GET" path="/v1/tables/:name" title="Describe a table" auth="required" description="Returns the table's schema, current rowCount, a sample of the first few rows, and the active accessMode." />
+            <EndpointCard method="PATCH" path="/v1/tables/:name" title="Update access mode" auth="required" description={'Body: { accessMode: "read"|"write"|"readwrite" }. Toggle a public-facing table between read-only, write-only, and full access. Takes effect on the very next request.'} />
+            <EndpointCard method="DELETE" path="/v1/tables/:name" title="Drop a table" auth="required" description="Permanently drops the table (SQLite DROP TABLE) and deletes its metadata row. Cannot be undone — the data is gone, but the Telegram audit-log mirror of the drop event remains." />
+            <EndpointCard method="GET" path="/v1/tables/:name/rows" title="List rows" auth="required (read or readwrite)" description="Returns up to 100 rows by default; bump with ?limit= (max 1000). Honors the access mode — returns 403 if the table is write-only." />
+            <EndpointCard method="POST" path="/v1/tables/:name/rows" title="Insert a row" auth="required (write or readwrite)" description={'Body: { row: { col: value, ... } }. Validates the row against the schema (type-check, nullability, defaults) and returns the inserted row with auto-incremented / defaulted columns filled in.'} />
+            <EndpointCard method="PATCH" path="/v1/tables/:name/rows" title="Update a row by PK" auth="required (write or readwrite)" description={'Body: { pk: { col: value }, patch: { col: value } }. Locates the row by its primary-key column(s) and applies the patch. Validates types against the schema.'} />
+            <EndpointCard method="DELETE" path="/v1/tables/:name/rows" title="Delete a row by PK" auth="required (write or readwrite)" description={'Body: { pk: { col: value } }. Removes the row whose primary-key column matches. 404 if no row matches.'} />
           </div>
 
           {/* Account & ops endpoints */}
@@ -863,7 +1397,49 @@ onyx files                                          # list stored files
 onyx download f_abc123 ./out.pdf                    # download by fileId
 onyx file-link f_abc123                             # mint a fresh ~1h download link
 onyx file-revoke f_abc123                           # drop the cached link
-onyx file-delete f_abc123                           # permanently delete a file`} />
+onyx file-delete f_abc123                           # permanently delete a file
+
+# Tables (account-scoped SQL tables; alias: tbl)
+onyx tables                                          # list your tables (alias: onyx tbl)
+onyx tables create tasks --columns "id:INTEGER:pk:ai,title:TEXT:notnull,body:TEXT" --access rw
+onyx tables describe tasks                           # schema + sample rows
+onyx tables rows tasks                               # list rows (default 100)
+onyx tables insert tasks --data '{"title":"Buy milk","done":false}'
+onyx tables update tasks --pk '{"id":1}' --data '{"done":true}'
+onyx tables delete tasks --pk '{"id":1}' --yes
+onyx tables drop tasks --yes                         # drop the whole table
+onyx tables mode tasks r                             # change access mode (r=read, w=write, rw=readwrite)`} />
+
+          <Card className="p-4 bg-card/40 border-border/60">
+            <div className="flex items-center gap-2.5 mb-2">
+              <Table2 className="size-4 text-primary" />
+              <h4 className="font-semibold text-[14px]">Column-spec mini-DSL</h4>
+            </div>
+            <p className="text-[13px] text-muted-foreground mb-3">
+              The <code className="font-mono text-primary">--columns</code> argument for{' '}
+              <code className="font-mono">onyx tables create</code> uses a comma-separated mini-DSL. Each column is:
+            </p>
+            <CodeBlock lang="text" code={`name:TYPE[:pk][:ai][:notnull][:default=VALUE]
+
+  name      any SQL-safe identifier (letters, digits, _)
+  TYPE      INTEGER | TEXT | REAL | NUMERIC | BLOB | DATETIME | BOOLEAN
+  pk        marks the column as PRIMARY KEY
+  ai        AUTOINCREMENT (implies INTEGER + pk)
+  notnull   adds NOT NULL
+  default=… sets a DEFAULT value (colons inside the value are respected if the
+            whole spec is quoted, e.g. "ts:DATETIME:default=2024-01-01 12:00:00")
+
+Examples:
+  "id:INTEGER:pk:ai,title:TEXT:notnull,body:TEXT"
+  "id:INTEGER:pk:ai,email:TEXT:notnull,created:DATETIME:default=now"
+  "k:TEXT:pk,v:TEXT,tags:TEXT"`} />
+            <p className="text-[12px] text-muted-foreground mt-3 leading-relaxed">
+              The CLI parses this spec client-side and POSTs the same{' '}
+              <code className="font-mono">{`{ name, columns: ColumnDef[], accessMode }`}</code> body the REST API expects,
+              so <code className="font-mono">--access rw</code> is just shorthand for{' '}
+              <code className="font-mono">readwrite</code>.
+            </p>
+          </Card>
 
           <Card className="p-4 bg-card/40 border-border/60">
             <div className="flex items-center gap-2.5 mb-2">
@@ -1023,6 +1599,121 @@ onyx file-delete f_abc123                           # permanently delete a file`
                   it&apos;s free, takes 30 seconds, and you already have a Telegram account. Your data lives in{' '}
                   <strong>your</strong> Telegram chat; you can walk away with it at any time. Stop using Onyx Base
                   tomorrow and your full database is still sitting there, fully readable.
+                </p>
+              </div>
+            </div>
+          </Card>
+        </TabsContent>
+
+        {/* ───────────────────────── Roadmap ───────────────────────── */}
+        <TabsContent value="roadmap" className="space-y-5">
+          <Card className="p-5 bg-primary/5 border-primary/20">
+            <div className="flex gap-3">
+              <div className="size-9 rounded-lg bg-primary/10 border border-primary/30 grid place-items-center shrink-0">
+                <Rocket className="size-4 text-primary" />
+              </div>
+              <div className="text-sm space-y-1.5">
+                <p className="font-medium text-foreground">25 more Telegram-powered data-storing features — ideas only</p>
+                <p className="text-muted-foreground text-[13px] leading-relaxed">
+                  Below are 25 features Onyx Base could grow into. Every one leans on a unique property of the Telegram
+                  Bot API — chat-as-storage, message-edit, pinned messages, file attachments, channels, topic threads,
+                  replies, inline keyboards, callback queries, <code className="font-mono">forwardMessage</code>,{' '}
+                  <code className="font-mono">copyMessage</code>, <code className="font-mono">editMessageText</code>,{' '}
+                  <code className="font-mono">setMyCommands</code>, Telegram Passport, message scheduling, polls, stickers,
+                  and so on. They are grouped into five categories of five. Nothing here is implemented yet — these are
+                  design notes for future work, not promises.
+                </p>
+              </div>
+            </div>
+          </Card>
+
+          {/* Storage models */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Database className="size-4 text-primary" />
+              <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">Storage models</h4>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Channel-as-collection" body="Each Telegram channel maps 1-to-1 to a KV collection; posting a message in the channel creates a record, deleting the message drops the key. Channels become first-class, externally-addressable namespaces." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Topic-thread collections" body="In a supergroup with topics enabled, each topic thread is a sub-collection. One chat can host dozens of parallel collections, partitioned by topic_id, with per-topic ACLs inherited from the group." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Message-thread transactions" body="Group a multi-key transaction as a reply thread: each reply is one mutated key, and the thread closes atomically when the parent message is edited to 'committed'. Rollback = deleting the thread." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Pinned-message indexes" body="Maintain B-tree-like secondary indexes as pinned messages — one pinned JSON document per indexed column, re-pinned on every write. Lookups become O(1) chat reads instead of full scans." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="File-dedup via file_unique_id" body="Telegram assigns every uploaded file a globally-unique file_unique_id. Detect duplicate uploads by it and dedupe — store one Telegram document, reference-count the rest." />
+            </div>
+          </div>
+
+          {/* Bot interactions */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <TerminalSquare className="size-4 text-primary" />
+              <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">Bot interactions</h4>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Telegram-native CRUD bot" body="Reply to a KV mirror message in the chat to update the corresponding record — the bot parses the reply and mutates the store. Edit a mirror message to overwrite, delete it to drop the key." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Bot-command SQL REPL" body="setMyCommands registers /sql, /get, /set, /list. Run /sql SELECT * FROM tasks WHERE done=0 directly in the chat; the bot returns the result as a formatted message or CSV attachment." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Inline-keyboard TTL controls" body="Every mirror message ships with inline buttons: '+1h', '+1d', 'revoke'. Tapping a button fires a callback_query that adjusts the record's TTL without an API call." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Sticker-as-boolean toggle" body="React to a mirror message with a 👍 sticker to flip a boolean key true, 👎 to flip it false. The bot watches message_reactions and mutates the store in response." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Webhook-from-reply" body="Reply 'retry' to a failed-write mirror message to replay the operation. Reply 'rollback' to undo. The reply chain becomes a per-record operations console." />
+            </div>
+          </div>
+
+          {/* Replication & backup */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <RefreshCw className="size-4 text-primary" />
+              <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">Replication & backup</h4>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Cross-chat replication" body="Mirror the same record to N Telegram chats for multi-region redundancy. Reads fail over to the next chat on a 404; writes fan out and reconcile via the pinned manifest." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Bot-2-bot hot backup" body="A second bot mirrors the first bot's chat via getUpdates + forwardMessage, giving a hot-standby that can take over instantly if the primary bot token is compromised or revoked." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Message-edit diff log" body="Every KV edit's Telegram mirror keeps the previous value as a reply in the thread — free, append-only version history with no extra storage cost." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Channel-topic partitions" body="Shard a hot collection across multiple topics in a channel for write throughput. The bot hashes the key → topic_id, so writes spread across topics instead of contending on one." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Forwarded-message provenance" body="When a record is copied from another chat, store the original chat_id + message_id as provenance metadata — giving every value an audit trail back to its source." />
+            </div>
+          </div>
+
+          {/* Developer experience */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Code2 className="size-4 text-primary" />
+              <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">Developer experience</h4>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Telegram-login-widget sessions" body="Replace the email+password recovery flow with Telegram's login widget — sign in with one tap, no OTP, no password to forget. The bot's signed identity proof becomes the session." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Chat-as-a-queue" body="Use a dedicated chat as a FIFO work queue: producers send messages, consumers poll via getUpdates with a long-poll offset. ack = deleteMessage, retry = edit + repost." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Scheduled writes via message scheduling" body="Telegram's schedule_message becomes a delayed KV write — schedule a message 24h out, and the bot applies it as a set when it fires. Cron, but stored in Telegram." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="QR-code value replies" body="After every set, the bot replies with a QR code image of the value — scan-to-share on mobile without copy-paste. Optional per-collection toggle." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Voice-note transcriptions" body="Upload a voice message; the bot transcribes it via Whisper and stores the text as the value. Audio + transcript both live in Telegram, retrievable as a paired album." />
+            </div>
+          </div>
+
+          {/* Integrations */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <Globe className="size-4 text-primary" />
+              <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">Integrations</h4>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Telegram-passport-backed auth" body="Use Telegram Passport for KYC-verified accounts — the bot requests identity documents, the user approves via Telegram's native UI, and the verified status is mirrored to the manifest." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Poll-backed aggregations" body="A Telegram poll mirrors a numeric KV counter; votes update it via getUpdates. Closing the poll freezes the counter, exporting the result as a snapshot matview." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Album-as-document" body="Group multiple file uploads as a single logical document via Telegram's media-album feature. One record, N attachments, atomic download." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Message-reply-graph for FKs" body="Model foreign-key relationships as reply chains — a child record's mirror message replies to its parent's. Cascading deletes = walk the reply tree with deleteMessage." />
+              <FeatureCard icon={<Lightbulb className="size-4" />} title="Animated-avatar config reflection" body="Store user profile config (theme, avatar, status text) as KV; the bot's own avatar and bio reflect the live state, so the bot's profile is a live status board." />
+            </div>
+          </div>
+
+          <Card className="p-4 bg-card/40 border-border/60">
+            <div className="flex gap-3">
+              <div className="size-9 rounded-lg bg-primary/10 border border-primary/20 grid place-items-center shrink-0">
+                <Lightbulb className="size-4 text-primary" />
+              </div>
+              <div className="text-sm space-y-1.5">
+                <p className="font-medium text-foreground">None of this is implemented yet</p>
+                <p className="text-muted-foreground text-[13px] leading-relaxed">
+                  These are design notes — the goal is to show how much further Telegram-as-a-database can go. Vote for
+                  your favourites by opening an issue, or build one yourself on top of the existing{' '}
+                  <code className="font-mono text-primary">/v1/*</code> surface and{' '}
+                  <code className="font-mono text-primary">/v1/tables/*</code> endpoints.
                 </p>
               </div>
             </div>
