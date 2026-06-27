@@ -5,9 +5,10 @@ import {
   uploadFile,
   fileView,
   MAX_FILE_SIZE,
+  resolveBotApiBaseUrl,
 } from '@/lib/data-store'
 import { logAction } from '@/lib/kv'
-import { sendEventMessage } from '@/lib/telegram'
+import { sendEventMessage, effectiveUploadLimitBytes } from '@/lib/telegram'
 
 export const runtime = 'nodejs'
 // Allow large multipart uploads (up to 2 GB). Next.js route handlers stream
@@ -21,7 +22,11 @@ export async function GET(req: NextRequest) {
 
   const origin = getPublicOrigin(req)
   const files = listFileRecords(user.dbUserId).map((f) => fileView(f, origin))
-  return ok({ files, maxFileSize: MAX_FILE_SIZE })
+  // The effective upload limit depends on whether the user has a local Bot API
+  // server configured: 50 MB (cloud) or 2 GB (local). The UI uses this to set
+  // the upload button's disabled state + the limit badge.
+  const maxFileUploadBytes = effectiveUploadLimitBytes(resolveBotApiBaseUrl(user.dbUserId))
+  return ok({ files, maxFileSize: MAX_FILE_SIZE, maxFileUploadBytes })
 }
 
 /**
@@ -77,5 +82,6 @@ export async function POST(req: NextRequest) {
   return ok({
     file: fileView(result.record, getPublicOrigin(req)),
     maxFileSize: MAX_FILE_SIZE,
+    maxFileUploadBytes: effectiveUploadLimitBytes(resolveBotApiBaseUrl(user.dbUserId)),
   })
 }

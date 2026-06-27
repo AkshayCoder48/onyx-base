@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server'
 import { authenticate, ok, fail, getPublicOrigin } from '@/lib/auth'
-import { findFileById, resolveFileBotToken, markFileLinkRevoked } from '@/lib/data-store'
+import { findFileById, resolveFileBotToken, resolveFileBotApiBaseUrl, markFileLinkRevoked } from '@/lib/data-store'
 import {
   getCachedFileDownloadUrl,
   invalidateCachedFileUrl,
@@ -53,15 +53,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
 
   // ?force=1 → bust the cache so the next call hits Telegram for a brand-new URL.
   const force = req.nextUrl.searchParams.get('force') === '1'
+  const botToken = resolveFileBotToken(file)
+  const botApiBaseUrl = resolveFileBotApiBaseUrl(file)
   if (force) {
-    invalidateCachedFileUrl(file.telegramFileId, resolveFileBotToken(file))
+    invalidateCachedFileUrl(file.telegramFileId, botToken, botApiBaseUrl)
   }
 
-  const botToken = resolveFileBotToken(file)
-  const resolved = await getCachedTelegramDirectUrl(file.telegramFileId, botToken)
+  const resolved = await getCachedTelegramDirectUrl(file.telegramFileId, botToken, botApiBaseUrl)
   if (!resolved) {
     return fail(
-      'Could not resolve a download URL from Telegram. The file may have been removed from the backing chat, or it exceeds the cloud Bot API 20 MB download limit (a local Bot API server is required for larger files).',
+      'Could not resolve a download URL from Telegram. The file may have been removed from the backing chat. If you are using the cloud Bot API, files over 20 MB cannot be downloaded via getFile — configure a custom local Bot API server in Settings to enable 2 GB downloads.',
       502,
     )
   }

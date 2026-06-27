@@ -27,6 +27,8 @@ import {
   fetchPinnedManifest,
   sendDocumentFile,
   deleteFileMessage,
+  CLOUD_UPLOAD_LIMIT_BYTES,
+  LOCAL_BOT_API_LIMIT_BYTES,
   type TelegramPayload,
   type SentDocument,
 } from '@/lib/telegram'
@@ -97,6 +99,14 @@ interface TelegramConfigRecord {
   botToken: string | null
   /** Whether the bot token was set by the user (for display; the token itself is never returned to the client). */
   hasCustomBotToken: boolean
+  /**
+   * Optional custom local Bot API server URL (e.g. `http://localhost:8081`).
+   * When set, ALL Telegram API calls for this user route through this server
+   * instead of the cloud api.telegram.org. This unlocks 2 GB uploads/downloads
+   * (the cloud API caps at 50 MB upload / 20 MB download).
+   * See: https://github.com/tdlib/telegram-bot-api
+   */
+  botApiBaseUrl: string | null
   updatedAt: string
 }
 
@@ -168,6 +178,15 @@ export interface FileRecord {
    * custom config. `storageMode` is what lets us resolve the right bot.
    */
   storageMode: 'server' | 'custom'
+  /**
+   * The Bot API base URL used at upload time. `null`/empty = cloud api.telegram.org.
+   * A non-empty URL (e.g. `http://localhost:8081`) means the file was uploaded
+   * via a local Bot API server — its `telegramFileId` is LOCAL and can ONLY be
+   * resolved by the same local server + the same bot token. We store this on
+   * the file record so the download proxy knows which backend to call, even if
+   * the user later removes or changes their custom server config.
+   */
+  botApiBaseUrl: string | null
   /** Optional human label. */
   label: string | null
   /** Whether the permanent link works without authentication. Default true. */
@@ -331,16 +350,21 @@ function ensureShape(loaded: Partial<StoreShape>): StoreShape {
     apiKeys: loaded.apiKeys ?? [],
     records: loaded.records ?? [],
     logs: loaded.logs ?? [],
-    telegramConfigs: loaded.telegramConfigs ?? [],
+    telegramConfigs: (loaded.telegramConfigs ?? []).map((c) => ({
+      ...c,
+      botApiBaseUrl: c.botApiBaseUrl ?? null,
+    })),
     shareTokens: loaded.shareTokens ?? [],
-    // Backfill `storageMode` and `linkRevokedAt` on legacy file records
-    // (created before these fields existed). Old files defaulted to the env
-    // bot, so we treat them as 'server' — correct for any file uploaded before
-    // the server-vs-custom split, since the only path was env fallback.
+    // Backfill `storageMode`, `linkRevokedAt`, and `botApiBaseUrl` on legacy
+    // file records (created before these fields existed). Old files defaulted
+    // to the env bot, so we treat them as 'server' — correct for any file
+    // uploaded before the server-vs-custom split, since the only path was env
+    // fallback.
     files: (loaded.files ?? []).map((f) => ({
       ...f,
       storageMode: (f.storageMode ?? 'server') as 'server' | 'custom',
       linkRevokedAt: f.linkRevokedAt ?? null,
+      botApiBaseUrl: f.botApiBaseUrl ?? null,
     })),
     collectionNames: loaded.collectionNames ?? [],
     adminKeys: loaded.adminKeys ?? [],
@@ -370,11 +394,15 @@ function backfillInPlace(existing: StoreShape): StoreShape {
   if (!Array.isArray(existing.records)) existing.records = []
   if (!Array.isArray(existing.logs)) existing.logs = []
   if (!Array.isArray(existing.telegramConfigs)) existing.telegramConfigs = []
+  for (const c of existing.telegramConfigs) {
+    if (c.botApiBaseUrl === undefined) c.botApiBaseUrl = null
+  }
   if (!Array.isArray(existing.shareTokens)) existing.shareTokens = []
   if (!Array.isArray(existing.files)) existing.files = []
   for (const f of existing.files) {
     if (f.storageMode === undefined) f.storageMode = 'server'
     if (f.linkRevokedAt === undefined) f.linkRevokedAt = null
+    if (f.botApiBaseUrl === undefined) f.botApiBaseUrl = null
   }
   if (!Array.isArray(existing.collectionNames)) existing.collectionNames = []
   if (!Array.isArray(existing.adminKeys)) existing.adminKeys = []
@@ -617,9 +645,9 @@ export function buildIdentityManifest(): string {
  * (syncUserIdentityToTelegram) which is pushed to the user's OWN custom
  * chat + bot token, or via email+password login.
  */
-export function syncIdentityToTelegram(chatId?: string, botToken?: string): Promise<number | null> {
+export function syncIdentityToTelegram(chatId?: string, botToken?: string, botApiBaseUrl?: string): Promise<number | null> {
   const json = buildIdentityManifest()
-  return sendAndPinManifest(json, chatId, botToken)
+  return sendAndPinManifest(json, chatId, botToken, botApiBaseUrl)
 }
 
 // ─── Per-user manifest (custom-chat recovery) ────────────────────────────────
@@ -673,7 +701,8 @@ export async function syncUserIdentityToTelegram(dbUserId: string): Promise<numb
   }
   const json = buildUserManifest(dbUserId)
   if (!json) return null
-  return sendAndPinManifest(json, config.chatId.trim(), config.botToken.trim())
+  const botApiBaseUrl = config.botApiBaseUrl?.trim() || ''
+  return sendAndPinManifest(json, config.chatId.trim(), config.botToken.trim(), botApiBaseUrl)
 }
 
 /**
@@ -692,7 +721,7 @@ export async function rehydrateUserFromTelegram(dbUserId: string): Promise<{
   if (!config || !config.chatId.trim() || !config.hasCustomBotToken || !config.botToken) {
     return { attempted: false, usersRestored: 0, keysRestored: 0 }
   }
-  const json = await fetchPinnedManifest(config.chatId.trim(), config.botToken.trim())
+  const json = await fetchPinnedManifest(config.chatId.trim(), config.botToken.trim(), config.botApiBaseUrl?.trim() || '')
   if (json === null) {
     return { attempted: false, usersRestored: 0, keysRestored: 0 }
   }
@@ -820,13 +849,13 @@ export function restoreIdentityFromBackup(rawJson: string): {
  * any missing users / keys into the local store. Best-effort: returns a
  * summary but never throws. Used on cold boot and on auth miss.
  */
-export async function rehydrateFromTelegram(chatId?: string, botToken?: string): Promise<{
+export async function rehydrateFromTelegram(chatId?: string, botToken?: string, botApiBaseUrl?: string): Promise<{
   attempted: boolean
   usersRestored: number
   keysRestored: number
   error?: string
 }> {
-  const json = await fetchPinnedManifest(chatId, botToken)
+  const json = await fetchPinnedManifest(chatId, botToken, botApiBaseUrl)
   if (json === null) {
     return { attempted: false, usersRestored: 0, keysRestored: 0 }
   }
@@ -864,12 +893,14 @@ export function upsertRecord(
     valueType: string
     chatId?: string
     botToken?: string
+    botApiBaseUrl?: string
   },
 ): { record: RecordEntry; created: boolean } {
   const existing = findRecord(dbUserId, opts.collection, opts.key)
   const now = new Date().toISOString()
   const chatId = opts.chatId
   const botToken = opts.botToken
+  const botApiBaseUrl = opts.botApiBaseUrl
 
   if (existing) {
     existing.value = opts.value
@@ -888,9 +919,9 @@ export function upsertRecord(
       op: 'SET',
     }
     if (existing.telegramMessageId) {
-      void editKvMessage(existing.telegramMessageId, payload, chatId, botToken)
+      void editKvMessage(existing.telegramMessageId, payload, chatId, botToken, botApiBaseUrl)
     } else {
-      void sendKvMessage(payload, chatId, botToken).then((msgId) => {
+      void sendKvMessage(payload, chatId, botToken, botApiBaseUrl).then((msgId) => {
         if (msgId) {
           existing.telegramMessageId = msgId
           saveToDisk()
@@ -924,7 +955,7 @@ export function upsertRecord(
     updatedAt: Math.floor(Date.now() / 1000),
     op: 'SET',
   }
-  void sendKvMessage(payload, chatId, botToken).then((msgId) => {
+  void sendKvMessage(payload, chatId, botToken, botApiBaseUrl).then((msgId) => {
     if (msgId) {
       record.telegramMessageId = msgId
       saveToDisk()
@@ -940,6 +971,7 @@ export function deleteRecord(
   key: string,
   chatId?: string,
   botToken?: string,
+  botApiBaseUrl?: string,
 ): RecordEntry | null {
   const idx = store.records.findIndex(
     (r) => r.userId === dbUserId && r.collection === collection && r.key === key,
@@ -948,7 +980,7 @@ export function deleteRecord(
   const [removed] = store.records.splice(idx, 1)
   saveToDisk()
   if (removed.telegramMessageId) {
-    void deleteKvMessage(removed.telegramMessageId, chatId, botToken)
+    void deleteKvMessage(removed.telegramMessageId, chatId, botToken, botApiBaseUrl)
   }
   return removed
 }
@@ -1069,7 +1101,7 @@ export function countCollections(dbUserId: string): number {
  * distinguishes "found but empty" (0) from "not found" (null), so the route
  * can return the correct 404.
  */
-export function deleteCollection(dbUserId: string, name: string, chatId?: string, botToken?: string): number | null {
+export function deleteCollection(dbUserId: string, name: string, chatId?: string, botToken?: string, botApiBaseUrl?: string): number | null {
   const existsInRecords = store.records.some(
     (r) => r.userId === dbUserId && r.collection === name,
   )
@@ -1082,7 +1114,7 @@ export function deleteCollection(dbUserId: string, name: string, chatId?: string
     (r) => r.userId === dbUserId && r.collection === name,
   )
   for (const r of toRemove) {
-    if (r.telegramMessageId) void deleteKvMessage(r.telegramMessageId, chatId, botToken)
+    if (r.telegramMessageId) void deleteKvMessage(r.telegramMessageId, chatId, botToken, botApiBaseUrl)
   }
   store.records = store.records.filter((r) => !(r.userId === dbUserId && r.collection === name))
   removeCollectionName(dbUserId, name)
@@ -1279,6 +1311,35 @@ export function resolveStorageMode(dbUserId: string): 'server' | 'custom' {
 }
 
 /**
+ * Resolve the effective Bot API base URL for a user: custom config → env → '' (cloud default).
+ * Returns '' when the cloud api.telegram.org is in use.
+ */
+export function resolveBotApiBaseUrl(dbUserId: string): string {
+  const custom = getTelegramConfig(dbUserId)
+  if (custom && custom.botApiBaseUrl && custom.botApiBaseUrl.trim()) return custom.botApiBaseUrl.trim()
+  return process.env.TELEGRAM_BOT_API_URL || ''
+}
+
+/**
+ * Resolve the Bot API base URL for an EXISTING file based on its stored
+ * `botApiBaseUrl` (captured at upload time). Falls back to the user's current
+ * config or env for legacy files uploaded before this field existed.
+ */
+export function resolveFileBotApiBaseUrl(file: FileRecord): string {
+  // Prefer the URL stored on the file record (captured at upload time).
+  if (file.botApiBaseUrl && file.botApiBaseUrl.trim()) return file.botApiBaseUrl.trim()
+  // Legacy files (uploaded before this field existed) — infer from the user's
+  // current config or env. This is best-effort: if the user had a local server
+  // at upload time but removed it since, we can't know the original URL. The
+  // file_id would be unresolvable in that case regardless.
+  if (file.storageMode === 'custom') {
+    const custom = getTelegramConfig(file.userId)
+    if (custom && custom.botApiBaseUrl && custom.botApiBaseUrl.trim()) return custom.botApiBaseUrl.trim()
+  }
+  return process.env.TELEGRAM_BOT_API_URL || ''
+}
+
+/**
  * Resolve the chat ID for an EXISTING file based on its `storageMode` — NOT the
  * user's current config (which may have changed since upload). Files uploaded to
  * the server bot stay on the server bot; files uploaded to a custom bot stay on
@@ -1308,15 +1369,17 @@ export function resolveFileBotToken(file: FileRecord): string {
   return process.env.TELEGRAM_BOT_TOKEN || ''
 }
 
-/** Set or update the per-user Telegram chat ID and/or bot token. */
+/** Set or update the per-user Telegram chat ID, bot token, and/or local Bot API server URL. */
 export function setTelegramConfig(
   dbUserId: string,
   chatId: string,
   label?: string | null,
   botToken?: string | null,
+  botApiBaseUrl?: string | null,
 ): TelegramConfigRecord {
   const trimmed = chatId.trim()
   const trimmedToken = botToken?.trim() || null
+  const trimmedUrl = botApiBaseUrl?.trim() || null
   const existing = store.telegramConfigs.find((c) => c.userId === dbUserId)
   const now = new Date().toISOString()
   let record: TelegramConfigRecord
@@ -1329,6 +1392,10 @@ export function setTelegramConfig(
       existing.botToken = trimmedToken
       existing.hasCustomBotToken = !!trimmedToken
     }
+    // Same semantics for botApiBaseUrl: undefined = preserve, null = clear, string = set.
+    if (botApiBaseUrl !== undefined) {
+      existing.botApiBaseUrl = trimmedUrl
+    }
     existing.updatedAt = now
     saveToDisk()
     record = existing
@@ -1339,6 +1406,7 @@ export function setTelegramConfig(
       label: label ?? null,
       botToken: trimmedToken,
       hasCustomBotToken: !!trimmedToken,
+      botApiBaseUrl: trimmedUrl,
       updatedAt: now,
     }
     store.telegramConfigs.push(record)
@@ -1567,6 +1635,8 @@ export function createFileRecord(
     isPublic?: boolean
     /** Which Telegram backend was used — 'server' (env) or 'custom' (user's own). */
     storageMode?: 'server' | 'custom'
+    /** The Bot API base URL used at upload time (null/empty = cloud api.telegram.org). */
+    botApiBaseUrl?: string | null
   },
 ): FileRecord {
   const now = new Date().toISOString()
@@ -1581,6 +1651,7 @@ export function createFileRecord(
     telegramFileId: opts.sent.fileId,
     telegramFileUniqueId: opts.sent.fileUniqueId,
     storageMode: opts.storageMode ?? 'server',
+    botApiBaseUrl: opts.botApiBaseUrl?.trim() || null,
     label: opts.label?.trim() || null,
     isPublic: opts.isPublic ?? true,
     downloads: 0,
@@ -1628,7 +1699,8 @@ export function deleteFileRecord(dbUserId: string, id: string): FileRecord | nul
   if (removed.telegramMessageId) {
     const chatId = resolveFileChatId(removed)
     const botToken = resolveFileBotToken(removed)
-    void deleteFileMessage(removed.telegramMessageId, chatId, botToken)
+    const botApiBaseUrl = resolveFileBotApiBaseUrl(removed)
+    void deleteFileMessage(removed.telegramMessageId, chatId, botToken, botApiBaseUrl)
   }
   return removed
 }
@@ -1690,9 +1762,6 @@ export async function uploadFile(
   },
 ): Promise<{ record: FileRecord } | { error: string }> {
   if (payload.size <= 0) return { error: 'File is empty.' }
-  if (payload.size > MAX_FILE_SIZE) {
-    return { error: `File is ${(payload.size / 1024 / 1024).toFixed(1)} MB — the 2 GB per-file limit was exceeded.` }
-  }
   // ─── Storage routing: the "server-sided telegram storage automatically when
   // custom not set up" rule. ────────────────────────────────────────────────
   //
@@ -1707,13 +1776,16 @@ export async function uploadFile(
   const storageMode = resolveStorageMode(dbUserId)
   let chatId: string
   let botToken: string
+  let botApiBaseUrl: string
   if (storageMode === 'custom') {
     const custom = getTelegramConfig(dbUserId)!
     chatId = custom.chatId.trim()
     botToken = custom.botToken!.trim()
+    botApiBaseUrl = custom.botApiBaseUrl?.trim() || ''
   } else {
     chatId = process.env.TELEGRAM_CHAT_ID || ''
     botToken = process.env.TELEGRAM_BOT_TOKEN || ''
+    botApiBaseUrl = process.env.TELEGRAM_BOT_API_URL || ''
   }
   if (!chatId || !botToken) {
     return {
@@ -1722,6 +1794,17 @@ export async function uploadFile(
           ? 'Your custom Telegram configuration is incomplete — set BOTH a Chat ID and a Bot Token in Settings, or clear them to use the server-side storage automatically.'
           : 'Telegram storage is not available. The server operator has not configured the server-side Telegram bot, and you have not set up a custom Bot Token + Chat ID in Settings.',
     }
+  }
+  // ─── Size-limit enforcement (BEFORE hitting Telegram) ─────────────────────
+  // The cloud Bot API caps uploads at 50 MB; a local Bot API server raises that
+  // to 2 GB. Enforce the right limit here so the user gets a clear, actionable
+  // error message instead of a confusing Telegram rejection.
+  const maxBytes = botApiBaseUrl ? LOCAL_BOT_API_LIMIT_BYTES : CLOUD_UPLOAD_LIMIT_BYTES
+  if (payload.size > maxBytes) {
+    const hint = botApiBaseUrl
+      ? 'The file exceeds the 2 GB local Bot API server limit.'
+      : 'The file exceeds the 50 MB cloud Bot API upload limit. To upload files up to 2 GB, configure a custom local Bot API server URL in Settings → Telegram chat ID.'
+    return { error: `File is ${(payload.size / 1024 / 1024).toFixed(1)} MB — ${hint}` }
   }
   const sent = await sendDocumentFile(
     {
@@ -1732,18 +1815,22 @@ export async function uploadFile(
     },
     chatId,
     botToken,
+    botApiBaseUrl,
   )
-  if (!sent) {
-    return { error: 'Telegram rejected the upload (the file may exceed the cloud Bot API 50 MB limit — a local Bot API server is required for files up to 2 GB).' }
+  if (!sent.ok) {
+    // Surface the ACTUAL Telegram error (e.g. "Unauthorized", "chat not found")
+    // — NOT a misleading "50 MB limit" guess.
+    return { error: sent.error }
   }
   const record = createFileRecord(dbUserId, {
-    sent,
+    sent: sent.document,
     fileName: payload.fileName,
     mimeType: payload.mimeType,
     size: payload.size,
     label: payload.label,
     isPublic: payload.isPublic,
     storageMode,
+    botApiBaseUrl,
   })
   return { record }
 }
@@ -1757,6 +1844,8 @@ export function fileView(f: FileRecord, origin: string) {
     mimeType: f.mimeType,
     size: f.size,
     storageMode: f.storageMode ?? 'server',
+    /** Whether the file was uploaded via a local Bot API server (null/empty = cloud). */
+    botApiBaseUrl: f.botApiBaseUrl ?? null,
     label: f.label,
     isPublic: f.isPublic,
     downloads: f.downloads,

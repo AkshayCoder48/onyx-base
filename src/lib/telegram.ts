@@ -19,15 +19,62 @@
 const ENV_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''
 const ENV_CHAT_ID = process.env.TELEGRAM_CHAT_ID || ''
 
+/** Operator-level custom local Bot API server URL (optional). */
+const ENV_BOT_API_URL = process.env.TELEGRAM_BOT_API_URL || ''
+
+/** The cloud Bot API base URL (the default when no local server is configured). */
+const CLOUD_BOT_API_BASE = 'https://api.telegram.org'
+
+/** Cloud Bot API upload limit — 50 MB per file. */
+export const CLOUD_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
+/** Cloud Bot API download (getFile) limit — 20 MB per file. */
+export const CLOUD_DOWNLOAD_LIMIT_BYTES = 20 * 1024 * 1024
+/** Max file size with a local Bot API server — 2 GB. */
+export const LOCAL_BOT_API_LIMIT_BYTES = 2 * 1024 * 1024 * 1024
+
 /** Resolve the effective bot token: override → env default. */
 function resolveBotToken(botTokenOverride?: string): string {
   const t = botTokenOverride?.trim()
   return t || ENV_BOT_TOKEN
 }
 
-/** Compute the Telegram Bot API base URL for a given bot token. */
-function resolveApiBase(botTokenOverride?: string): string {
-  return `https://api.telegram.org/bot${resolveBotToken(botTokenOverride)}`
+/**
+ * Resolve the effective Bot API base URL (WITHOUT the /bot<token> suffix).
+ * Priority: per-call override → env TELEGRAM_BOT_API_URL → cloud default.
+ * Returns the bare origin (e.g. `https://api.telegram.org` or `http://localhost:8081`)
+ * with no trailing slash.
+ */
+function resolveBotApiOrigin(botApiBaseUrlOverride?: string): string {
+  const url = (botApiBaseUrlOverride?.trim() || ENV_BOT_API_URL || CLOUD_BOT_API_BASE).replace(/\/+$/, '')
+  return url
+}
+
+/** Compute the Telegram Bot API base URL for a given bot token (+ optional local server). */
+function resolveApiBase(botTokenOverride?: string, botApiBaseUrlOverride?: string): string {
+  return `${resolveBotApiOrigin(botApiBaseUrlOverride)}/bot${resolveBotToken(botTokenOverride)}`
+}
+
+/**
+ * Returns the effective custom Bot API base URL (per-user override or env).
+ * Empty string means "cloud default (api.telegram.org) is being used".
+ */
+export function resolveEffectiveBotApiUrl(botApiBaseUrlOverride?: string): string {
+  return (botApiBaseUrlOverride?.trim() || ENV_BOT_API_URL || '').trim()
+}
+
+/** Whether a custom local Bot API server is in use (per-user override or env). */
+export function isUsingLocalBotApi(botApiBaseUrlOverride?: string): boolean {
+  return Boolean(resolveEffectiveBotApiUrl(botApiBaseUrlOverride))
+}
+
+/**
+ * The effective max upload size, in bytes. 2 GB when a local Bot API server is
+ * configured, 50 MB otherwise (the cloud Bot API hard limit).
+ */
+export function effectiveUploadLimitBytes(botApiBaseUrlOverride?: string): number {
+  return isUsingLocalBotApi(botApiBaseUrlOverride)
+    ? LOCAL_BOT_API_LIMIT_BYTES
+    : CLOUD_UPLOAD_LIMIT_BYTES
 }
 
 export interface TelegramPayload {
@@ -51,6 +98,14 @@ export interface EventPayload {
 export function isTelegramConfigured(chatIdOverride?: string, botTokenOverride?: string) {
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   return Boolean(resolveBotToken(botTokenOverride) && chatId)
+}
+
+/**
+ * Human-readable label for the active Bot API backend — shown in the settings UI
+ * so the user knows whether they're on the 50 MB cloud path or the 2 GB local path.
+ */
+export function getBotApiBackendLabel(botApiBaseUrlOverride?: string): string {
+  return isUsingLocalBotApi(botApiBaseUrlOverride) ? 'Local Bot API server' : 'Cloud Bot API (api.telegram.org)'
 }
 
 /**
@@ -132,13 +187,14 @@ export async function sendKvMessage(
   payload: TelegramPayload,
   chatIdOverride?: string,
   botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
 ): Promise<number | null> {
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   if (!isTelegramConfigured(chatId, botTokenOverride)) return null
 
   try {
     const text = formatPayload(payload)
-    const res = await fetchWithTimeout(`${resolveApiBase(botTokenOverride)}/sendMessage`, {
+    const res = await fetchWithTimeout(`${resolveApiBase(botTokenOverride, botApiBaseUrlOverride)}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -164,12 +220,12 @@ export async function sendKvMessage(
  * Send an account/event notification (signup, login, apikey.create, etc.) to
  * the Telegram channel. Fire-and-forget — never blocks the caller.
  */
-export async function sendEventMessage(payload: EventPayload, chatIdOverride?: string, botTokenOverride?: string): Promise<boolean> {
+export async function sendEventMessage(payload: EventPayload, chatIdOverride?: string, botTokenOverride?: string, botApiBaseUrlOverride?: string): Promise<boolean> {
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   if (!isTelegramConfigured(chatId, botTokenOverride)) return false
   try {
     const text = formatEvent(payload)
-    const res = await fetchWithTimeout(`${resolveApiBase(botTokenOverride)}/sendMessage`, {
+    const res = await fetchWithTimeout(`${resolveApiBase(botTokenOverride, botApiBaseUrlOverride)}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -197,12 +253,13 @@ export async function editKvMessage(
   payload: TelegramPayload,
   chatIdOverride?: string,
   botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
 ): Promise<boolean> {
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   if (!isTelegramConfigured(chatId, botTokenOverride)) return false
   try {
     const text = formatPayload(payload)
-    const res = await fetchWithTimeout(`${resolveApiBase(botTokenOverride)}/editMessageText`, {
+    const res = await fetchWithTimeout(`${resolveApiBase(botTokenOverride, botApiBaseUrlOverride)}/editMessageText`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -222,11 +279,11 @@ export async function editKvMessage(
 }
 
 /** Delete a backup message (used when a key is deleted). */
-export async function deleteKvMessage(messageId: number, chatIdOverride?: string, botTokenOverride?: string): Promise<boolean> {
+export async function deleteKvMessage(messageId: number, chatIdOverride?: string, botTokenOverride?: string, botApiBaseUrlOverride?: string): Promise<boolean> {
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   if (!isTelegramConfigured(chatId, botTokenOverride)) return false
   try {
-    const res = await fetchWithTimeout(`${resolveApiBase(botTokenOverride)}/deleteMessage`, {
+    const res = await fetchWithTimeout(`${resolveApiBase(botTokenOverride, botApiBaseUrlOverride)}/deleteMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
@@ -287,11 +344,12 @@ export async function sendAndPinManifest(
   manifestJson: string,
   chatIdOverride?: string,
   botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
 ): Promise<number | null> {
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   if (!isTelegramConfigured(chatId, botTokenOverride)) return null
 
-  const apiBase = resolveApiBase(botTokenOverride)
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
   const text = `${MANIFEST_MARKER}\n${manifestJson}`
 
   try {
@@ -374,10 +432,11 @@ export async function sendAndPinManifest(
 export async function fetchPinnedManifest(
   chatIdOverride?: string,
   botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
 ): Promise<string | null> {
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   if (!isTelegramConfigured(chatId, botTokenOverride)) return null
-  const apiBase = resolveApiBase(botTokenOverride)
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
 
   try {
     const chatRes = await fetchWithTimeout(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)
@@ -406,7 +465,7 @@ export async function fetchPinnedManifest(
  * If `chatIdOverride` is supplied, validates that specific chat ID (used for
  * per-user custom chat IDs). Otherwise validates the env default.
  */
-export async function pingTelegram(chatIdOverride?: string, botTokenOverride?: string): Promise<{
+export async function pingTelegram(chatIdOverride?: string, botTokenOverride?: string, botApiBaseUrlOverride?: string): Promise<{
   ok: boolean
   botName?: string
   chatId: string
@@ -419,10 +478,10 @@ export async function pingTelegram(chatIdOverride?: string, botTokenOverride?: s
     return { ok: false, chatId, error: 'Not configured (bot token or chat ID missing).' }
   }
   try {
-    const apiBase = resolveApiBase(botTokenOverride)
+    const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
     const meRes = await fetchWithTimeout(`${apiBase}/getMe`)
-    const me = (await meRes.json()) as { ok: boolean; result?: { username: string } }
-    if (!me.ok) return { ok: false, chatId, error: 'Bot token rejected by Telegram.' }
+    const me = (await meRes.json()) as { ok: boolean; result?: { username: string }; description?: string }
+    if (!me.ok) return { ok: false, chatId, error: `Bot token rejected: ${me.description || 'unknown error'}.` }
 
     const chatRes = await fetchWithTimeout(`${apiBase}/getChat?chat_id=${chatId}`)
     const chat = (await chatRes.json()) as {
@@ -445,7 +504,8 @@ export async function pingTelegram(chatIdOverride?: string, botTokenOverride?: s
       chatType: chat.result?.type,
     }
   } catch {
-    return { ok: false, chatId, error: 'Network error reaching api.telegram.org.' }
+    const origin = resolveBotApiOrigin(botApiBaseUrlOverride)
+    return { ok: false, chatId, error: `Network error reaching ${origin}.` }
   }
 }
 
@@ -458,11 +518,13 @@ export async function pingTelegram(chatIdOverride?: string, botTokenOverride?: s
 // fetch a fresh URL from Telegram behind the scenes, and pipe the byte stream
 // straight back to the user. The Telegram download URL is never exposed.
 //
-// NOTE on limits: the *cloud* Telegram Bot API caps bot uploads at ~50 MB and
-// `getFile` downloads at ~20 MB. The full 2 GB upload + download envelope is
-// unlocked by running a local Bot API server (https://github.com/tdlib/telegram-bot-api).
-// We enforce 2 GB at the application layer so the same code works unchanged
-// whether the operator points at the cloud API or a self-hosted local server.
+// NOTE on limits:
+//   - Cloud Bot API (api.telegram.org, the default): uploads capped at 50 MB,
+//     `getFile` downloads capped at 20 MB.
+//   - Local Bot API server (self-hosted, optional): both limits raised to 2 GB.
+// The app enforces the right limit based on which backend is configured, so the
+// user gets a clear "file too large" error BEFORE we waste a round-trip to
+// Telegram.
 
 export interface SentDocument {
   messageId: number
@@ -473,11 +535,20 @@ export interface SentDocument {
   fileSize: number | null
 }
 
+/** Result of `sendDocumentFile` — either success (with the document) or a structured failure with a human-readable error. */
+export type SendDocumentResult =
+  | { ok: true; document: SentDocument }
+  | { ok: false; error: string }
+
 /**
  * Upload a file (as a Blob/Buffer + filename + mime) to a Telegram chat using
  * `sendDocument`. Returns the message id + the Telegram file_id we need to
  * re-fetch the file later. The file is sent with `disable_notification` so it
  * doesn't spam the chat.
+ *
+ * Returns `{ ok: false, error }` (NOT null) on failure, with the ACTUAL Telegram
+ * error description surfaced — so callers can show the user the real reason
+ * (e.g. "Unauthorized", "chat not found") instead of a misleading guess.
  */
 export async function sendDocumentFile(
   payload: {
@@ -488,10 +559,13 @@ export async function sendDocumentFile(
   },
   chatIdOverride?: string,
   botTokenOverride?: string,
-): Promise<SentDocument | null> {
+  botApiBaseUrlOverride?: string,
+): Promise<SendDocumentResult> {
   const chatId = chatIdOverride ?? ENV_CHAT_ID
-  if (!isTelegramConfigured(chatId, botTokenOverride)) return null
-  const apiBase = resolveApiBase(botTokenOverride)
+  if (!isTelegramConfigured(chatId, botTokenOverride)) {
+    return { ok: false, error: 'Telegram is not configured (missing bot token or chat ID).' }
+  }
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
 
   try {
     const form = new FormData()
@@ -520,37 +594,44 @@ export async function sendDocumentFile(
       }
     }
     if (!data.ok || !data.result?.document) {
-      console.error('[telegram] sendDocument failed:', data.description)
-      return null
+      const desc = data.description || 'unknown error'
+      // Surface Telegram's actual error so the user knows the real cause
+      // (e.g. "Unauthorized" for a bad token, "Bad Request: CHAT_ID_INVALID"
+      // for an unreachable chat) — NOT a misleading "50 MB limit" guess.
+      return { ok: false, error: `Telegram rejected the upload: ${desc}` }
     }
     const doc = data.result.document
     return {
-      messageId: data.result.message_id,
-      fileId: doc.file_id,
-      fileUniqueId: doc.file_unique_id,
-      fileName: doc.file_name ?? null,
-      mimeType: doc.mime_type ?? null,
-      fileSize: doc.file_size ?? null,
+      ok: true,
+      document: {
+        messageId: data.result.message_id,
+        fileId: doc.file_id,
+        fileUniqueId: doc.file_unique_id,
+        fileName: doc.file_name ?? null,
+        mimeType: doc.mime_type ?? null,
+        fileSize: doc.file_size ?? null,
+      },
     }
   } catch (err) {
-    console.error('[telegram] sendDocument error:', err)
-    return null
+    const msg = err instanceof Error ? err.message : 'unknown error'
+    return { ok: false, error: `Network error reaching Telegram: ${msg}` }
   }
 }
 
 /**
  * Resolve a fresh, temporary download URL for a Telegram file via `getFile`.
- * The returned URL (`https://api.telegram.org/file/bot<token>/<file_path>`) is
- * valid for at least 1 hour. Our download proxy calls this on every request so
- * links stay permanent from the user's point of view.
+ * The returned URL is valid for at least 1 hour. Our download proxy calls this
+ * on every request so links stay permanent from the user's point of view.
  */
 export async function getFileDownloadUrl(
   fileId: string,
   botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
 ): Promise<{ url: string; fileSize: number | null } | null> {
   const botToken = resolveBotToken(botTokenOverride)
   if (!botToken) return null
-  const apiBase = resolveApiBase(botTokenOverride)
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
+  const fileBase = resolveBotApiOrigin(botApiBaseUrlOverride)
 
   try {
     const res = await fetchWithTimeout(
@@ -565,8 +646,10 @@ export async function getFileDownloadUrl(
       console.error('[telegram] getFile failed:', data.description)
       return null
     }
+    // Download URL format: <origin>/file/bot<token>/<file_path>
+    // Works for both cloud (api.telegram.org) and local Bot API servers.
     return {
-      url: `${apiBase.replace('/bot', '/file/bot')}/${data.result.file_path}`,
+      url: `${fileBase}/file/bot${botToken}/${data.result.file_path}`,
       fileSize: data.result.file_size ?? null,
     }
   } catch (err) {
@@ -603,12 +686,18 @@ const FILE_URL_CACHE_TTL_MS = 55 * 60 * 1000
 /** Keyed by `${botTokenFingerprint}:${fileId}` to keep server/custom bots apart. */
 const fileUrlCache = new Map<string, CachedFileUrl>()
 
-/** Short, non-reversible fingerprint of the bot token so we can key the cache by it without storing the raw token. */
-function tokenFingerprint(botTokenOverride?: string): string {
+/** Short, non-reversible fingerprint of the bot token + API backend so we can key the cache by it without storing the raw token. */
+function tokenFingerprint(botTokenOverride?: string, botApiBaseUrlOverride?: string): string {
   const t = resolveBotToken(botTokenOverride)
-  if (!t) return 'none'
   // First + last 4 chars is enough to distinguish bots without leaking the full secret.
-  return `${t.slice(0, 4)}…${t.slice(-4)}`
+  const tf = t ? `${t.slice(0, 4)}…${t.slice(-4)}` : 'none'
+  // Include a fingerprint of the API backend so cloud and local server URLs
+  // don't collide in the cache (a file_id from the cloud API is NOT the same
+  // as one from a local Bot API server, even for the same bot token).
+  const uf = isUsingLocalBotApi(botApiBaseUrlOverride)
+    ? resolveEffectiveBotApiUrl(botApiBaseUrlOverride).replace(/^https?:\/\//, '').slice(0, 20)
+    : 'cloud'
+  return `${uf}:${tf}`
 }
 
 /**
@@ -621,8 +710,9 @@ function tokenFingerprint(botTokenOverride?: string): string {
 export async function getCachedFileDownloadUrl(
   fileId: string,
   botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
 ): Promise<{ url: string; fileSize: number | null; expiresAt: number } | null> {
-  const cacheKey = `${tokenFingerprint(botTokenOverride)}:${fileId}`
+  const cacheKey = `${tokenFingerprint(botTokenOverride, botApiBaseUrlOverride)}:${fileId}`
   const now = Date.now()
   const cached = fileUrlCache.get(cacheKey)
 
@@ -632,7 +722,7 @@ export async function getCachedFileDownloadUrl(
   }
 
   // Cache miss or about to expire → call Telegram for a fresh URL.
-  const fresh = await getFileDownloadUrl(fileId, botTokenOverride)
+  const fresh = await getFileDownloadUrl(fileId, botTokenOverride, botApiBaseUrlOverride)
   if (!fresh) return null
 
   const entry: CachedFileUrl = {
@@ -659,9 +749,10 @@ export async function getCachedFileDownloadUrl(
 export async function getCachedTelegramDirectUrl(
   fileId: string,
   botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
 ): Promise<{ url: string; fileSize: number | null; expiresAt: number } | null> {
   // Same cache, same semantics — the cached URL IS the Telegram direct URL.
-  return getCachedFileDownloadUrl(fileId, botTokenOverride)
+  return getCachedFileDownloadUrl(fileId, botTokenOverride, botApiBaseUrlOverride)
 }
 
 /**
@@ -669,8 +760,8 @@ export async function getCachedTelegramDirectUrl(
  * the user explicitly requests a fresh link via the "Get link" button). The
  * next `getCachedFileDownloadUrl` call will re-fetch from Telegram.
  */
-export function invalidateCachedFileUrl(fileId: string, botTokenOverride?: string): void {
-  const cacheKey = `${tokenFingerprint(botTokenOverride)}:${fileId}`
+export function invalidateCachedFileUrl(fileId: string, botTokenOverride?: string, botApiBaseUrlOverride?: string): void {
+  const cacheKey = `${tokenFingerprint(botTokenOverride, botApiBaseUrlOverride)}:${fileId}`
   fileUrlCache.delete(cacheKey)
 }
 
@@ -679,8 +770,9 @@ export async function deleteFileMessage(
   messageId: number,
   chatIdOverride?: string,
   botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
 ): Promise<boolean> {
   // Reuses the same deleteMessage call as KV messages — a document message is
   // just another message id from Telegram's point of view.
-  return deleteKvMessage(messageId, chatIdOverride, botTokenOverride)
+  return deleteKvMessage(messageId, chatIdOverride, botTokenOverride, botApiBaseUrlOverride)
 }
