@@ -5,8 +5,10 @@ import {
   uploadFile,
   fileView,
   MAX_FILE_SIZE,
+  resolveBotApiBaseUrl,
 } from '@/lib/data-store'
 import { logAction } from '@/lib/kv'
+import { effectiveUploadLimitBytes } from '@/lib/telegram'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -23,7 +25,8 @@ export async function GET(req: NextRequest) {
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const files = listFileRecords(user.dbUserId).map((f) => fileView(f, getPublicOrigin(req)))
-  return ok({ files, maxFileSize: MAX_FILE_SIZE })
+  const maxFileUploadBytes = effectiveUploadLimitBytes(resolveBotApiBaseUrl(user.dbUserId))
+  return ok({ files, maxFileSize: MAX_FILE_SIZE, maxFileUploadBytes })
 }
 
 /**
@@ -83,5 +86,6 @@ export async function POST(req: NextRequest) {
   return ok({
     file: fileView(result.record, getPublicOrigin(req)),
     maxFileSize: MAX_FILE_SIZE,
+    maxFileUploadBytes: effectiveUploadLimitBytes(resolveBotApiBaseUrl(user.dbUserId)),
   })
 }

@@ -3,6 +3,7 @@ import {
   findFileByPublicId,
   incrementFileDownload,
   resolveFileBotToken,
+  resolveFileBotApiBaseUrl,
 } from '@/lib/data-store'
 import { getCachedFileDownloadUrl } from '@/lib/telegram'
 import { verifyDownloadToken } from '@/lib/download-token'
@@ -59,10 +60,13 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   // `storageMode`, not the user's current config. A Telegram file_id is
   // bot-specific, so we must call getFile on the same bot that received the
   // upload (server bot for `storageMode='server'`, custom bot for `'custom'`).
+  // Same for the Bot API base URL: a file uploaded via a local Bot API server
+  // has a LOCAL file_id that can only be resolved by that same server.
   const botToken = resolveFileBotToken(file)
-  const resolved = await getCachedFileDownloadUrl(file.telegramFileId, botToken)
+  const botApiBaseUrl = resolveFileBotApiBaseUrl(file)
+  const resolved = await getCachedFileDownloadUrl(file.telegramFileId, botToken, botApiBaseUrl)
   if (!resolved) {
-    return new Response('Could not resolve the file from Telegram. It may have been removed or exceed the cloud Bot API 20 MB download limit (a local Bot API server is required for larger files).', {
+    return new Response('Could not resolve the file from Telegram. It may have been removed. If you are using the cloud Bot API, files over 20 MB cannot be downloaded via getFile — configure a custom local Bot API server in Settings to enable 2 GB downloads.', {
       status: 502,
       headers: { 'Content-Type': 'text/plain' },
     })

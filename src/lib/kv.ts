@@ -20,6 +20,7 @@ import {
   addLog,
   resolveChatId,
   resolveBotToken,
+  resolveBotApiBaseUrl,
 } from '@/lib/data-store'
 import { notifyRealtime } from '@/lib/realtime'
 
@@ -84,9 +85,10 @@ export async function setKey(
   }
   const serialized = JSON.stringify(value)
 
-  // Resolve the user's custom Telegram chat ID + bot token (falls back to env defaults).
+  // Resolve the user's custom Telegram chat ID + bot token + Bot API URL (falls back to env defaults).
   const chatId = resolveChatId(user.dbUserId)
   const botToken = resolveBotToken(user.dbUserId)
+  const botApiBaseUrl = resolveBotApiBaseUrl(user.dbUserId)
 
   const { record } = upsertRecord(user.dbUserId, user.userId, {
     collection: collectionName,
@@ -95,6 +97,7 @@ export async function setKey(
     valueType,
     chatId,
     botToken,
+    botApiBaseUrl,
   })
 
   await logAction(user, 'set', record.key, `collection=${collectionName}`, opts.source)
@@ -123,7 +126,8 @@ export async function deleteKey(
 ): Promise<boolean> {
   const chatId = resolveChatId(user.dbUserId)
   const botToken = resolveBotToken(user.dbUserId)
-  const removed = deleteRecord(user.dbUserId, collection, key, chatId, botToken)
+  const botApiBaseUrl = resolveBotApiBaseUrl(user.dbUserId)
+  const removed = deleteRecord(user.dbUserId, collection, key, chatId, botToken, botApiBaseUrl)
   if (!removed) return false
   await logAction(user, 'delete', key, `collection=${collection}`, source)
   notifyRealtime({ userId: user.userId, event: 'delete', collection, key })

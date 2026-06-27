@@ -7,6 +7,7 @@ import {
   clearBotToken,
   resolveChatId,
   resolveBotToken,
+  resolveBotApiBaseUrl,
 } from '@/lib/data-store'
 import { pingTelegram } from '@/lib/telegram'
 
@@ -28,6 +29,7 @@ export async function GET(req: NextRequest) {
           chatId: config.chatId,
           label: config.label,
           hasCustomBotToken: config.hasCustomBotToken,
+          botApiBaseUrl: config.botApiBaseUrl,
           updatedAt: config.updatedAt,
         }
       : null,
@@ -35,6 +37,8 @@ export async function GET(req: NextRequest) {
     effectiveChatId: resolveChatId(user.dbUserId),
     envBotConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
     hasCustomBotToken: config?.hasCustomBotToken ?? false,
+    envBotApiUrl: process.env.TELEGRAM_BOT_API_URL || '',
+    effectiveBotApiUrl: resolveBotApiBaseUrl(user.dbUserId),
   })
 }
 
@@ -57,6 +61,8 @@ export async function PUT(req: NextRequest) {
   const label = typeof body.label === 'string' ? body.label.trim() : null
   const botTokenRaw = body.botToken
   const clearBotTokenFlag = body.clearBotToken === true
+  const botApiBaseUrlRaw = body.botApiBaseUrl
+  const clearBotApiUrlFlag = body.clearBotApiUrl === true
 
   if (!chatId) return fail('Chat ID is required.', 400)
   if (!/^-?\d+$/.test(chatId)) {
@@ -88,6 +94,26 @@ export async function PUT(req: NextRequest) {
     botTokenToValidate = existingConfig?.botToken ?? undefined
   }
 
+  // Determine the Bot API base URL to store.
+  // - clearBotApiUrl=true or botApiBaseUrl=null → clear it (use cloud default).
+  // - string → set it (validate URL format).
+  // - undefined → preserve existing.
+  let botApiBaseUrlToStore: string | null | undefined
+  if (clearBotApiUrlFlag || botApiBaseUrlRaw === null) {
+    botApiBaseUrlToStore = null
+  } else if (typeof botApiBaseUrlRaw === 'string') {
+    const trimmedUrl = botApiBaseUrlRaw.trim()
+    if (trimmedUrl && !/^https?:\/\//i.test(trimmedUrl)) {
+      return fail(
+        'Bot API server URL must start with http:// or https:// (e.g. http://localhost:8081).',
+        400,
+      )
+    }
+    botApiBaseUrlToStore = trimmedUrl || null
+  } else {
+    botApiBaseUrlToStore = undefined
+  }
+
   // If no custom bot token and no env token, we can't validate.
   const effectiveToken = botTokenToValidate || process.env.TELEGRAM_BOT_TOKEN || ''
   if (!effectiveToken) {
@@ -98,7 +124,12 @@ export async function PUT(req: NextRequest) {
   }
 
   // Validate the chat ID is reachable by the bot BEFORE saving it.
-  const probe = await pingTelegram(chatId, botTokenToValidate)
+  // Use the effective Bot API URL (the one being saved, or the existing/env one)
+  // so the probe goes to the right server.
+  const effectiveBotApiUrl = botApiBaseUrlToStore !== undefined
+    ? (botApiBaseUrlToStore || '')
+    : resolveBotApiBaseUrl(user.dbUserId)
+  const probe = await pingTelegram(chatId, botTokenToValidate, effectiveBotApiUrl)
   if (!probe.ok) {
     return fail(
       `Telegram rejected chat ID ${chatId}: ${probe.error ?? 'unknown error'}. Make sure the bot is an admin of the channel/group, or that you have sent /start to the bot in a private chat.`,
@@ -106,12 +137,13 @@ export async function PUT(req: NextRequest) {
     )
   }
 
-  const config = setTelegramConfig(user.dbUserId, chatId, label, botTokenToStore)
+  const config = setTelegramConfig(user.dbUserId, chatId, label, botTokenToStore, botApiBaseUrlToStore)
   return ok({
     customConfig: {
       chatId: config.chatId,
       label: config.label,
       hasCustomBotToken: config.hasCustomBotToken,
+      botApiBaseUrl: config.botApiBaseUrl,
       updatedAt: config.updatedAt,
     },
     telegram: probe,
@@ -131,5 +163,6 @@ export async function DELETE(req: NextRequest) {
     cleared,
     effectiveChatId: resolveChatId(user.dbUserId),
     effectiveBotToken: resolveBotToken(user.dbUserId) ? '(env default)' : '(not configured)',
+    effectiveBotApiUrl: resolveBotApiBaseUrl(user.dbUserId) || '(cloud default)',
   })
 }

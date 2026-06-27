@@ -78,8 +78,6 @@ function iconForFile(name: string, mime: string) {
   return FileIcon
 }
 
-const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024 // 2 GB — enforced app-side (Telegram's hard ceiling)
-
 // ─── On-demand download link state ───────────────────────────────────────────
 //
 // Telegram revokes `getFile` download URLs after ~1 hour. So instead of
@@ -148,8 +146,14 @@ export function CloudStorageView() {
 
   const { data, isLoading } = useQuery({
     queryKey: ['files'],
-    queryFn: () => api<{ files: FileView[]; maxFileSize: number }>('/api/files'),
+    queryFn: () => api<{ files: FileView[]; maxFileSize: number; maxFileUploadBytes?: number }>('/api/files'),
   })
+
+  // The effective upload limit: 50 MB (cloud Bot API) or 2 GB (local Bot API server).
+  // Falls back to the cloud limit until the server responds.
+  const maxFileUploadBytes = data?.maxFileUploadBytes ?? 50 * 1024 * 1024
+  const isLocalBotApi = maxFileUploadBytes >= 1024 * 1024 * 1024
+  const limitLabel = isLocalBotApi ? '2 GB' : '50 MB'
 
   const uploadMutation = useMutation({
     mutationFn: async (opts: { file: File; label: string; isPublic: boolean }) => {
@@ -303,13 +307,16 @@ export function CloudStorageView() {
   const onFilesPicked = useCallback((files: FileList | null) => {
     if (!files || files.length === 0) return
     const f = files[0]
-    if (f.size > MAX_FILE_SIZE) {
-      toast.error(`File is ${(f.size / 1024 / 1024).toFixed(1)} MB — the 2 GB per-file limit was exceeded.`)
+    if (f.size > maxFileUploadBytes) {
+      const hint = isLocalBotApi
+        ? 'the 2 GB local Bot API server limit was exceeded'
+        : 'the 50 MB cloud Bot API upload limit was exceeded. Configure a local Bot API server in Settings to upload files up to 2 GB.'
+      toast.error(`File is ${(f.size / 1024 / 1024).toFixed(1)} MB — ${hint}`)
       return
     }
     setSelectedFile(f)
     setUploadOpen(true)
-  }, [])
+  }, [maxFileUploadBytes, isLocalBotApi])
 
   const resetUpload = () => {
     setSelectedFile(null)
@@ -350,7 +357,7 @@ export function CloudStorageView() {
     <div>
       <PageHeader
         title="Cloud Storage"
-        description="Store files up to 2 GB each — any extension, unlimited count. Tap “Get link” to mint a 1-hour download URL from Telegram."
+        description={`Store files up to ${limitLabel} each — any extension, unlimited count. Tap “Get link” to mint a 1-hour download URL from Telegram.`}
         actions={
           <Button
             onClick={() => fileInputRef.current?.click()}
@@ -396,7 +403,10 @@ export function CloudStorageView() {
         </Card>
         <Card className="p-4 bg-card/40 border-border/60">
           <div className="text-xs text-muted-foreground mb-1">Per-file limit</div>
-          <div className="text-2xl font-semibold tabular-nums">2 GB</div>
+          <div className="text-2xl font-semibold tabular-nums">{limitLabel}</div>
+          <div className="text-[10px] text-muted-foreground/60 mt-0.5">
+            {isLocalBotApi ? 'Local Bot API server' : 'Cloud Bot API'}
+          </div>
         </Card>
       </div>
 
@@ -420,7 +430,8 @@ export function CloudStorageView() {
         <HardDrive className="size-7 mx-auto mb-2 text-muted-foreground" />
         <p className="text-sm font-medium">Drop a file here or click to browse</p>
         <p className="text-xs text-muted-foreground mt-1">
-          Any file type — exe, txt, png, jpg, zip, video, audio, anything. Up to 2 GB each.
+          Any file type — exe, txt, png, jpg, zip, video, audio, anything. Up to {limitLabel} each.
+          {!isLocalBotApi && ' Configure a local Bot API server in Settings for up to 2 GB.'}
         </p>
       </div>
 
@@ -576,7 +587,14 @@ export function CloudStorageView() {
                 <div className="flex items-start gap-2 rounded-md border border-amber-300/40 bg-amber-50 p-3 text-xs text-amber-800">
                   <AlertCircle className="size-4 shrink-0 mt-0.5" />
                   <div>
-                    Files over 50 MB require a self-hosted <a className="underline" href="https://github.com/tdlib/telegram-bot-api" target="_blank" rel="noreferrer">local Telegram Bot API server</a> for upload, and over 20 MB for download via <code className="font-mono">getFile</code>. The 2 GB ceiling is enforced app-side either way.
+                    {!isLocalBotApi && (
+                      <>
+                        Files over 50 MB require a self-hosted <a className="underline" href="https://github.com/tdlib/telegram-bot-api" target="_blank" rel="noreferrer">local Telegram Bot API server</a> for upload, and over 20 MB for download via <code className="font-mono">getFile</code>. Configure it in Settings → Telegram chat ID → Local Bot API server URL to enable 2 GB uploads.
+                      </>
+                    )}
+                    {isLocalBotApi && (
+                      <>A local Bot API server is configured — files up to 2 GB can be uploaded and downloaded.</>
+                    )}
                   </div>
                 </div>
               )}
