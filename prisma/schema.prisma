@@ -130,30 +130,3 @@ model MaterializedView {
   @@unique([userId, name])
   @@index([userId])
 }
-
-// ─── Account-scoped custom tables (CREATE TABLE manager) ────────────────────
-// Each developer can create their own SQL tables. The metadata (owner,
-// display name, real SQLite table name, access mode, column schema) lives
-// here; the actual table lives in SQLite as `usr_<shortHash>_<name>` so two
-// developers can both own a table called "notes" without colliding.
-//
-// accessMode controls what the PUBLIC v1 API may do with the table's rows:
-//   read      — SELECT only
-//   write     — INSERT / UPDATE / DELETE only (no reads)
-//   readwrite — both
-// The dashboard owner can always do everything regardless of accessMode.
-model UserTable {
-  id         String   @id @default(cuid())
-  userId     String   // dbUserId (owner) — never the public usr_ id
-  name       String   // user-facing name (no usr_ prefix), e.g. "notes"
-  tableName  String   // real SQLite table name, e.g. "usr_notes_a1b2c3d4"
-  accessMode String   @default("readwrite") // read | write | readwrite
-  schema     String   // JSON: [{name, type, primary, autoIncrement, nullable, defaultValue}]
-  rowCount   Int      @default(0)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
-
-  @@unique([userId, name])
-  @@unique([tableName])
-  @@index([userId])
-}
