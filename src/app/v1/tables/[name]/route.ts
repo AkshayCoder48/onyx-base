@@ -10,20 +10,21 @@ import {
 
 export const runtime = 'nodejs'
 
-// ─── GET /api/dashboard/tables/[name] ───────────────────────────────────────
 /**
- * Describe a table owned by the authenticated developer: column schema,
- * row count, and a sample of up to 100 rows.
+ * GET /v1/tables/[name] — describe a table (schema + sample rows).
+ * PATCH /v1/tables/[name] — update access mode. Body: { accessMode }
+ * DELETE /v1/tables/[name] — drop a table.
+ *
+ * Auth: `Authorization: Bearer kv_live_…` (or admin key)
  */
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ name: string }> },
 ) {
   const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized.', 401)
+  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const { name } = await params
-
   try {
     const result = await describeUserTable(user.dbUserId, name)
     return ok({ table: result })
@@ -36,20 +37,12 @@ export async function GET(
   }
 }
 
-// ─── PATCH /api/dashboard/tables/[name] ─────────────────────────────────────
-/**
- * Update a table's access mode. Only the access mode is editable; the
- * column schema cannot be changed after creation (SQLite ALTER TABLE is
- * limited and dangerous).
- *
- * Body: { accessMode: 'read' | 'write' | 'readwrite' }
- */
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ name: string }> },
 ) {
   const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized.', 401)
+  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const { name } = await params
   const body = (await req.json().catch(() => null)) as {
@@ -70,20 +63,14 @@ export async function PATCH(
   }
 }
 
-// ─── DELETE /api/dashboard/tables/[name] ────────────────────────────────────
-/**
- * Drop a table owned by the authenticated developer. Drops the real SQLite
- * table AND deletes the metadata row.
- */
 export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ name: string }> },
 ) {
   const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized.', 401)
+  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const { name } = await params
-
   try {
     await dropUserTable(user.dbUserId, name)
     return ok({ message: 'Table dropped' })
