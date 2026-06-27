@@ -18,7 +18,6 @@ import {
   X,
   Github,
   Code2,
-  Table2,
 } from 'lucide-react'
 import { useOnyxBase, type ViewKey } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -40,7 +39,6 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { key: 'overview', label: 'Dashboard', icon: LayoutDashboard },
       { key: 'database', label: 'Database', icon: Database },
       { key: 'collections', label: 'Collections', icon: FolderTree },
-      { key: 'tables', label: 'Tables', icon: Table2 },
       { key: 'storage', label: 'Cloud Storage', icon: HardDrive },
     ],
   },

@@ -16,8 +16,6 @@ import {
   ShieldCheck,
   Trash2,
   Lock,
-  Server,
-  HardDrive,
 } from 'lucide-react'
 import { useApi, type StatsView } from '@/lib/api'
 import { useOnyxBase } from '@/lib/store'
@@ -32,20 +30,17 @@ import { toast } from 'sonner'
 
 interface TelegramStatus {
   ok: boolean
+  botName?: string | null
+  chatId: string
   chatType?: string | null
   error?: string | null
 }
 
 interface StatusResponse {
   telegram: TelegramStatus
-  customConfig: { chatId: string; label: string | null; hasCustomBotToken: boolean; botApiBaseUrl: string | null; updatedAt: string } | null
-  envChatIdMasked: string
-  envChatIdConfigured: boolean
+  customConfig: { chatId: string; label: string | null; hasCustomBotToken: boolean; updatedAt: string } | null
+  envChatId: string
   envBotConfigured: boolean
-  botApiBackend: string
-  usingLocalBotApi: boolean
-  maxFileUploadBytes: number
-  envBotApiUrl: string
 }
 
 export function SettingsView() {
@@ -66,7 +61,7 @@ export function SettingsView() {
   })
   const telegram = statusData?.telegram
   const customConfig = statusData?.customConfig
-  const envChatIdMasked = statusData?.envChatIdMasked
+  const envChatId = statusData?.envChatId
 
   async function copyKey() {
     if (!apiKey) return
@@ -139,24 +134,24 @@ export function SettingsView() {
               <span className="text-xs font-medium">
                 Telegram {telegram?.ok ? 'connected' : 'not reachable'}
               </span>
-              {telegram?.ok && telegram.chatType && (
+              {telegram?.botName && (
                 <Badge variant="outline" className="font-mono text-[10px] ml-auto border-primary/30 text-primary">
-                  {telegram.chatType}
+                  @{telegram.botName}
                 </Badge>
               )}
             </div>
             {telegram?.ok ? (
               <p className="text-[11px] text-muted-foreground/80">
-                Backup chat reachable ({telegram.chatType ?? 'chat'}). Every write mirrors a structured backup message.
+                Chat <code className="font-mono">{telegram.chatId}</code> ({telegram.chatType}) reachable. Every write mirrors a structured backup message.
               </p>
             ) : (
               <div className="text-[11px] text-muted-foreground/80 space-y-1.5">
                 <p>
-                  Bot can&apos;t reach the backup chat
+                  Bot can&apos;t reach chat <code className="font-mono">{telegram?.chatId ?? '—'}</code>
                   {telegram?.error ? `: ${telegram.error}` : '.'}
                 </p>
                 <p className="text-stone-600">
-                  Make sure the bot has been added to your channel/group as an admin, or set your own chat ID in the &quot;Telegram chat ID&quot; section below.
+                  Use the &quot;Telegram chat ID&quot; section below to set your own chat ID, or ask the bot admin to add the bot to your channel.
                 </p>
               </div>
             )}
@@ -166,14 +161,9 @@ export function SettingsView() {
         {/* Telegram chat ID + bot token config — the new feature */}
         <TelegramChatIdCard
           customConfig={customConfig ?? null}
-          envChatIdMasked={envChatIdMasked ?? ''}
-          envChatIdConfigured={statusData?.envChatIdConfigured ?? false}
+          envChatId={envChatId ?? ''}
           envBotConfigured={statusData?.envBotConfigured ?? false}
           telegramOk={telegram?.ok ?? false}
-          botApiBackend={statusData?.botApiBackend ?? 'Cloud Bot API (api.telegram.org)'}
-          usingLocalBotApi={statusData?.usingLocalBotApi ?? false}
-          maxFileUploadBytes={statusData?.maxFileUploadBytes ?? 50 * 1024 * 1024}
-          envBotApiUrl={statusData?.envBotApiUrl ?? ''}
           onSaved={() => {
             refetchStatus()
             qc.invalidateQueries({ queryKey: ['telegram-status'] })
@@ -226,95 +216,58 @@ $ onyx export`}
 
 function TelegramChatIdCard({
   customConfig,
-  envChatIdMasked,
-  envChatIdConfigured,
+  envChatId,
   envBotConfigured,
   telegramOk,
-  botApiBackend,
-  usingLocalBotApi,
-  maxFileUploadBytes,
-  envBotApiUrl,
   onSaved,
 }: {
-  customConfig: { chatId: string; label: string | null; hasCustomBotToken: boolean; botApiBaseUrl: string | null; updatedAt: string } | null
-  envChatIdMasked: string
-  envChatIdConfigured: boolean
+  customConfig: { chatId: string; label: string | null; hasCustomBotToken: boolean; updatedAt: string } | null
+  envChatId: string
   envBotConfigured: boolean
   telegramOk: boolean
-  botApiBackend: string
-  usingLocalBotApi: boolean
-  maxFileUploadBytes: number
-  envBotApiUrl: string
   onSaved: () => void
 }) {
   const api = useApi()
-  // The chat ID input is intentionally NOT pre-filled from customConfig.chatId
-  // (which is now masked server-side). When a custom config exists, the field
-  // starts empty with a "type to replace" placeholder so the user never sees
-  // a masked value in an editable input.
-  const [chatId, setChatId] = useState('')
+  const [chatId, setChatId] = useState(customConfig?.chatId ?? '')
   const [label, setLabel] = useState(customConfig?.label ?? '')
   const [botToken, setBotToken] = useState('')
-  const [botApiUrl, setBotApiUrl] = useState(customConfig?.botApiBaseUrl ?? '')
   const [showBotToken, setShowBotToken] = useState(false)
   const [saving, setSaving] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [clearingToken, setClearingToken] = useState(false)
-  const [clearingBotApiUrl, setClearingBotApiUrl] = useState(false)
   const hasCustomBotToken = customConfig?.hasCustomBotToken ?? false
-  const hasCustomBotApiUrl = Boolean(customConfig?.botApiBaseUrl)
 
   // Sync local state when the server data loads/changes.
   useEffect(() => {
     if (customConfig) {
       setChatId(customConfig.chatId)
       setLabel(customConfig.label ?? '')
-      setBotApiUrl(customConfig.botApiBaseUrl ?? '')
     }
   }, [customConfig])
 
   async function save() {
     const trimmed = chatId.trim()
-    // chatId is optional on save — if empty and a config already exists, the
-    // server keeps the existing chat ID (so the user can update just the bot
-    // token / label without re-entering the chat ID).
-    if (trimmed && !/^-?\d+$/.test(trimmed)) {
-      toast.error('Chat ID must be numeric (e.g. -1001234567890)')
+    if (!trimmed) {
+      toast.error('Chat ID is required')
       return
     }
-    if (!trimmed && !customConfig && !envChatIdConfigured) {
-      toast.error('Chat ID is required')
+    if (!/^-?\d+$/.test(trimmed)) {
+      toast.error('Chat ID must be numeric (e.g. -1001234567890)')
       return
     }
     setSaving(true)
     try {
-      const body: Record<string, unknown> = { label: label.trim() || undefined }
-      // Only send chatId when the user typed a new one.
-      if (trimmed) body.chatId = trimmed
+      const body: Record<string, unknown> = { chatId: trimmed, label: label.trim() || undefined }
       // Only send botToken if the user typed something (don't overwrite existing on chat-ID-only saves)
       const trimmedToken = botToken.trim()
       if (trimmedToken) {
         body.botToken = trimmedToken
       }
-      // Send botApiBaseUrl so the server can store/clear it. We always send it
-      // (even if empty) so the user can clear it by emptying the field — UNLESS
-      // they didn't touch the field at all and it matches the existing value.
-      const trimmedUrl = botApiUrl.trim()
-      if (trimmedUrl !== (customConfig?.botApiBaseUrl ?? '')) {
-        body.botApiBaseUrl = trimmedUrl
-      }
       await api('/api/dashboard/telegram-config', {
         method: 'PUT',
         body: JSON.stringify(body),
       })
-      const msg = trimmedToken
-        ? 'Telegram config saved — bot token verified'
-        : trimmedUrl !== (customConfig?.botApiBaseUrl ?? '')
-          ? trimmedUrl
-            ? 'Telegram config saved — local Bot API server URL set'
-            : 'Telegram config saved — reverted to cloud Bot API'
-          : 'Telegram chat ID saved — connection verified'
-      toast.success(msg)
+      toast.success(trimmedToken ? 'Telegram config saved — bot token verified' : 'Telegram chat ID saved — connection verified')
       setBotToken('') // clear the token field after save
       onSaved()
     } catch (err) {
@@ -345,7 +298,7 @@ function TelegramChatIdCard({
     try {
       await api('/api/dashboard/telegram-config', {
         method: 'PUT',
-        body: JSON.stringify({ clearBotToken: true }),
+        body: JSON.stringify({ chatId: chatId.trim() || envChatId, clearBotToken: true }),
       })
       toast.success('Custom bot token cleared — using server default')
       onSaved()
@@ -353,23 +306,6 @@ function TelegramChatIdCard({
       toast.error(err instanceof Error ? err.message : 'Clear failed')
     } finally {
       setClearingToken(false)
-    }
-  }
-
-  async function clearBotApiUrlOnly() {
-    setClearingBotApiUrl(true)
-    try {
-      await api('/api/dashboard/telegram-config', {
-        method: 'PUT',
-        body: JSON.stringify({ clearBotApiUrl: true }),
-      })
-      setBotApiUrl('')
-      toast.success('Custom Bot API URL cleared — using cloud default (50 MB upload limit)')
-      onSaved()
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Clear failed')
-    } finally {
-      setClearingBotApiUrl(false)
     }
   }
 
@@ -406,7 +342,7 @@ function TelegramChatIdCard({
             Effective chat ID
           </div>
           <code className="font-mono text-xs text-primary break-all">
-            {customConfig?.chatId || envChatIdMasked || '— (not configured)'}
+            {customConfig?.chatId || envChatId || '— (not configured)'}
           </code>
         </div>
         <div className="rounded-md border border-border/40 bg-background/40 p-3">
@@ -414,10 +350,10 @@ function TelegramChatIdCard({
             Source
           </div>
           <span className="text-xs">
-            {customConfig ? 'Your custom chat ID' : envChatIdConfigured ? 'Server env default' : 'Not set'}
+            {customConfig ? 'Your custom chat ID' : envChatId ? 'Server env default' : 'Not set'}
           </span>
         </div>
-        <div className="rounded-md border border-border/40 bg-background/40 p-3">
+        <div className="rounded-md border border-border/40 bg-background/40 p-3 sm:col-span-2">
           <div className="text-[11px] uppercase tracking-wide text-muted-foreground/70 mb-1">
             Bot token
           </div>
@@ -431,19 +367,6 @@ function TelegramChatIdCard({
             )}
           </span>
         </div>
-        <div className="rounded-md border border-border/40 bg-background/40 p-3">
-          <div className="text-[11px] uppercase tracking-wide text-muted-foreground/70 mb-1">
-            Bot API backend
-          </div>
-          <div className="flex items-center gap-1.5">
-            <Server className="size-3 text-primary/70" />
-            <span className="text-xs font-medium">{botApiBackend}</span>
-          </div>
-          <div className="text-[10px] text-muted-foreground/60 mt-1">
-            Upload limit: <span className="font-mono text-primary/80">{maxFileUploadBytes >= 1024 * 1024 * 1024 ? '2 GB' : '50 MB'}</span>
-            {usingLocalBotApi ? ' (local server)' : ' (cloud)'}
-          </div>
-        </div>
       </div>
 
       {/* Input form */}
@@ -456,7 +379,7 @@ function TelegramChatIdCard({
             id="tg-chat-id"
             value={chatId}
             onChange={(e) => setChatId(e.target.value)}
-            placeholder={customConfig ? 'Saved — type a new chat ID to replace' : '-1001234567890'}
+            placeholder="-1001234567890"
             className="font-mono text-sm h-9"
           />
           <p className="text-[11px] text-muted-foreground/70">
@@ -517,48 +440,6 @@ function TelegramChatIdCard({
             >
               {clearingToken ? <Loader2 className="size-3 animate-spin" /> : <Trash2 className="size-3" />}
               Clear custom bot token
-            </Button>
-          )}
-        </div>
-        {/* ─── Custom local Bot API server URL (optional — unlocks 2 GB files) ─── */}
-        <div className="space-y-1.5 pt-2 border-t border-border/40">
-          <Label htmlFor="tg-bot-api-url" className="text-xs font-medium uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
-            <HardDrive className="size-3" /> Local Bot API server URL <span className="text-muted-foreground/50 normal-case">(optional — for files up to 2 GB)</span>
-            {hasCustomBotApiUrl && (
-              <Badge variant="outline" className="ml-auto font-mono text-[9px] border-primary/30 text-primary">custom</Badge>
-            )}
-          </Label>
-          <Input
-            id="tg-bot-api-url"
-            value={botApiUrl}
-            onChange={(e) => setBotApiUrl(e.target.value)}
-            placeholder="http://localhost:8081"
-            className="font-mono text-sm h-9"
-            autoComplete="off"
-            spellCheck={false}
-          />
-          <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
-            The cloud Bot API (<code className="font-mono">api.telegram.org</code>) caps uploads at <strong>50 MB</strong> and downloads at <strong>20 MB</strong>.
-            Running your own <a className="underline text-primary/80" href="https://github.com/tdlib/telegram-bot-api" target="_blank" rel="noreferrer">local Bot API server</a> raises both limits to <strong>2 GB</strong>.
-            Enter its base URL here to route ALL file operations through your server instead of the cloud.
-            Leave empty to use the cloud default.
-          </p>
-          {envBotApiUrl && !hasCustomBotApiUrl && (
-            <p className="text-[10px] text-muted-foreground/60">
-              Server operator has set a default: <code className="font-mono">{envBotApiUrl}</code>
-            </p>
-          )}
-          {hasCustomBotApiUrl && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={clearBotApiUrlOnly}
-              disabled={clearingBotApiUrl}
-              className="text-[11px] h-7 px-2 text-muted-foreground hover:text-red-600"
-            >
-              {clearingBotApiUrl ? <Loader2 className="size-3 animate-spin" /> : <Trash2 className="size-3" />}
-              Clear custom Bot API URL
             </Button>
           )}
         </div>

@@ -36,6 +36,7 @@ yarn-error.log*
 .env.*.local
 .env.development
 .env.production
+.env.vercel-reference.txt
 # (intentionally NOT ignoring .env.example — it's the safe template users copy)
 
 # vercel
