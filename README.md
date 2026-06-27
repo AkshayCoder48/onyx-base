@@ -78,6 +78,256 @@ same Telegram-backed durability model.
 
 <br/>
 
+<!-- ───────────────────────── KEYS, TOKENS & SESSIONS ───────────────────────── -->
+## Keys, Tokens & Sessions
+
+Onyx Base uses three distinct credential types — your master **API key**, scoped
+**share tokens**, and short-lived signed **download tokens** — plus a
+browser-side **session** store. Each one is minted, scoped, and revoked
+independently. Treat them like different keys on your keyring: the API key opens
+the front door, share tokens are the spare that only works on the garage, and
+download tokens are an AirBnB-style temporary code that expires by itself.
+
+### API Key — `kv_live_…`
+
+Your master credential. The Bearer token used by the dashboard, the `onyx` CLI,
+and every REST call. Grants full read/write access to everything you own.
+
+| Property | Value |
+|:---|:---|
+| **Format** | `kv_live_<28 hex>` |
+| **Minted** | Dashboard → **API Keys** tab (or returned once at signup). Shown exactly once at creation — copy it before closing the dialog. |
+| **Scope** | Full account access: every collection, every key, every file, every share token, every log. Not scoped — it is you. |
+| **Lifetime** | No expiry. Lives until you revoke it. Stored as a salted hash on the server; the plaintext is only ever shown once. |
+| **Revocation** | Revoke instantly from the API Keys tab (`DELETE /api/dashboard/api-keys/:id`). The key stops authenticating on the very next request. |
+| **Survives a full local-store wipe** | Yes. On a cache-miss, the auth layer fetches the pinned identity manifest from Telegram, rehydrates your user + API key records into the local store, and retries. The manifest lives in Telegram; the key matches it; you authenticate. |
+
+```http
+# Every /v1/* and /api/dashboard/* request carries this header:
+Authorization: Bearer kv_live_abc123def456…
+
+# Example: set a value
+curl -X POST https://onyx.example.com/v1/set \
+  -H "Authorization: Bearer kv_live_abc123def456…" \
+  -H "Content-Type: application/json" \
+  -d '{"key":"coins","value":500}'
+```
+
+### Share Token — `st_…`
+
+A public, scoped, rate-limited, expiring, revocable credential that wraps
+exactly one `(collection, key)` pair. Safe to embed in source-visible HTML
+(CodePen, static sites, browser extensions).
+
+| Property | Value |
+|:---|:---|
+| **Format** | `st_<28 hex>` |
+| **Minted** | Dashboard → **Public Share** tab (`POST /api/dashboard/share-tokens`). Choose mode (`read` / `write` / `readwrite`), allowed ops, rate limit, and TTL. |
+| **Scope** | One `(collection, key)` pair. A read token can only read that one key; a write token can only mutate that one key. It cannot touch anything else in your account. |
+| **Lifetime** | Optional TTL (in minutes). No TTL = never expires. Rate-limited per IP, per minute (default 30). Revoke at any time. |
+| **Revocation** | Revoke instantly from the Public Share tab (`DELETE /api/dashboard/share-tokens/:id`). The public URL returns 404 on the very next request. Cannot be undone — create a new token and update your HTML. |
+| **Modes** | `read` (`GET /v1/share/:token`), `write` (`POST /v1/write/:token`), `readwrite` (both endpoints work). |
+| **Write options** | `allowedOps` (`set` / `incr` / `append`), `maxValueLength` (bytes, default 4096), `incrMin` / `incrMax` (clamp `incr` results). |
+| **URLs** | Each token comes with copy-paste-ready `readUrl` and `writeUrl`. |
+
+```bash
+# Read token (mode: read) — public, no auth header
+curl https://onyx.example.com/v1/share/st_YOUR_READ_TOKEN
+# → {"ok":true,"key":"visits","value":42,"type":"number"}
+
+# Write token (mode: write, allowedOps: ["incr"]) — public, no auth
+curl -X POST https://onyx.example.com/v1/write/st_YOUR_WRITE_TOKEN \
+  -H "Content-Type: application/json" \
+  -d '{"op":"incr","amount":1}'
+# → {"ok":true,"op":"incr","value":43,"previous":42,"type":"number"}
+```
+
+### Download Token — `expiresAt.sig` (HMAC-SHA256)
+
+A signed, 55-minute, per-file token that lets anyone holding the link download
+one specific file — public or private. The signature IS the credential.
+
+| Property | Value |
+|:---|:---|
+| **Format** | `<expiresAt>.<HMAC-SHA256(fileId:expiresAt, CLOUDKV_SECRET)>` (passed as `?t=…&e=…` on `/f/<fileId>`) |
+| **Minted** | Auto-minted when you click **Get link** on a file row (`POST /v1/files/:id/link` or `/api/files/:id/link`). Returned alongside the Telegram cloud URL and the proxy URL. |
+| **Scope** | Exactly one file (by its internal `fileId`). Cannot be used to download any other file, list files, or read KV data. |
+| **Lifetime** | 55 minutes (just under Telegram's ~1-hour `getFile` URL expiry). Never auto-refreshed — the user must click **Get link** again after expiry. |
+| **Revocation** | Revoke drops the cached Telegram URL on our side (`POST /v1/files/:id/revoke`). The signature itself can't be revoked, but the underlying Telegram `getFile` URL it points at expires on its own ~1-hour clock. |
+| **Works for** | Both public AND private files. The signature is the credential, not the file's visibility flag. |
+
+```bash
+# Click "Get link" on a file → returns a signed URL on your origin:
+#   https://onyx.example.com/f/f_a1b2c3...?t=1735900000000.7e3a9f...&e=1735900000000
+
+# Anyone with the URL can download the file — no auth header:
+curl -L -o report.pdf \
+  "https://onyx.example.com/f/f_a1b2c3...?t=1735900000000.7e3a9f...&e=1735900000000"
+
+# After 55 minutes the signature is rejected. Re-click "Get link".
+```
+
+> **Why the signature is the credential.** The token is
+> `<expiresAt>.<HMAC-SHA256(fileId:expiresAt, CLOUDKV_SECRET)>`. The server
+> verifies the HMAC with a constant-time comparison and checks the expiry — no
+> database lookup, no session. That means the link works for both public and
+> private files, works from anywhere in the world, and never exposes the
+> Telegram bot token (the URL is on your origin; the server proxies the bytes
+> out of Telegram behind the scenes using a cached `getFile` URL).
+
+### Session — `cloudkv-session` (browser-side)
+
+The dashboard stores your session in `localStorage` under the key
+`cloudkv-session` — a Zustand-persisted store. It contains:
+
+| Field | Purpose |
+|:---|:---|
+| `apiKey` | Your `kv_live_…` master API key. Sent as the Bearer header on every dashboard request. |
+| `user` | Your profile: `userId`, `name`, `plan`, `counts` (records / collections / apiKeys / logs), and `isAdmin`. |
+| `activeView` | Which dashboard tab you're on (`overview`, `database`, `collections`, `storage`, `api-keys`, `share`, `playground`, `sql`, `docs`, `logs`, `analytics`, `settings`). Persists across reloads. |
+| `activeCollection` | The currently-selected collection (defaults to `default`). |
+| `useAdminMode` | `true` when an admin user wants the admin console; `false` for the regular dashboard. Only meaningful when `user.isAdmin` is true. |
+
+**This is a LOCAL session.** The server has no session table, no session
+cookie, no "logged in users" list. Every request is authenticated statelessly
+via the Bearer API key header. That means:
+
+- **Clearing `localStorage` = signed out.** There is no server-side logout
+  endpoint because there is no server-side session.
+- **The session never leaves the browser.** Only the API key travels in the
+  `Authorization` header on each request — the rest of the session state
+  (`activeView`, `activeCollection`, `useAdminMode`) is purely client-side UI
+  state.
+- **Signing out** calls `clearSession()`, which wipes `apiKey`, `user`, and
+  resets `activeView` / `activeCollection` / `useAdminMode` to defaults.
+- **The API key persists in localStorage** across browser restarts. If you share
+  the device, sign out when you're done. The key itself is still valid on the
+  server until you revoke it from the API Keys tab.
+
+```javascript
+// Inspecting the session from the browser console:
+const session = JSON.parse(localStorage.getItem('cloudkv-session') || '{}')
+console.log(session.state)
+// → {
+//     apiKey: "kv_live_abc123…",
+//     user: { userId: "usr_xxx", name: "Ada", plan: "free",
+//            counts: { records: 4, collections: 2, apiKeys: 1, logs: 12 },
+//            isAdmin: false },
+//     activeView: "database",
+//     activeCollection: "default",
+//     useAdminMode: true
+//   }
+
+// Signing out = wipe this one key:
+localStorage.removeItem('cloudkv-session')
+```
+
+<br/>
+
+<!-- ───────────────────────── FEATURE REFERENCE ───────────────────────── -->
+## Feature reference
+
+Twelve dashboard tabs, each a real feature — not a placeholder. The icons match
+the sidebar exactly.
+
+| Tab | What it does |
+|:---|:---|
+| **Dashboard** | Your landing page: a welcome header, four stat cards (records / collections / files / API keys), a 7-day activity area chart, recent records list, and a quick-jump launcher. Use it as the daily entry point — it surfaces what changed since you last visited and gets you into the database or storage tab in one click. |
+| **Database** | A spreadsheet-style IDE for your key-value data. Browse every record in the active collection, expand JSON cells, edit values inline, create new keys with auto-typing (string / number / boolean / JSON), and delete with a confirmation. Auto-refreshes in real time when other clients (the CLI, the API, a share-token widget) mutate a key — the row updates without a reload. |
+| **Collections** | Group keys into named collections (`default`, `cache`, `metrics`, …). Create, rename, and delete whole collections in one action — deleting a collection also wipes every record inside it and mirrors the deletion to Telegram. Use collections to keep unrelated data (config vs. analytics vs. user state) cleanly separated without a second account. |
+| **Cloud Storage** | A drag-and-drop file manager backed by Telegram. Upload any extension (exe, pdf, png, mp4, zip — anything) up to the effective limit (50 MB cloud Bot API, or 2 GB with a self-hosted local Bot API server). Each file gets a permanent `/f/<fileId>` proxy URL plus a signed 55-minute download token. Toggle public/private per file; track download counts. |
+| **API Keys** | Mint, name, and revoke multiple `kv_live_…` API keys per account. Each key is shown exactly once at creation — copy it before closing the dialog. Use named keys to segregate access (e.g. one for production, one for staging, one for the CLI on your laptop); revoke any of them instantly without touching the others. Keys are stored as salted hashes; the plaintext is never retrievable after creation. |
+| **Public Share** | Create scoped, rate-limited, expiring, revocable share tokens that wrap exactly one `(collection, key)` pair. Choose mode (`read` / `write` / `readwrite`), allowed ops (`set` / `incr` / `append`), max value length, incr bounds, per-IP rate limit, and TTL. Each token comes with copy-paste-ready `readUrl` and `writeUrl` — safe to embed in CodePen, static HTML, or browser extensions. |
+| **API Playground** | An interactive REST explorer: pick an endpoint (`set` / `get` / `list` / `delete` / `files` / `share-tokens` / `whoami` / `stats` / `logs` / …), fill in the parameters, hit **Send**, and inspect the raw JSON response. Auto-injects your current API key as the Bearer header. Great for prototyping calls before committing them to code, or for debugging why a particular request returns 404. |
+| **SQL Editor** | A real SQL console that runs against virtual tables (`records`, `collections`, `api_keys`, `logs`, `users`) pre-filtered to your account. Run `SELECT` / `INSERT` / `UPDATE` / `DELETE` / `CREATE` / `DROP` / `ALTER` statements, plus create your own `usr_*` tables for custom schemas. 1000-row cap per result, API keys masked in output, `⌘+Enter` to run. The fastest way to do bulk updates or exploratory queries. |
+| **Docs** | The in-app reference (the same content as the Keys/Tokens/Features/API/CLI/Realtime/Telegram sections of this README, restructured into tabs). Copy buttons on every code block, multi-language examples, and a **Copy for LLMs** button to grab the whole spec for an AI assistant. |
+| **Logs** | An append-only audit trail of every API event on your account: `set`, `delete`, `login`, `apikey.create`, `share.create`, file upload, `export`, and more. Each entry includes the action, the key/collection touched, the source (`dashboard` / `cli` / `api` / `share`), and a timestamp. Filter by action type, paginate through history. Every log entry is also mirrored into your Telegram chat as a structured message. |
+| **Analytics** | Aggregate charts over your account activity: requests per day, top actions, top keys, share-token usage, file-download counts. Useful for spotting usage patterns (e.g. a share token that suddenly spiked traffic, or a key that's being read far more than written). All data is derived from the same logs table the Logs tab shows — just rolled up. |
+| **Settings** | Account + storage configuration. View your `userId`, plan, and API-key counts. Configure your own Telegram bot (Bot Token + Chat ID) to route new KV mirrors and file uploads to your private chat instead of the shared server-side bot. Optionally set a local Bot API server URL to unlock 2 GB file uploads/downloads (vs. the cloud Bot API's 50 MB upload / 20 MB download cap). Ping the bot to verify the config. |
+
+<br/>
+
+<!-- ───────────────────────── REST API SURFACE ───────────────────────── -->
+## REST API (`/v1/*`)
+
+Every `/v1/*` route (and every `/api/dashboard/*` route) requires the Bearer
+header — except signup, public share, public file download, and health. The same
+key works for the CLI, the dashboard, and any HTTP client.
+
+```http
+Authorization: Bearer kv_live_abc123def456…
+```
+
+### Key-value
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `POST` | `/v1/set` | Set / upsert a value. Body: `{ "key", "value", "collection"? }`. Values are auto-typed (string / number / boolean / JSON). |
+| `GET` | `/v1/get/:key?collection=default` | Read a value. Returns `{ ok, key, value, type, collection, updatedAt }`. 404 when the key doesn't exist. |
+| `DELETE` | `/v1/delete/:key?collection=default` | Remove a key + its Telegram mirror message. 404 when the key doesn't exist. |
+| `GET` | `/v1/list?collection=default` | List keys in a collection. Returns `{ ok, keys, count, collection }`. |
+| `GET` | `/v1/export?collection=default` | Dump the whole database (or one collection) as a JSON object. Non-default collections are prefixed with the collection name + a dot. |
+
+### Files
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `POST` | `/v1/files` | Upload a file (multipart: `file`, optional `label`, optional `public`). Returns file metadata + permanent `/f/<fileId>` URL. |
+| `GET` | `/v1/files` | List stored files. Also returns the effective `maxFileUploadBytes` (50 MB cloud / 2 GB local). |
+| `GET` | `/v1/files/:id` | File metadata. |
+| `POST` | `/v1/files/:id/link` | Mint a signed 55-minute download link. Returns `{ url, proxyUrl, expiresAt, expiresInSec, revocable }`. Add `?force=1` to bypass the 55-min server cache. |
+| `POST` | `/v1/files/:id/revoke` | Drop the cached Telegram `getFile` URL on our side. The next `/link` call pulls a brand-new URL. |
+| `DELETE` | `/v1/files/:id` | Permanently delete a file (record + Telegram document message). |
+| `GET` | `/f/:fileId?t=…&e=…` | Public download proxy — streams bytes from Telegram through your server's origin. No auth (signature is the credential). Add `?inline=1` to render in-browser. |
+
+### Collections
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `GET` | `/v1/collections` | List collections (with record counts). |
+| `GET` | `/v1/collections/:name` | Collection detail. |
+
+### Account & ops
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `GET` | `/v1/whoami` | Identify the current API key + user. Returns `{ userId, apiKeyId, apiKeyName, isAdmin }`. |
+| `GET` | `/v1/health` | Service + Telegram storage status. Liveness + readiness probe. No auth. |
+| `GET` | `/v1/stats` | Account statistics (records / collections / apiKeys / logs / files counts, activity by day, recent activity). |
+| `GET` | `/v1/logs?limit=50&action=…` | Recent audit log entries, optionally filtered by action. |
+
+### Share tokens (public surface)
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `GET` | `/v1/share/:token` | **Public** scoped read — no auth. Returns the value, type, and updatedAt for the single key the token wraps. |
+| `POST` | `/v1/write/:token` | **Public** scoped write — no auth. Body: `{ "op": "set"|"incr"|"append", "value"?, "amount"? }`. Honors `allowedOps`, `maxValueLength`, `incrMin/incrMax`, and the per-IP rate limit. |
+| `POST` | `/api/dashboard/share-tokens` | Create a share token (auth required). Body: `{ collection?, key, mode, label?, ttlMinutes?, rateLimitPerMin?, allowedOps?, maxValueLength?, incrMin?, incrMax? }`. |
+| `GET` | `/api/dashboard/share-tokens` | List your share tokens (auth required). |
+| `DELETE` | `/api/dashboard/share-tokens/:id` | Revoke a share token instantly (auth required). The public URL returns 404 on the next request. |
+
+### Advanced (`/api/v1/*`)
+
+A Supabase-style advanced surface lives under `/api/v1/*` (note the `/api`
+prefix, distinct from the basic `/v1/*` surface). All routes require the Bearer
+API key and are scoped to the authenticated user.
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `GET` | `/api/v1/views` | List named views (projections over a collection). Create with `POST /api/v1/views { name, collection, projection, filter? }`. |
+| `GET` | `/api/v1/views/:name` | Execute a stored view — applies its substring filter on the key and projects the requested columns. |
+| `GET` | `/api/v1/matviews` | List materialized views (pre-computed aggregations cached as JSON). Create with `POST /api/v1/matviews { name, query }`. Refresh-all with `POST /api/v1/matviews { action: "refresh_all" }`. |
+| `GET` | `/api/v1/matviews/:name` | O(1) read of the cached aggregation result. `POST` to refresh, `DELETE` to drop. |
+| `POST` | `/api/v1/functions` | Create a server-side function. Body: `{ name, code }`. Runs in a `new Function("ctx", code)` sandbox with `{ record, db, user }` — `db` is read-only and user-scoped. 5s timeout, syntax-checked at create. |
+| `POST` | `/api/v1/functions/:name` | Test-invoke a stored function with the supplied `ctx` body. |
+| `POST` | `/api/v1/rpc/:name` | Built-in RPC: `count_records`, `sum { key }`, `aggregate { collection, type }`, `search { query, collection?, limit? }`, `touch { key, value, collection? }`. All user-scoped. |
+| `POST` | `/api/v1/graphql` | Minimal hand-rolled GraphQL endpoint (no Apollo/graphql deps). Queries for `records`, `collections`, `apiKeys`, `logs`, `me` — all user-scoped. Args + variables supported on `records(limit, collection)` and `logs(limit, action)`. Standard `{ data, errors }` response. |
+
+> The full surface — including dashboard routes (`/api/dashboard/*`) and admin
+> routes (`/api/admin/*`) — is in the **API surface** section below.
+
+<br/>
+
 <!-- ───────────────────────── WRITE PATH DATA FLOW ───────────────────────── -->
 ## How a write flows
 
