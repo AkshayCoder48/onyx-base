@@ -75,7 +75,7 @@ export function maskKey(key: string) {
 
 /**
  * Mask a Telegram chat ID so only the sign + last 4 digits are visible.
- * e.g. "-1003694343052" → "-100…052", "123456789" → "…6789".
+ * e.g. "-1001234567890" → "-100…7890", "123456789" → "…6789".
  *
  * Used everywhere a chat ID is shown in the dashboard so the full identifier
  * (an operator secret) is never surfaced in the UI or in screenshots.

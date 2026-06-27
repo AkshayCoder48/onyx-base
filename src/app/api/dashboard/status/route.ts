@@ -7,7 +7,7 @@ export const runtime = 'nodejs'
 
 /**
  * Mask a chat ID for safe display: keep only the sign + first 3 + last 4
- * digits. e.g. "-1003694343052" → "-100…052". The full chat ID is an
+ * digits. e.g. "-1001234567890" → "-100…7890". The full chat ID is an
  * operator secret and must never be sent to the browser.
  */
 function maskChatId(id: string): string {
