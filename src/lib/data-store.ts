@@ -282,7 +282,12 @@ export const ADMIN_PUBLIC_USER_ID = 'usr_admin'
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
-const STORE_PATH = path.join(process.cwd(), 'db', 'cloudkv.json')
+// On serverless platforms (Vercel) the working directory is read-only, so the
+// JSON cache must live in /tmp (the only writable, per-instance-ephemeral dir).
+// Locally we keep it in ./db so the cache survives hot reloads. Telegram is
+// always the durable layer; this file is only a fast local index.
+const DATA_DIR = process.env.VERCEL ? '/tmp' : path.join(process.cwd(), 'db')
+const STORE_PATH = path.join(DATA_DIR, 'cloudkv.json')
 
 const EMPTY_STORE: StoreShape = { users: [], apiKeys: [], records: [], logs: [], telegramConfigs: [], shareTokens: [], files: [], collectionNames: [], adminKeys: [] }
 
