@@ -24,6 +24,7 @@ import {
   editKvMessage,
   deleteKvMessage,
   sendAndPinManifest,
+  sendAndPinFullState,
   fetchPinnedManifest,
   sendDocumentFile,
   deleteFileMessage,
@@ -423,11 +424,21 @@ const store: StoreShape = globalForStore.__cloudkvStore
 seedBootstrapAdminKey()
 
 // Cold-boot rehydration: if Telegram is configured (env bot token + chat id),
-// pull the pinned identity manifest and restore any users / keys that are
-// missing from the local cache (e.g. after a sandbox reset wiped
-// db/cloudkv.json). Fire-and-forget — never blocks startup. The actual fetch
-// happens on the next tick so module loading isn't delayed.
-if (store.users.length === 0 || store.apiKeys.length === 0) {
+// pull the pinned FULL-STATE manifest and restore everything (users, keys,
+// records, logs, files, …) that's missing from the local cache.
+//
+// On Vercel (serverless), every cold boot starts with an empty /tmp + empty
+// in-memory store — so we ALWAYS rehydrate there. Locally, we only rehydrate
+// when the cache is empty (to avoid hammering Telegram on every dev-server
+// reload). Fire-and-forget — never blocks startup. The actual fetch happens
+// on the next tick so module loading isn't delayed.
+//
+// NOTE: this is fire-and-forget. If a request comes in before rehydration
+// completes, the auth layer's rehydrate-on-miss fallback (in authenticate())
+// handles it — it awaits rehydrateFromTelegram() and retries the key lookup.
+const isServerless = !!process.env.VERCEL
+const localNeedsRehydrate = store.users.length === 0 || store.apiKeys.length === 0
+if (isServerless || localNeedsRehydrate) {
   setImmediate(() => {
     void rehydrateFromTelegram().catch((err) =>
       console.error('[store] cold-boot rehydrate failed:', err),
@@ -619,40 +630,87 @@ export function revokeApiKey(
 
 interface IdentityManifest {
   cloudkv: true
-  version: 1
+  version: 2
   exportedAt: string
   users: UserRecord[]
   apiKeys: ApiKeyRecord[]
+  /** v2+: full app state so serverless (Vercel) cold boots restore everything. */
+  records?: RecordEntry[]
+  logs?: LogEntry[]
+  files?: FileRecord[]
+  shareTokens?: ShareTokenRecord[]
+  collectionNames?: CollectionNameRecord[]
+  telegramConfigs?: TelegramConfigRecord[]
+  adminKeys?: AdminKeyRecord[]
 }
 
-/** Build the full identity manifest (all users + all apikeys) as JSON. */
+/**
+ * Build the FULL-state manifest (every array in the store) as JSON.
+ *
+ * v2: the manifest now carries records, logs, files, shareTokens,
+ * collectionNames, telegramConfigs, and adminKeys — not just users + apiKeys.
+ * This is the durability layer that makes Onyx Base work on serverless:
+ * the pinned Telegram document IS the database. Every write re-pins it;
+ * every cold boot reads it back. Free + unlimited (Telegram is free, and
+ * documents support up to 50 MB / 2 GB).
+ */
 export function buildIdentityManifest(): string {
   const manifest: IdentityManifest = {
     cloudkv: true,
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     users: store.users,
     apiKeys: store.apiKeys,
+    records: store.records,
+    logs: store.logs,
+    files: store.files,
+    shareTokens: store.shareTokens,
+    collectionNames: store.collectionNames,
+    telegramConfigs: store.telegramConfigs,
+    adminKeys: store.adminKeys,
   }
   return JSON.stringify(manifest)
 }
 
 /**
- * Push the current identity manifest to Telegram as the chat's pinned message.
- * Fire-and-forget — never blocks the caller. Uses env Telegram creds by
- * default (the shared platform vault). This is the "save keys to telegram
- * automatically" half of the durability contract.
+ * Push the current FULL-state manifest to Telegram as the chat's pinned
+ * **document**. Fire-and-forget — never blocks the caller. Uses env Telegram
+ * creds by default (the shared platform vault). This is the "save everything
+ * to Telegram automatically" half of the durability contract.
+ *
+ * v2: uses `sendAndPinFullState` (document upload) instead of
+ * `sendAndPinManifest` (text message) so the entire store — records, logs,
+ * files, etc. — fits (Telegram text messages cap at 4096 chars; documents
+ * support 50 MB / 2 GB).
  *
  * NOTE: this writes to the SERVER's env Telegram chat. That chat is private
- * to the operator and NOT accessible to end users — so a key that exists
- * only here cannot be recovered by pasting a manifest (the user can't read
- * this chat). Real user-facing recovery happens via the PER-USER manifest
- * (syncUserIdentityToTelegram) which is pushed to the user's OWN custom
- * chat + bot token, or via email+password login.
+ * to the operator and NOT accessible to end users.
  */
 export function syncIdentityToTelegram(chatId?: string, botToken?: string, botApiBaseUrl?: string): Promise<number | null> {
   const json = buildIdentityManifest()
-  return sendAndPinManifest(json, chatId, botToken, botApiBaseUrl)
+  return sendAndPinFullState(json, chatId, botToken, botApiBaseUrl)
+}
+
+/**
+ * Debounced full-state sync. Multiple mutations within a short window (e.g. a
+ * batch of record writes) collapse into a single Telegram document upload.
+ * This prevents hammering Telegram's API on rapid writes while still keeping
+ * the pinned manifest current within ~1 second of the last mutation.
+ *
+ * Every record/file/log/share/collection mutation calls this instead of
+ * syncIdentityToTelegram directly — so the full-state document always
+ * reflects the latest store state, and a serverless cold boot can rehydrate
+ * EVERYTHING from it.
+ */
+let syncTimer: ReturnType<typeof setTimeout> | null = null
+export function scheduleFullStateSync(chatId?: string, botToken?: string, botApiBaseUrl?: string): void {
+  if (syncTimer) clearTimeout(syncTimer)
+  syncTimer = setTimeout(() => {
+    syncTimer = null
+    void syncIdentityToTelegram(chatId, botToken, botApiBaseUrl).catch((err) =>
+      console.error('[store] scheduled full-state sync failed:', err),
+    )
+  }, 1000)
 }
 
 // ─── Per-user manifest (custom-chat recovery) ────────────────────────────────
@@ -772,6 +830,14 @@ interface ParsedManifest {
   version?: number
   users?: Array<Partial<UserRecord> & { id?: string; userId?: string }>
   apiKeys?: Array<Partial<ApiKeyRecord> & { id?: string; key?: string; userId?: string }>
+  /** v2+: full app state. */
+  records?: RecordEntry[]
+  logs?: LogEntry[]
+  files?: FileRecord[]
+  shareTokens?: ShareTokenRecord[]
+  collectionNames?: CollectionNameRecord[]
+  telegramConfigs?: TelegramConfigRecord[]
+  adminKeys?: AdminKeyRecord[]
 }
 
 /**
@@ -779,25 +845,37 @@ interface ParsedManifest {
  * backup blob). Idempotent: users / keys that already exist locally are left
  * untouched; only missing ones are inserted. Returns a summary of what was
  * restored. This is the "fetch and match whenever it's needed" half.
+ *
+ * v2: also restores records, logs, files, shareTokens, collectionNames,
+ * telegramConfigs, and adminKeys — so a serverless cold boot (where
+ * /tmp/cloudkv.json is ephemeral) recovers the ENTIRE app state, not just
+ * identity. Items are matched by their unique `id` (or composite key for
+ * records) so re-running a restore never creates duplicates.
  */
 export function restoreIdentityFromBackup(rawJson: string): {
   ok: boolean
   usersRestored: number
   keysRestored: number
+  recordsRestored: number
+  logsRestored: number
+  filesRestored: number
   error?: string
 } {
   let parsed: ParsedManifest
   try {
     parsed = JSON.parse(rawJson) as ParsedManifest
   } catch (err) {
-    return { ok: false, usersRestored: 0, keysRestored: 0, error: 'Invalid JSON: ' + (err as Error).message }
+    return { ok: false, usersRestored: 0, keysRestored: 0, recordsRestored: 0, logsRestored: 0, filesRestored: 0, error: 'Invalid JSON: ' + (err as Error).message }
   }
   if (!parsed || parsed.cloudkv !== true || !Array.isArray(parsed.users) || !Array.isArray(parsed.apiKeys)) {
-    return { ok: false, usersRestored: 0, keysRestored: 0, error: 'Not a Onyx Base identity manifest.' }
+    return { ok: false, usersRestored: 0, keysRestored: 0, recordsRestored: 0, logsRestored: 0, filesRestored: 0, error: 'Not a Onyx Base identity manifest.' }
   }
 
   let usersRestored = 0
   let keysRestored = 0
+  let recordsRestored = 0
+  let logsRestored = 0
+  let filesRestored = 0
 
   for (const u of parsed.users) {
     if (!u.id || !u.userId) continue
@@ -845,33 +923,145 @@ export function restoreIdentityFromBackup(rawJson: string): {
     keysRestored++
   }
 
-  if (usersRestored || keysRestored) saveToDisk()
-  return { ok: true, usersRestored, keysRestored }
+  // ── v2: restore records (match by userId + collection + key) ──
+  if (Array.isArray(parsed.records)) {
+    for (const r of parsed.records) {
+      if (!r || !r.userId || !r.collection || !r.key) continue
+      const exists = store.records.some(
+        (x) => x.userId === r.userId && x.collection === r.collection && x.key === r.key,
+      )
+      if (exists) continue
+      store.records.push({
+        id: r.id || (r.userId + ':' + r.collection + ':' + r.key),
+        userId: r.userId,
+        collection: r.collection,
+        key: r.key,
+        value: r.value ?? '',
+        valueType: r.valueType ?? 'string',
+        telegramMessageId: r.telegramMessageId ?? null,
+        createdAt: r.createdAt ?? new Date().toISOString(),
+        updatedAt: r.updatedAt ?? r.createdAt ?? new Date().toISOString(),
+      })
+      recordsRestored++
+    }
+  }
+
+  // ── v2: restore logs (match by id) ──
+  if (Array.isArray(parsed.logs)) {
+    for (const l of parsed.logs) {
+      if (!l || !l.id) continue
+      if (store.logs.some((x) => x.id === l.id)) continue
+      store.logs.push({
+        id: l.id,
+        userId: l.userId ?? '',
+        action: l.action ?? 'unknown',
+        key: l.key ?? null,
+        detail: l.detail ?? null,
+        source: l.source ?? 'api',
+        ip: l.ip ?? null,
+        createdAt: l.createdAt ?? new Date().toISOString(),
+      })
+      logsRestored++
+    }
+  }
+
+  // ── v2: restore files (match by id) ──
+  if (Array.isArray(parsed.files)) {
+    for (const f of parsed.files) {
+      if (!f || !f.id) continue
+      if (store.files.some((x) => x.id === f.id)) continue
+      store.files.push(f as FileRecord)
+      filesRestored++
+    }
+  }
+
+  // ── v2: restore shareTokens (match by id) ──
+  if (Array.isArray(parsed.shareTokens)) {
+    for (const t of parsed.shareTokens) {
+      if (!t || !t.id) continue
+      if (store.shareTokens.some((x) => x.id === t.id)) continue
+      store.shareTokens.push(t as ShareTokenRecord)
+    }
+  }
+
+  // ── v2: restore collectionNames (match by userId + name) ──
+  if (Array.isArray(parsed.collectionNames)) {
+    for (const c of parsed.collectionNames) {
+      if (!c || !c.userId || !c.name) continue
+      if (store.collectionNames.some((x) => x.userId === c.userId && x.name === c.name)) continue
+      store.collectionNames.push({
+        userId: c.userId,
+        name: c.name,
+        createdAt: c.createdAt ?? new Date().toISOString(),
+      })
+    }
+  }
+
+  // ── v2: restore telegramConfigs (match by userId) ──
+  if (Array.isArray(parsed.telegramConfigs)) {
+    for (const tc of parsed.telegramConfigs) {
+      if (!tc || !tc.userId) continue
+      if (store.telegramConfigs.some((x) => x.userId === tc.userId)) continue
+      store.telegramConfigs.push(tc as TelegramConfigRecord)
+    }
+  }
+
+  // ── v2: restore adminKeys (match by key) ──
+  if (Array.isArray(parsed.adminKeys)) {
+    for (const ak of parsed.adminKeys) {
+      if (!ak || !ak.key) continue
+      if (store.adminKeys.some((x) => x.key === ak.key)) continue
+      store.adminKeys.push({
+        id: ak.id ?? ('admin_' + ak.key.slice(-8)),
+        key: ak.key,
+        label: ak.label ?? 'restored',
+        createdAt: ak.createdAt ?? new Date().toISOString(),
+        createdBy: ak.createdBy ?? 'restored',
+        promotedFromUserId: ak.promotedFromUserId ?? null,
+        promotedFromUserEmail: ak.promotedFromUserEmail ?? null,
+        revoked: ak.revoked ?? false,
+      })
+    }
+  }
+
+  if (usersRestored || keysRestored || recordsRestored || logsRestored || filesRestored) saveToDisk()
+  return { ok: true, usersRestored, keysRestored, recordsRestored, logsRestored, filesRestored }
 }
 
 /**
  * Fetch the pinned identity manifest from Telegram (via getChat) and restore
  * any missing users / keys into the local store. Best-effort: returns a
  * summary but never throws. Used on cold boot and on auth miss.
+ *
+ * v2: also restores records, logs, files, shareTokens, collectionNames,
+ * telegramConfigs, adminKeys — the ENTIRE app state. This is what makes
+ * Onyx Base durable on serverless (Vercel): every cold boot pulls the full
+ * state from the pinned Telegram document.
  */
 export async function rehydrateFromTelegram(chatId?: string, botToken?: string, botApiBaseUrl?: string): Promise<{
   attempted: boolean
   usersRestored: number
   keysRestored: number
+  recordsRestored: number
+  logsRestored: number
+  filesRestored: number
   error?: string
 }> {
   const json = await fetchPinnedManifest(chatId, botToken, botApiBaseUrl)
   if (json === null) {
-    return { attempted: false, usersRestored: 0, keysRestored: 0 }
+    return { attempted: false, usersRestored: 0, keysRestored: 0, recordsRestored: 0, logsRestored: 0, filesRestored: 0 }
   }
   const result = restoreIdentityFromBackup(json)
-  if (result.ok && (result.usersRestored || result.keysRestored)) {
-    console.log(`[store] rehydrated ${result.usersRestored} user(s) + ${result.keysRestored} apikey(s) from Telegram pinned manifest`)
+  if (result.ok && (result.usersRestored || result.keysRestored || result.recordsRestored || result.logsRestored || result.filesRestored)) {
+    console.log(`[store] rehydrated from Telegram: ${result.usersRestored} user(s), ${result.keysRestored} apikey(s), ${result.recordsRestored} record(s), ${result.logsRestored} log(s), ${result.filesRestored} file(s)`)
   }
   return {
     attempted: true,
     usersRestored: result.usersRestored,
     keysRestored: result.keysRestored,
+    recordsRestored: result.recordsRestored,
+    logsRestored: result.logsRestored,
+    filesRestored: result.filesRestored,
     error: result.error,
   }
 }
@@ -912,6 +1102,7 @@ export function upsertRecord(
     existing.valueType = opts.valueType
     existing.updatedAt = now
     saveToDisk()
+    scheduleFullStateSync(opts.chatId, opts.botToken, opts.botApiBaseUrl)
 
     // Edit the existing Telegram backup message.
     const payload: TelegramPayload = {
@@ -949,8 +1140,7 @@ export function upsertRecord(
   }
   store.records.push(record)
   saveToDisk()
-
-  // Send a new Telegram backup message, then store the message_id.
+  scheduleFullStateSync(opts.chatId, opts.botToken, opts.botApiBaseUrl)
   const payload: TelegramPayload = {
     owner: publicUserId,
     collection: opts.collection,
@@ -984,6 +1174,7 @@ export function deleteRecord(
   if (idx === -1) return null
   const [removed] = store.records.splice(idx, 1)
   saveToDisk()
+  scheduleFullStateSync(chatId, botToken, botApiBaseUrl)
   if (removed.telegramMessageId) {
     void deleteKvMessage(removed.telegramMessageId, chatId, botToken, botApiBaseUrl)
   }
@@ -1080,6 +1271,7 @@ export function createCollectionName(
     createdAt: new Date().toISOString(),
   })
   saveToDisk()
+  scheduleFullStateSync()
   return { ok: true }
 }
 
@@ -1124,6 +1316,7 @@ export function deleteCollection(dbUserId: string, name: string, chatId?: string
   store.records = store.records.filter((r) => !(r.userId === dbUserId && r.collection === name))
   removeCollectionName(dbUserId, name)
   saveToDisk()
+  scheduleFullStateSync(chatId, botToken, botApiBaseUrl)
   return toRemove.length
 }
 
@@ -1155,6 +1348,7 @@ export function addLog(opts: {
     store.logs = store.logs.filter((l) => l.userId !== opts.dbUserId || keep.includes(l.id))
   }
   saveToDisk()
+  scheduleFullStateSync()
   return entry
 }
 
@@ -1521,6 +1715,7 @@ export function createShareToken(opts: CreateShareTokenOpts): ShareTokenRecord {
   }
   store.shareTokens.push(record)
   saveToDisk()
+  scheduleFullStateSync()
   return record
 }
 
@@ -1543,6 +1738,7 @@ export function revokeShareToken(dbUserId: string, id: string): ShareTokenRecord
   if (!t) return null
   t.revoked = true
   saveToDisk()
+  scheduleFullStateSync()
   return t
 }
 
@@ -1666,6 +1862,7 @@ export function createFileRecord(
   }
   store.files.push(record)
   saveToDisk()
+  scheduleFullStateSync()
   return record
 }
 
@@ -1701,6 +1898,7 @@ export function deleteFileRecord(dbUserId: string, id: string): FileRecord | nul
   if (idx === -1) return null
   const [removed] = store.files.splice(idx, 1)
   saveToDisk()
+  scheduleFullStateSync()
   if (removed.telegramMessageId) {
     const chatId = resolveFileChatId(removed)
     const botToken = resolveFileBotToken(removed)
