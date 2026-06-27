@@ -27,9 +27,11 @@ export const runtime = 'nodejs'
  *
  * Email rules:
  *   - For `source=web`: email is REQUIRED and must pass strict validation +
- *     the tempmail-blocker local blocklist + a live SMTP deliverability probe.
- *     If the email already belongs to an existing account, we REFUSE to create
- *     a duplicate and tell the user to sign in instead.
+ *     the tempmail-blocker local blocklist + a live domain check via
+ *     check.emailverifier.online (disposable / domain-not-found / no-MX /
+ *     syntax). The SMTP RCPT probe result is NOT required — it blocked valid
+ *     emails. If the email already belongs to an existing account, we REFUSE
+ *     to create a duplicate and tell the user to sign in instead.
  *   - For `source=cli`: email is optional (the CLI historically sends name only).
  *
  * Password rules:
@@ -101,17 +103,18 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // ── Real mailbox verification (web signups only) ──
-  // Two layers: (1) tempmail-blocker local blocklist (instant), then
-  // (2) check.emailverifier.online live SMTP probe. Blocks bot abuse with
-  // fake / non-existent / disposable addresses. CLI signups skip this. If the
-  // live probe is unreachable, we fail open (allow the signup) so a
-  // third-party outage doesn't lock everyone out.
+  // ── Email verification (web signups only) ──
+  // Two layers: (1) tempmail-blocker local blocklist (4,493+ disposable
+  // domains, instant), then (2) check.emailverifier.online live domain check
+  // (disposable type / domain-not-found / no-MX / syntax). The SMTP RCPT
+  // probe result (`safetosend`) is deliberately NOT required — it produced
+  // false negatives on valid mailboxes. CLI signups skip this. If the live
+  // API is unreachable, we fail open so an outage doesn't lock everyone out.
   if (isWeb && email) {
     const verification = await verifyEmail(email)
     if (!verification.valid) {
       return fail(
-        verification.reason || 'This email address could not be verified. Please use a valid, deliverable email.',
+        verification.reason || 'Please use a real, non-disposable email address.',
         400,
         { verificationStatus: verification.status },
       )
