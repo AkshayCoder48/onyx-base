@@ -11,6 +11,7 @@ import { LogsView } from './logs'
 import { AnalyticsView } from './analytics'
 import { PlaygroundView } from './playground'
 import { SqlEditorView } from './sql-editor'
+import { TablesView } from './tables'
 import { DocsView } from './docs'
 import { SettingsView } from './settings'
 import { useOnyxBase } from '@/lib/store'
@@ -39,6 +40,7 @@ export function DashboardShell() {
               {view === 'analytics' && <AnalyticsView />}
               {view === 'playground' && <PlaygroundView />}
               {view === 'sql' && <SqlEditorView />}
+              {view === 'tables' && <TablesView />}
               {view === 'docs' && <DocsView />}
               {view === 'settings' && <SettingsView />}
             </div>

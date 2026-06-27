@@ -18,6 +18,7 @@ import {
   X,
   Github,
   Code2,
+  Table2,
 } from 'lucide-react'
 import { useOnyxBase, type ViewKey } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -49,6 +50,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { key: 'share', label: 'Public Share', icon: Share2 },
       { key: 'playground', label: 'API Playground', icon: TerminalSquare },
       { key: 'sql', label: 'SQL Editor', icon: Code2 },
+      { key: 'tables', label: 'Tables', icon: Table2 },
       { key: 'docs', label: 'Docs', icon: BookOpen },
       { key: 'logs', label: 'Logs', icon: ScrollText },
       { key: 'analytics', label: 'Analytics', icon: BarChart3 },

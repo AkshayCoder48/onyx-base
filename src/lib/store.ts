@@ -14,6 +14,7 @@ export type ViewKey =
   | 'analytics'
   | 'playground'
   | 'sql'
+  | 'tables'
   | 'docs'
   | 'settings'
 
