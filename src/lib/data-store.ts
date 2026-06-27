@@ -203,60 +203,12 @@ interface StoreShape {
   collectionNames: CollectionNameRecord[]
   /** Admin keys (`onyxbase_*`) — grant cross-user read access via /admin. */
   adminKeys: AdminKeyRecord[]
-  /**
-   * Email OTP records. Each OTP is a 6-digit code hashed with scrypt (the
-   * SAME `hashPassword` used for user passwords) and stored here with a
-   * 10-minute TTL. Codes are NEVER stored in plaintext — only the hash is
-   * persisted. Records are consumed (marked `consumedAt`) on successful
-   * verification, and expired ones are purged at the top of every `saveOtp`.
-   */
-  otps: OtpRecord[]
 }
 
 interface CollectionNameRecord {
   userId: string
   name: string
   createdAt: string
-}
-
-/**
- * A one-time email verification code (signup / login / reset).
- *
- * The 6-digit `code` itself is NEVER stored — only a scrypt hash of it
- * (`codeHash`, format `scrypt$<saltHex>$<hashHex>` from `hashPassword`).
- * Verification uses `verifyPassword(code, codeHash)`.
- *
- * Lifecycle:
- *   1. `createOtp(email, purpose)` → mints a new record + returns the code.
- *   2. `verifyOtp(email, purpose, code)` → finds the latest unconsumed
- *      record for this (email, purpose), checks expiry, checks the hash,
- *      and on success calls `markOtpConsumed(id)` so the code can't be
- *      replayed. Returns `{ valid: boolean, reason?: string }`.
- *   3. `purgeExpiredOtps()` → called at the top of every `saveOtp`, removes
- *      records whose `expiresAt` has passed (whether consumed or not) so
- *      the store doesn't grow unbounded.
- *
- * Dev-mode visibility: `listOtpsForEmail(email)` returns metadata (id,
- * purpose, createdAt, expiresAt, consumedAt) for the admin dashboard —
- * but NOT the hash, and NEVER the plaintext code. The plaintext code only
- * exists in memory between `createOtp` and the caller sending the email /
- * returning it as `devCode`.
- */
-export interface OtpRecord {
-  /** `otp_<cuid>` — unique per OTP. */
-  id: string
-  /** Lowercased email the code was issued to. */
-  email: string
-  /** What the code is for: signup verification, login, or password reset. */
-  purpose: 'signup' | 'login' | 'reset'
-  /** scrypt hash of the 6-digit code. NEVER store the plaintext code. */
-  codeHash: string
-  /** Epoch ms when the OTP was issued. */
-  createdAt: number
-  /** Epoch ms when the OTP expires (createdAt + OTP_TTL_MS, 10 minutes). */
-  expiresAt: number
-  /** Epoch ms when the OTP was successfully consumed (verified), else null. */
-  consumedAt: number | null
 }
 
 // ─── Admin keys ──────────────────────────────────────────────────────────────
@@ -313,7 +265,7 @@ export const ADMIN_PUBLIC_USER_ID = 'usr_admin'
 
 const STORE_PATH = path.join(process.cwd(), 'db', 'cloudkv.json')
 
-const EMPTY_STORE: StoreShape = { users: [], apiKeys: [], records: [], logs: [], telegramConfigs: [], shareTokens: [], files: [], collectionNames: [], adminKeys: [], otps: [] }
+const EMPTY_STORE: StoreShape = { users: [], apiKeys: [], records: [], logs: [], telegramConfigs: [], shareTokens: [], files: [], collectionNames: [], adminKeys: [] }
 
 function loadFromDisk(): StoreShape {
   try {
@@ -329,7 +281,6 @@ function loadFromDisk(): StoreShape {
       files: parsed.files ?? [],
       collectionNames: parsed.collectionNames ?? [],
       adminKeys: parsed.adminKeys ?? [],
-      otps: parsed.otps ?? [],
     }
   } catch {
     return { ...EMPTY_STORE }
@@ -350,7 +301,6 @@ function saveToDisk() {
       files: store.files,
       collectionNames: store.collectionNames,
       adminKeys: store.adminKeys,
-      otps: store.otps,
     }
     // Atomic write: write to a temp file in the same directory, then rename.
     // `rename` is atomic on POSIX, so a crash mid-write can never leave a
@@ -394,7 +344,6 @@ function ensureShape(loaded: Partial<StoreShape>): StoreShape {
     })),
     collectionNames: loaded.collectionNames ?? [],
     adminKeys: loaded.adminKeys ?? [],
-    otps: loaded.otps ?? [],
   }
 }
 
@@ -429,7 +378,6 @@ function backfillInPlace(existing: StoreShape): StoreShape {
   }
   if (!Array.isArray(existing.collectionNames)) existing.collectionNames = []
   if (!Array.isArray(existing.adminKeys)) existing.adminKeys = []
-  if (!Array.isArray(existing.otps)) existing.otps = []
   return existing
 }
 
@@ -2074,100 +2022,4 @@ export function adminRevokeAdminKey(id: string): AdminKeyRecord | null {
   k.revoked = true
   saveToDisk()
   return k
-}
-
-// ─── OTP records (email verification codes) ─────────────────────────────────
-//
-// Stores scrypt-hashed 6-digit codes for signup / login / password-reset
-// verification. The plaintext code is NEVER persisted — only the hash. The
-// `createOtp` helper in `src/lib/otp.ts` is the single entry point: it mints
-// a code, hashes it with the EXISTING `hashPassword` from `password.ts`, and
-// stores the record here. The plaintext code is then handed back to the caller
-// (the API route), which either sends it via SMTP or returns it as `devCode`.
-
-/**
- * Persist a new OTP record (hash only — never the plaintext code).
- * Purges all expired OTPs first so the store doesn't grow unbounded.
- */
-export function saveOtp(record: OtpRecord): OtpRecord {
-  // Defensive: make sure the otps array exists on legacy store objects that
-  // were loaded before the otps field was added.
-  if (!Array.isArray(store.otps)) store.otps = []
-  purgeExpiredOtps()
-  store.otps.push(record)
-  saveToDisk()
-  return record
-}
-
-/**
- * Find the most recent UNCONSUMED OTP for a given (email, purpose) pair.
- * Returns undefined if none exists. Callers are responsible for checking
- * `expiresAt` and the hash — this function only filters by identity + state.
- */
-export function findLatestUnconsumedOtp(
-  email: string,
-  purpose: OtpRecord['purpose'],
-): OtpRecord | undefined {
-  const normalized = email.trim().toLowerCase()
-  if (!Array.isArray(store.otps)) return undefined
-  // Iterate in reverse-insertion order so we naturally pick the most recent.
-  for (let i = store.otps.length - 1; i >= 0; i--) {
-    const o = store.otps[i]
-    if (o.email === normalized && o.purpose === purpose && o.consumedAt === null) {
-      return o
-    }
-  }
-  return undefined
-}
-
-/**
- * Mark an OTP as consumed (verified) so it can't be replayed.
- * No-op if the record doesn't exist or was already consumed.
- */
-export function markOtpConsumed(id: string): void {
-  const o = store.otps?.find((x) => x.id === id)
-  if (!o) return
-  if (o.consumedAt !== null) return
-  o.consumedAt = Date.now()
-  saveToDisk()
-}
-
-/**
- * Remove OTPs whose `expiresAt` has passed. Called at the top of every
- * `saveOtp` so the cleanup happens automatically — no separate cron needed.
- * Returns the number of records purged (for optional logging).
- */
-export function purgeExpiredOtps(): number {
-  if (!Array.isArray(store.otps)) return 0
-  const now = Date.now()
-  const before = store.otps.length
-  store.otps = store.otps.filter((o) => o.expiresAt > now)
-  const purged = before - store.otps.length
-  if (purged > 0) saveToDisk()
-  return purged
-}
-
-/**
- * List ALL OTP records for an email — for the admin dashboard's dev-mode
- * display. Returns METADATA ONLY (id, purpose, createdAt, expiresAt,
- * consumedAt) — never the hash, never the plaintext code. The plaintext code
- * only exists transiently in memory between `createOtp` and the caller
- * delivering it.
- */
-export function listOtpsForEmail(email: string): Array<
-  Pick<OtpRecord, 'id' | 'email' | 'purpose' | 'createdAt' | 'expiresAt' | 'consumedAt'>
-> {
-  const normalized = email.trim().toLowerCase()
-  if (!Array.isArray(store.otps)) return []
-  return store.otps
-    .filter((o) => o.email === normalized)
-    .map(({ id, email: e, purpose, createdAt, expiresAt, consumedAt }) => ({
-      id,
-      email: e,
-      purpose,
-      createdAt,
-      expiresAt,
-      consumedAt,
-    }))
-    .sort((a, b) => b.createdAt - a.createdAt)
 }

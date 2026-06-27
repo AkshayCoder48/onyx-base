@@ -180,17 +180,8 @@ const SPEC = {
     '/api/auth/whoami': {
       get: { summary: 'Verify the bearer key + show user', responses: { '200': { description: 'OK' }, '401': { description: 'Unauthorized' } } },
     },
-    '/api/auth/send-otp': {
-      post: { summary: 'Send an email OTP', security: [], responses: { '200': { description: 'OK' } } },
-    },
-    '/api/auth/verify-otp': {
-      post: { summary: 'Verify an email OTP', security: [], responses: { '200': { description: 'OK' }, '401': { description: 'Invalid/expired' } } },
-    },
     '/api/auth/recover': {
       post: { summary: 'Recover a lost key via email + password', security: [], responses: { '200': { description: 'OK' } } },
-    },
-    '/api/auth/reset-password': {
-      post: { summary: 'Reset password with a recovery code', security: [], responses: { '200': { description: 'OK' } } },
     },
 
     // ─── Key-Value REST ───────────────────────────────────────────────────

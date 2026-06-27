@@ -40,15 +40,11 @@ function rateLimited(ip: string): boolean {
  *
  * Email + password recovery login. When a user has LOST their API key, they
  * can sign back in with the email + password they registered with to retrieve
- * a working key. This is the universal fallback that works whether or not the
- * user set up a custom Telegram chat.
+ * a working key.
  *
  * Flow:
  *   1. Look up the user by email + verify the scrypt password hash.
- *   2. If the user has a custom Telegram chat + bot token configured, try to
- *      rehydrate their per-user manifest from their chat (best-effort) — this
- *      recovers any keys that aren't in the local store (e.g. after a sandbox
- *      reset wiped db/cloudkv.json).
+ *   2. Best-effort rehydrate the user's keys from their own Telegram chat.
  *   3. Return the most recent non-revoked API key + identity + counts so the
  *      dashboard can enter directly (same response shape as /api/auth/verify).
  *
@@ -70,12 +66,10 @@ export async function POST(req: NextRequest) {
 
   let email: string | undefined
   let password: string | undefined
-  let otpVerified = false
   try {
     const body = await req.json()
     email = typeof body.email === 'string' ? body.email.trim() : undefined
     password = typeof body.password === 'string' ? body.password : undefined
-    otpVerified = body.otpVerified === true
   } catch {
     /* fall through */
   }
@@ -84,83 +78,9 @@ export async function POST(req: NextRequest) {
     return fail('Email is required.', 400)
   }
 
-  // ── OTP-login path ────────────────────────────────────────────────────────
-  // If the caller passes `otpVerified: true` (and NO password), they completed
-  // the send-otp + verify-otp flow for purpose='login'. We look the user up by
-  // email alone and return their most recent API key. This is the "sign in
-  // with email code" flow — useful when the user forgot their password but has
-  // email access. The send-otp endpoint already verified the account exists.
-  if (otpVerified && !password) {
-    const user = findUserByEmail(email)
-    if (!user) {
-      // The send-otp endpoint should have caught this, but double-check here.
-      return fail('No account found with this email. Sign up first.', 404)
-    }
-
-    // Best-effort rehydrate from the user's own Telegram chat.
-    try {
-      await rehydrateUserFromTelegram(user.id)
-    } catch (err) {
-      console.error('[auth/login] rehydrate (otp path) failed:', err)
-    }
-
-    const keys = listApiKeys(user.id).filter((k) => !k.revoked)
-    const apiKey = keys[0]
-    if (!apiKey) {
-      return fail(
-        'Your account has no active API keys (all were revoked). Sign in with an existing key or contact support.',
-        403,
-      )
-    }
-
-    const authed = {
-      dbUserId: user.id,
-      userId: user.userId,
-      apiKeyId: apiKey.id,
-      apiKeyName: apiKey.name,
-    } as const
-
-    await logAction(
-      authed as never,
-      'login',
-      undefined,
-      'dashboard session started via email OTP (no password)',
-      'dashboard',
-    )
-
-    void sendEventMessage(
-      {
-        owner: user.userId,
-        event: 'login',
-        detail: `email OTP · key=${apiKey.name}`,
-        source: 'dashboard',
-        ts: Math.floor(Date.now() / 1000),
-      },
-      resolveChatId(user.id),
-      resolveBotToken(user.id),
-    )
-
-    return ok({
-      userId: user.userId,
-      apiKey: apiKey.key,
-      apiKeyName: apiKey.name,
-      name: user.name,
-      email: user.email,
-      plan: user.plan,
-      createdAt: user.createdAt,
-      counts: {
-        records: countRecords(user.id),
-        collections: countCollections(user.id),
-        apiKeys: keys.length,
-        logs: countLogs(user.id),
-      },
-      message: 'Signed in via email OTP. Your API key has been retrieved.',
-    })
-  }
-
-  // ── Password-login path (existing) ────────────────────────────────────────
+  // ── Password-login path ────────────────────────────────────────────────────
   if (!password) {
-    return fail('Password is required (or complete email OTP verification first).', 400)
+    return fail('Password is required.', 400)
   }
 
   const user = findUserByCredentials(email, password)
