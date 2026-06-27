@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "name": "onyxbase",
+  "framework": "nextjs",
+  "installCommand": "bun install",
+  "buildCommand": "prisma generate && next build",
+  "build": {
+    "env": {
+      "DATABASE_URL": "file:/tmp/onyxbase.db",
+      "NEXT_PUBLIC_APP_NAME": "Onyx Base",
+      "NEXT_PUBLIC_APP_URL": "https://onyxbase.vercel.app"
+    }
+  }
+}
