@@ -114,7 +114,7 @@ export function getBotApiBackendLabel(botApiBaseUrlOverride?: string): string {
  * api.telegram.org), we abort quickly so the request doesn't hang forever
  * and tie up server resources.
  */
-function fetchWithTimeout(url: string, init: RequestInit, timeoutMs = 5000): Promise<Response> {
+function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 5000): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer))
@@ -320,6 +320,14 @@ interface PinnedMessage {
   message_id: number
   text: string | null
   caption: string | null
+  /** Present when the pinned message is a document (full-state manifest). */
+  document?: {
+    file_id: string
+    file_unique_id: string
+    file_name?: string
+    mime_type?: string
+    file_size?: number
+  }
 }
 
 interface GetChatResult {
@@ -428,6 +436,12 @@ export async function sendAndPinManifest(
  * Fetch the pinned identity manifest from the chat. Returns the raw manifest
  * JSON string (without the marker prefix), or null if the chat has no pinned
  * message, the pin isn't ours, or Telegram is unreachable.
+ *
+ * Handles BOTH formats:
+ *   - Text message (legacy / small manifests): the JSON is inline in the text.
+ *   - Document (full-state manifest, ≥ ~3 KB): the pinned message is a
+ *     `.json` document whose caption starts with the marker. We fetch the
+ *     file_id, download it, and return its contents.
  */
 export async function fetchPinnedManifest(
   chatIdOverride?: string,
@@ -437,6 +451,7 @@ export async function fetchPinnedManifest(
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   if (!isTelegramConfigured(chatId, botTokenOverride)) return null
   const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
+  const botToken = resolveBotToken(botTokenOverride)
 
   try {
     const chatRes = await fetchWithTimeout(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)
@@ -446,12 +461,123 @@ export async function fetchPinnedManifest(
       return null
     }
     const pinned = chat.result.pinned_message
-    const pinnedText = pinned?.text ?? pinned?.caption ?? null
-    if (!pinnedText || !pinnedText.startsWith(MANIFEST_MARKER)) return null
-    // Strip the marker prefix + newline.
-    return pinnedText.slice(MANIFEST_MARKER.length).trim()
+    if (!pinned) return null
+
+    // Case 1: text manifest (small / legacy).
+    const pinnedText = pinned.text ?? null
+    if (pinnedText && pinnedText.startsWith(MANIFEST_MARKER)) {
+      return pinnedText.slice(MANIFEST_MARKER.length).trim()
+    }
+
+    // Case 2: document manifest (full state). The JSON is in the document,
+    // the marker is in the caption.
+    const pinnedCaption = pinned.caption ?? null
+    const doc = pinned.document
+    if (doc && pinnedCaption && pinnedCaption.startsWith(MANIFEST_MARKER) && doc.file_id) {
+      // Resolve a fresh download URL for the document's file_id.
+      const dl = await getFileDownloadUrl(doc.file_id, botTokenOverride, botApiBaseUrlOverride)
+      if (!dl) {
+        console.error('[telegram] full-state manifest: getFile failed for file_id', doc.file_id)
+        return null
+      }
+      const fileRes = await fetchWithTimeout(dl.url)
+      if (!fileRes.ok) {
+        console.error('[telegram] full-state manifest: download failed', fileRes.status)
+        return null
+      }
+      return await fileRes.text()
+    }
+
+    return null
   } catch (err) {
     console.error('[telegram] fetchPinnedManifest error:', err)
+    return null
+  }
+}
+
+/**
+ * Send (or edit) the full-state manifest as a pinned Telegram **document**.
+ *
+ * Why a document, not a text message? Telegram caps text messages at 4096
+ * chars — far too small for a manifest containing records, logs, files, etc.
+ * Documents support up to 50 MB (cloud Bot API) or 2 GB (local Bot API), so
+ * the entire app state fits with room to spare. This is the durability layer
+ * that makes Onyx Base work on serverless (Vercel) — every write updates this
+ * pinned document, and every cold boot reads it back. Free + unlimited.
+ *
+ * The caption carries the marker so `fetchPinnedManifest` recognises it.
+ */
+export async function sendAndPinFullState(
+  stateJson: string,
+  chatIdOverride?: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<number | null> {
+  const chatId = chatIdOverride ?? ENV_CHAT_ID
+  if (!isTelegramConfigured(chatId, botTokenOverride)) return null
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
+  const caption = `${MANIFEST_MARKER}\nfull-state`
+
+  try {
+    // 1. Check for an existing pinned full-state document we can replace.
+    const chatRes = await fetchWithTimeout(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)
+    const chat = (await chatRes.json()) as GetChatResult
+    const pinned = chat.result?.pinned_message
+    const pinnedCaption = pinned?.caption ?? null
+    const pinnedIsOurs = !!pinned && !!pinnedCaption && pinnedCaption.startsWith(MANIFEST_MARKER)
+
+    // Build the document payload once.
+    const bytes = Buffer.from(stateJson, 'utf-8')
+    const blob = new Blob([bytes], { type: 'application/json' })
+    const fileName = `onyxbase-state.json`
+
+    if (pinnedIsOurs && pinned?.message_id) {
+      // Delete the old pinned document, then send a fresh one.
+      // (Telegram has no editMessageDocument for arbitrary files — we must
+      // delete + resend. The new message gets re-pinned below.)
+      try {
+        await fetchWithTimeout(`${apiBase}/deleteMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, message_id: pinned.message_id }),
+        })
+      } catch {
+        // swallow — stale pin will be replaced
+      }
+    }
+
+    // 2. Send the new full-state document.
+    const form = new FormData()
+    form.append('chat_id', chatId)
+    form.append('document', blob, fileName)
+    form.append('caption', caption.slice(0, 1024))
+    form.append('disable_notification', 'true')
+
+    const sendRes = await fetch(`${apiBase}/sendDocument`, { method: 'POST', body: form })
+    const sendData = (await sendRes.json()) as {
+      ok: boolean
+      description?: string
+      result?: { message_id: number }
+    }
+    if (!sendData.ok || !sendData.result) {
+      console.error('[telegram] full-state sendDocument failed:', sendData.description)
+      return null
+    }
+    const newMessageId = sendData.result.message_id
+
+    // 3. Pin it.
+    const pinRes = await fetchWithTimeout(`${apiBase}/pinChatMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: newMessageId, disable_notification: true }),
+    })
+    const pinData = (await pinRes.json()) as { ok: boolean; description?: string }
+    if (!pinData.ok) {
+      console.warn('[telegram] full-state pinChatMessage failed:', pinData.description)
+    }
+    return newMessageId
+  } catch (err) {
+    console.error('[telegram] sendAndPinFullState error:', err)
     return null
   }
 }
