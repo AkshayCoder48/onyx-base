@@ -47,6 +47,10 @@ const SCHEMA_DDL: string[] = [
   `CREATE TABLE IF NOT EXISTS "MaterializedView" ("id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, "userId" TEXT NOT NULL, "name" TEXT NOT NULL, "query" TEXT NOT NULL, "result" TEXT NOT NULL, "lastRefreshedAt" DATETIME NOT NULL, "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS "MaterializedView_userId_name_key" ON "MaterializedView"("userId", "name")`,
   `CREATE INDEX IF NOT EXISTS "MaterializedView_userId_idx" ON "MaterializedView"("userId")`,
+  `CREATE TABLE IF NOT EXISTS "UserTable" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL, "name" TEXT NOT NULL, "tableName" TEXT NOT NULL, "accessMode" TEXT NOT NULL DEFAULT 'readwrite', "schema" TEXT NOT NULL, "rowCount" INTEGER NOT NULL DEFAULT 0, "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "updatedAt" DATETIME NOT NULL)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "UserTable_userId_name_key" ON "UserTable"("userId", "name")`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS "UserTable_tableName_key" ON "UserTable"("tableName")`,
+  `CREATE INDEX IF NOT EXISTS "UserTable_userId_idx" ON "UserTable"("userId")`,
 ]
 
 let schemaInitialized = false

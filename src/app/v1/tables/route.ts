@@ -7,56 +7,45 @@ import {
   validateTableName,
   validateAccessMode,
   ValidationError,
-  type UserTableMeta,
   type ColumnDef,
 } from '@/lib/user-tables'
 
 export const runtime = 'nodejs'
 
-// ─── Types ──────────────────────────────────────────────────────────────────
-
-interface TablesListResponse {
-  tables: UserTableMeta[]
-}
-
-interface CreateBody {
-  name?: unknown
-  columns?: unknown
-  accessMode?: unknown
-}
-
-// ─── GET /api/dashboard/tables ──────────────────────────────────────────────
 /**
- * Returns every table owned by the authenticated developer. Tables are
- * account-scoped — you only see your own tables, never another developer's.
+ * GET /v1/tables — list every table owned by the caller.
+ * POST /v1/tables — create a new table.
+ *
+ * Auth: `Authorization: Bearer kv_live_…` (or `onyxbase_…` admin key)
+ *
+ * Works with every API key type — live keys, test keys, and admin keys all
+ * resolve to a user and only ever see that user's own tables.
  */
 export async function GET(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized.', 401)
+  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   try {
     const tables = await listUserTables(user.dbUserId)
-    return ok<TablesListResponse>({ tables })
+    return ok({
+      tables,
+      count: tables.length,
+    })
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
     return fail(`Failed to list tables: ${reason}`, 500)
   }
 }
 
-// ─── POST /api/dashboard/tables ─────────────────────────────────────────────
-/**
- * Create a new account-scoped table.
- *
- * Body: { name: string, columns: ColumnDef[], accessMode?: 'read'|'write'|'readwrite' }
- *
- * The real SQLite table name is derived from (dbUserId, name) so two
- * developers can both own a table called "notes" without colliding.
- */
 export async function POST(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized.', 401)
+  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
-  const body = (await req.json().catch(() => null)) as CreateBody | null
+  const body = (await req.json().catch(() => null)) as {
+    name?: unknown
+    columns?: unknown
+    accessMode?: unknown
+  } | null
   if (!body || typeof body !== 'object') {
     return fail('Request body must be a JSON object.', 400)
   }
