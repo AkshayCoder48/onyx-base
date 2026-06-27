@@ -32,8 +32,6 @@ export async function GET(req: NextRequest) {
     telegram: {
       configured: telegram.ok,
       reachable: telegram.ok,
-      bot: telegram.botName ?? null,
-      chatId: telegram.chatId,
       chatType: telegram.chatType ?? null,
       error: telegram.error ?? null,
     },

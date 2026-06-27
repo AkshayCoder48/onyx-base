@@ -5,6 +5,19 @@ import { pingTelegram, effectiveUploadLimitBytes, isUsingLocalBotApi, getBotApiB
 
 export const runtime = 'nodejs'
 
+/**
+ * Mask a chat ID for safe display: keep only the sign + first 3 + last 4
+ * digits. e.g. "-1003694343052" → "-100…052". The full chat ID is an
+ * operator secret and must never be sent to the browser.
+ */
+function maskChatId(id: string): string {
+  if (!id) return ''
+  const sign = id.startsWith('-') ? '-' : ''
+  const digits = id.replace(/^-/, '')
+  if (digits.length <= 7) return `${sign}…${digits.slice(-4)}`
+  return `${sign}${digits.slice(0, 3)}…${digits.slice(-4)}`
+}
+
 /** GET /api/dashboard/status — live service + Telegram reachability. */
 export async function GET(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
@@ -15,18 +28,24 @@ export async function GET(req: NextRequest) {
   const botApiBaseUrl = resolveBotApiBaseUrl(user.dbUserId)
   const config = getTelegramConfig(user.dbUserId)
   const telegram = await pingTelegram(chatId, botToken, botApiBaseUrl)
+  // SECURITY: never return the raw chat ID to the browser. The ping result
+  // still carries `chatId` internally (used for logging), but we mask it
+  // here so the frontend only ever sees "-100…052".
+  const { chatId: _drop, ...telegramSafe } = telegram
+  void _drop
   return ok({
-    telegram,
+    telegram: telegramSafe,
     customConfig: config
       ? {
-          chatId: config.chatId,
+          chatId: maskChatId(config.chatId),
           label: config.label,
           hasCustomBotToken: config.hasCustomBotToken,
           botApiBaseUrl: config.botApiBaseUrl,
           updatedAt: config.updatedAt,
         }
       : null,
-    envChatId: process.env.TELEGRAM_CHAT_ID || '',
+    envChatIdMasked: maskChatId(process.env.TELEGRAM_CHAT_ID || ''),
+    envChatIdConfigured: Boolean(process.env.TELEGRAM_CHAT_ID),
     envBotConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
     // ─── File upload limit info ───────────────────────────────────────────
     // The effective limit depends on whether a local Bot API server is

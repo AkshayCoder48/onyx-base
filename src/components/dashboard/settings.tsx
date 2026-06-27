@@ -32,8 +32,6 @@ import { toast } from 'sonner'
 
 interface TelegramStatus {
   ok: boolean
-  botName?: string | null
-  chatId: string
   chatType?: string | null
   error?: string | null
 }
@@ -41,7 +39,8 @@ interface TelegramStatus {
 interface StatusResponse {
   telegram: TelegramStatus
   customConfig: { chatId: string; label: string | null; hasCustomBotToken: boolean; botApiBaseUrl: string | null; updatedAt: string } | null
-  envChatId: string
+  envChatIdMasked: string
+  envChatIdConfigured: boolean
   envBotConfigured: boolean
   botApiBackend: string
   usingLocalBotApi: boolean
@@ -67,7 +66,7 @@ export function SettingsView() {
   })
   const telegram = statusData?.telegram
   const customConfig = statusData?.customConfig
-  const envChatId = statusData?.envChatId
+  const envChatIdMasked = statusData?.envChatIdMasked
 
   async function copyKey() {
     if (!apiKey) return
@@ -140,24 +139,24 @@ export function SettingsView() {
               <span className="text-xs font-medium">
                 Telegram {telegram?.ok ? 'connected' : 'not reachable'}
               </span>
-              {telegram?.botName && (
+              {telegram?.ok && telegram.chatType && (
                 <Badge variant="outline" className="font-mono text-[10px] ml-auto border-primary/30 text-primary">
-                  @{telegram.botName}
+                  {telegram.chatType}
                 </Badge>
               )}
             </div>
             {telegram?.ok ? (
               <p className="text-[11px] text-muted-foreground/80">
-                Chat <code className="font-mono">{telegram.chatId}</code> ({telegram.chatType}) reachable. Every write mirrors a structured backup message.
+                Backup chat reachable ({telegram.chatType ?? 'chat'}). Every write mirrors a structured backup message.
               </p>
             ) : (
               <div className="text-[11px] text-muted-foreground/80 space-y-1.5">
                 <p>
-                  Bot can&apos;t reach chat <code className="font-mono">{telegram?.chatId ?? '—'}</code>
+                  Bot can&apos;t reach the backup chat
                   {telegram?.error ? `: ${telegram.error}` : '.'}
                 </p>
                 <p className="text-stone-600">
-                  Use the &quot;Telegram chat ID&quot; section below to set your own chat ID, or ask the bot admin to add the bot to your channel.
+                  Make sure the bot has been added to your channel/group as an admin, or set your own chat ID in the &quot;Telegram chat ID&quot; section below.
                 </p>
               </div>
             )}
@@ -167,7 +166,8 @@ export function SettingsView() {
         {/* Telegram chat ID + bot token config — the new feature */}
         <TelegramChatIdCard
           customConfig={customConfig ?? null}
-          envChatId={envChatId ?? ''}
+          envChatIdMasked={envChatIdMasked ?? ''}
+          envChatIdConfigured={statusData?.envChatIdConfigured ?? false}
           envBotConfigured={statusData?.envBotConfigured ?? false}
           telegramOk={telegram?.ok ?? false}
           botApiBackend={statusData?.botApiBackend ?? 'Cloud Bot API (api.telegram.org)'}
@@ -226,7 +226,8 @@ $ onyx export`}
 
 function TelegramChatIdCard({
   customConfig,
-  envChatId,
+  envChatIdMasked,
+  envChatIdConfigured,
   envBotConfigured,
   telegramOk,
   botApiBackend,
@@ -236,7 +237,8 @@ function TelegramChatIdCard({
   onSaved,
 }: {
   customConfig: { chatId: string; label: string | null; hasCustomBotToken: boolean; botApiBaseUrl: string | null; updatedAt: string } | null
-  envChatId: string
+  envChatIdMasked: string
+  envChatIdConfigured: boolean
   envBotConfigured: boolean
   telegramOk: boolean
   botApiBackend: string
@@ -246,7 +248,11 @@ function TelegramChatIdCard({
   onSaved: () => void
 }) {
   const api = useApi()
-  const [chatId, setChatId] = useState(customConfig?.chatId ?? '')
+  // The chat ID input is intentionally NOT pre-filled from customConfig.chatId
+  // (which is now masked server-side). When a custom config exists, the field
+  // starts empty with a "type to replace" placeholder so the user never sees
+  // a masked value in an editable input.
+  const [chatId, setChatId] = useState('')
   const [label, setLabel] = useState(customConfig?.label ?? '')
   const [botToken, setBotToken] = useState('')
   const [botApiUrl, setBotApiUrl] = useState(customConfig?.botApiBaseUrl ?? '')
@@ -269,17 +275,22 @@ function TelegramChatIdCard({
 
   async function save() {
     const trimmed = chatId.trim()
-    if (!trimmed) {
-      toast.error('Chat ID is required')
+    // chatId is optional on save — if empty and a config already exists, the
+    // server keeps the existing chat ID (so the user can update just the bot
+    // token / label without re-entering the chat ID).
+    if (trimmed && !/^-?\d+$/.test(trimmed)) {
+      toast.error('Chat ID must be numeric (e.g. -1001234567890)')
       return
     }
-    if (!/^-?\d+$/.test(trimmed)) {
-      toast.error('Chat ID must be numeric (e.g. -1001234567890)')
+    if (!trimmed && !customConfig && !envChatIdConfigured) {
+      toast.error('Chat ID is required')
       return
     }
     setSaving(true)
     try {
-      const body: Record<string, unknown> = { chatId: trimmed, label: label.trim() || undefined }
+      const body: Record<string, unknown> = { label: label.trim() || undefined }
+      // Only send chatId when the user typed a new one.
+      if (trimmed) body.chatId = trimmed
       // Only send botToken if the user typed something (don't overwrite existing on chat-ID-only saves)
       const trimmedToken = botToken.trim()
       if (trimmedToken) {
@@ -334,7 +345,7 @@ function TelegramChatIdCard({
     try {
       await api('/api/dashboard/telegram-config', {
         method: 'PUT',
-        body: JSON.stringify({ chatId: chatId.trim() || envChatId, clearBotToken: true }),
+        body: JSON.stringify({ clearBotToken: true }),
       })
       toast.success('Custom bot token cleared — using server default')
       onSaved()
@@ -350,7 +361,7 @@ function TelegramChatIdCard({
     try {
       await api('/api/dashboard/telegram-config', {
         method: 'PUT',
-        body: JSON.stringify({ chatId: chatId.trim() || envChatId, clearBotApiUrl: true }),
+        body: JSON.stringify({ clearBotApiUrl: true }),
       })
       setBotApiUrl('')
       toast.success('Custom Bot API URL cleared — using cloud default (50 MB upload limit)')
@@ -395,7 +406,7 @@ function TelegramChatIdCard({
             Effective chat ID
           </div>
           <code className="font-mono text-xs text-primary break-all">
-            {customConfig?.chatId || envChatId || '— (not configured)'}
+            {customConfig?.chatId || envChatIdMasked || '— (not configured)'}
           </code>
         </div>
         <div className="rounded-md border border-border/40 bg-background/40 p-3">
@@ -403,7 +414,7 @@ function TelegramChatIdCard({
             Source
           </div>
           <span className="text-xs">
-            {customConfig ? 'Your custom chat ID' : envChatId ? 'Server env default' : 'Not set'}
+            {customConfig ? 'Your custom chat ID' : envChatIdConfigured ? 'Server env default' : 'Not set'}
           </span>
         </div>
         <div className="rounded-md border border-border/40 bg-background/40 p-3">
@@ -445,7 +456,7 @@ function TelegramChatIdCard({
             id="tg-chat-id"
             value={chatId}
             onChange={(e) => setChatId(e.target.value)}
-            placeholder="-1001234567890"
+            placeholder={customConfig ? 'Saved — type a new chat ID to replace' : '-1001234567890'}
             className="font-mono text-sm h-9"
           />
           <p className="text-[11px] text-muted-foreground/70">

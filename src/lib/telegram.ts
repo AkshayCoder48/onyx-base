@@ -467,7 +467,6 @@ export async function fetchPinnedManifest(
  */
 export async function pingTelegram(chatIdOverride?: string, botTokenOverride?: string, botApiBaseUrlOverride?: string): Promise<{
   ok: boolean
-  botName?: string
   chatId: string
   chatType?: string
   error?: string
@@ -490,22 +489,24 @@ export async function pingTelegram(chatIdOverride?: string, botTokenOverride?: s
       description?: string
     }
     if (!chat.ok) {
+      // SECURITY: do NOT echo the bot @username, the chat ID, or the chat
+      // title into the error — these are operator secrets. Surface only the
+      // generic Telegram reason (e.g. "Bad Request: chat not found") plus
+      // actionable guidance.
       return {
         ok: false,
         chatId,
-        botName: me.result?.username,
-        error: chat.description || `Chat ${chatId} is not reachable by this bot.`,
+        error: chat.description || 'Chat is not reachable by this bot.',
       }
     }
     return {
       ok: true,
-      botName: me.result?.username,
       chatId,
       chatType: chat.result?.type,
     }
   } catch {
-    const origin = resolveBotApiOrigin(botApiBaseUrlOverride)
-    return { ok: false, chatId, error: `Network error reaching ${origin}.` }
+    // Don't leak the Bot API origin (could be a private local server URL).
+    return { ok: false, chatId, error: 'Network error reaching the Telegram Bot API.' }
   }
 }
 

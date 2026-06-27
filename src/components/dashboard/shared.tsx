@@ -72,3 +72,18 @@ export function maskKey(key: string) {
   if (key.length <= 16) return key
   return `${key.slice(0, 12)}…${key.slice(-4)}`
 }
+
+/**
+ * Mask a Telegram chat ID so only the sign + last 4 digits are visible.
+ * e.g. "-1003694343052" → "-100…052", "123456789" → "…6789".
+ *
+ * Used everywhere a chat ID is shown in the dashboard so the full identifier
+ * (an operator secret) is never surfaced in the UI or in screenshots.
+ */
+export function maskChatId(id: string | null | undefined): string {
+  if (!id) return '—'
+  if (id.length <= 4) return '…' + id
+  const sign = id.startsWith('-') ? '-' : ''
+  const digits = id.replace(/^-/, '')
+  return `${sign}${digits.slice(0, 3)}…${digits.slice(-4)}`
+}
