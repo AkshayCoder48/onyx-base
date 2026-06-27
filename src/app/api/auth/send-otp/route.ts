@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server'
 import { ok, fail, isValidEmail } from '@/lib/auth'
 import { findUserByEmail } from '@/lib/data-store'
 import { createOtp, isOtpRateLimited, OTP_PURPOSES, type OtpPurpose } from '@/lib/otp'
-import { sendOtpEmail, isEmailConfigured } from '@/lib/email'
+import { sendOtpEmail } from '@/lib/email'
 import { verifyEmail } from '@/lib/email-verify'
 
 export const runtime = 'nodejs'
@@ -124,37 +124,10 @@ export async function POST(req: NextRequest) {
   // ── Mint + persist the OTP (hash only — plaintext stays in memory) ──
   const code = createOtp(email, purpose)
 
-  // ── Deliver (SMTP) or surface (dev mode) ──
+  // ── Surface the code in dev mode (no email is sent) ──
   const result = await sendOtpEmail({ to: email, code, purpose })
 
-  // Delivery-failure fallback policy:
-  //
-  // If the email API is configured but delivery FAILS (e.g. invalid API key,
-  // unverified sender domain, rate limit exceeded), we do NOT block the
-  // signup/login flow. Instead we fall back to dev mode: the code is returned
-  // as `devCode` so the user can complete verification, AND a `warning` field
-  // surfaces the error so the operator knows email delivery is broken and
-  // can fix it.
-  //
-  // This matches the user's requirement: when the email API works, real
-  // emails send; when it doesn't, the flow still works and the operator is
-  // told exactly what to fix.
-  if (!result.delivered && !result.devMode) {
-    const warning = `Email delivery failed — showing the code inline instead. Fix your RESEND_API_KEY / RESEND_FROM config in .env to enable real email delivery. Error: ${result.message}`
-
-    console.warn(`[otp] Email delivery failed, falling back to dev mode for ${email}: ${result.message}`)
-
-    return ok({
-      delivered: false,
-      devMode: true,
-      expiresInSeconds: 600,
-      devCode: code,
-      warning,
-      message: 'Email delivery failed — verification code shown inline (dev fallback).',
-    })
-  }
-
-  // Compose the response. devCode is ONLY included when devMode is true.
+  // devCode is included so the frontend can display the code inline.
   return ok({
     delivered: result.delivered,
     devMode: result.devMode,
@@ -170,12 +143,9 @@ export async function POST(req: NextRequest) {
  * Useful for the admin dashboard's "OTP delivery" status indicator.
  */
 export async function GET() {
-  const configured = await isEmailConfigured()
   return ok({
-    emailConfigured: configured,
-    devMode: !configured,
-    message: configured
-      ? 'Email is configured — OTP codes are delivered via email. Provider priority: Gmail OAuth2 > SMTP > Resend.'
-      : 'Email is NOT configured — OTP codes are returned as devCode in the API response and logged to the server console (local dev mode). Connect Gmail in the admin Email tab (no App Password, 500/day free) OR set SMTP_* (Brevo: 300/day free) OR RESEND_API_KEY (100/day free) in .env.',
+    emailConfigured: false,
+    devMode: true,
+    message: 'Dev mode — OTP codes are returned as devCode in the API response and logged to the server console. No email is sent.',
   })
 }
