@@ -227,7 +227,7 @@ localStorage.removeItem('cloudkv-session')
 <!-- ───────────────────────── FEATURE REFERENCE ───────────────────────── -->
 ## Feature reference
 
-Twelve dashboard tabs, each a real feature — not a placeholder. The icons match
+Thirteen dashboard tabs, each a real feature — not a placeholder. The icons match
 the sidebar exactly.
 
 | Tab | What it does |
@@ -240,10 +240,11 @@ the sidebar exactly.
 | **Public Share** | Create scoped, rate-limited, expiring, revocable share tokens that wrap exactly one `(collection, key)` pair. Choose mode (`read` / `write` / `readwrite`), allowed ops (`set` / `incr` / `append`), max value length, incr bounds, per-IP rate limit, and TTL. Each token comes with copy-paste-ready `readUrl` and `writeUrl` — safe to embed in CodePen, static HTML, or browser extensions. |
 | **API Playground** | An interactive REST explorer: pick an endpoint (`set` / `get` / `list` / `delete` / `files` / `share-tokens` / `whoami` / `stats` / `logs` / …), fill in the parameters, hit **Send**, and inspect the raw JSON response. Auto-injects your current API key as the Bearer header. Great for prototyping calls before committing them to code, or for debugging why a particular request returns 404. |
 | **SQL Editor** | A real SQL console that runs against virtual tables (`records`, `collections`, `api_keys`, `logs`, `users`) pre-filtered to your account. Run `SELECT` / `INSERT` / `UPDATE` / `DELETE` / `CREATE` / `DROP` / `ALTER` statements, plus create your own `usr_*` tables for custom schemas. 1000-row cap per result, API keys masked in output, `⌘+Enter` to run. The fastest way to do bulk updates or exploratory queries. |
-| **Docs** | The in-app reference (the same content as the Keys/Tokens/Features/API/CLI/Realtime/Telegram sections of this README, restructured into tabs). Copy buttons on every code block, multi-language examples, and a **Copy for LLMs** button to grab the whole spec for an AI assistant. |
+| **Docs** | The in-app reference (the same content as the Keys/Tokens/Features/API/CLI/Realtime/Telegram sections of this README, restructured into tabs). Copy buttons on every code block, multi-language examples, and a **Copy for LLMs** button to grab the whole spec for an AI assistant. The **Single page** tab combines every section into one LLM-friendly document — the exact same content served at [`/llms.txt`](src/app/llms.txt/route.ts) (the [llmstxt.org](https://llmstxt.org) convention). |
 | **Logs** | An append-only audit trail of every API event on your account: `set`, `delete`, `login`, `apikey.create`, `share.create`, file upload, `export`, and more. Each entry includes the action, the key/collection touched, the source (`dashboard` / `cli` / `api` / `share`), and a timestamp. Filter by action type, paginate through history. Every log entry is also mirrored into your Telegram chat as a structured message. |
 | **Analytics** | Aggregate charts over your account activity: requests per day, top actions, top keys, share-token usage, file-download counts. Useful for spotting usage patterns (e.g. a share token that suddenly spiked traffic, or a key that's being read far more than written). All data is derived from the same logs table the Logs tab shows — just rolled up. |
 | **Settings** | Account + storage configuration. View your `userId`, plan, and API-key counts. Configure your own Telegram bot (Bot Token + Chat ID) to route new KV mirrors and file uploads to your private chat instead of the shared server-side bot. Optionally set a local Bot API server URL to unlock 2 GB file uploads/downloads (vs. the cloud Bot API's 50 MB upload / 20 MB download cap). Ping the bot to verify the config. |
+| **Tables** | Account-scoped SQL tables with per-table access modes (`read` / `write` / `readwrite`). Define a schema (TEXT / INTEGER / REAL / NUMERIC / BLOB / DATETIME / BOOLEAN columns, primary keys, auto-increment, defaults, nullability), then drive full CRUD from a real database-grid UI in the dashboard, the REST API (`/v1/tables/*`), or the CLI (`onyx tables`). Each table gets a unique `usr_<name>_<hash>` SQLite name so two accounts can both own a `notes` table without colliding. Toggle the access mode at any time to lock down public-facing tables — `read` blocks all writes, `write` blocks all reads, the dashboard owner always has full access. |
 
 <br/>
 
@@ -286,6 +287,50 @@ Authorization: Bearer kv_live_abc123def456…
 |:---|:---|:---|
 | `GET` | `/v1/collections` | List collections (with record counts). |
 | `GET` | `/v1/collections/:name` | Collection detail. |
+
+### Tables
+
+Account-scoped SQL tables. Each table you create gets a unique
+`usr_<name>_<hash>` SQLite name so two accounts can both own a `notes` table
+without colliding. Each table has an **access mode** that controls what the
+public API can do: `read` → GET only; `write` → POST / PATCH / DELETE only;
+`readwrite` → everything. The dashboard owner can always do everything
+regardless of mode — the `/api/dashboard/tables/*` routes have the same shape
+but skip the access-mode check.
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `GET` | `/v1/tables` | List your tables (name, accessMode, rowCount, schema, timestamps). |
+| `POST` | `/v1/tables` | Create a table. Body: `{ name, columns: ColumnDef[], accessMode? }`. `ColumnDef = { name, type: TEXT\|INTEGER\|REAL\|NUMERIC\|BLOB\|DATETIME\|BOOLEAN, primary?, autoIncrement?, nullable?, defaultValue? }`. `accessMode` defaults to `readwrite`. |
+| `GET` | `/v1/tables/:name` | Describe a table — schema + rowCount + sample rows + accessMode. |
+| `PATCH` | `/v1/tables/:name` | Update the access mode. Body: `{ accessMode }`. Takes effect on the next request. |
+| `DELETE` | `/v1/tables/:name` | Drop a table (SQLite `DROP TABLE` + metadata delete). Cannot be undone. |
+| `GET` | `/v1/tables/:name/rows` | List rows (default 100, `?limit=` max 1000). Honors the access mode — 403 on a write-only table. |
+| `POST` | `/v1/tables/:name/rows` | Insert a row. Body: `{ row: { col: value, … } }`. Validates against the schema; returns the inserted row with auto-incremented / defaulted columns filled in. |
+| `PATCH` | `/v1/tables/:name/rows` | Update a row by primary key. Body: `{ pk: { col: value }, patch: { col: value } }`. |
+| `DELETE` | `/v1/tables/:name/rows` | Delete a row by primary key. Body: `{ pk: { col: value } }`. 404 if no row matches. |
+
+```bash
+# Create a "tasks" table (read+write via the public API)
+curl -X POST https://onyx.example.com/v1/tables \
+  -H "Authorization: Bearer kv_live_…" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"tasks","accessMode":"readwrite","columns":[{"name":"id","type":"INTEGER","primary":true,"autoIncrement":true},{"name":"title","type":"TEXT","nullable":false},{"name":"done","type":"BOOLEAN","defaultValue":"0"}]}'
+
+# Insert a row
+curl -X POST https://onyx.example.com/v1/tables/tasks/rows \
+  -H "Authorization: Bearer kv_live_…" \
+  -H "Content-Type: application/json" \
+  -d '{"row":{"title":"Buy milk","done":false}}'
+
+# List rows
+curl -H "Authorization: Bearer kv_live_…" https://onyx.example.com/v1/tables/tasks/rows
+```
+
+> The dashboard mirrors the same shape under `/api/dashboard/tables/*` — list,
+> create, describe, drop, mode-change, rows CRUD — but with no access-mode
+> enforcement since the dashboard owner has full access. The CLI talks to the
+> dashboard routes.
 
 ### Account & ops
 
@@ -614,6 +659,34 @@ onyx file-link f_abc123            # mint a fresh Telegram cloud URL (~1h)
 onyx file-revoke f_abc123          # drop the cached URL immediately
 onyx file-delete f_abc123          # permanently delete a file
 
+# Tables (account-scoped SQL tables)
+onyx tables                                  # list your tables (alias: tbl)
+onyx tables create tasks --columns "id:INTEGER:pk:ai,title:TEXT:notnull,body:TEXT" --access rw
+onyx tables describe tasks                   # schema + sample rows
+onyx tables rows tasks                       # list rows (default 100)
+onyx tables insert tasks --data '{"title":"Buy milk","done":false}'
+onyx tables update tasks --pk '{"id":1}' --data '{"done":true}'
+onyx tables delete tasks --pk '{"id":1}' --yes
+onyx tables drop tasks --yes                 # drop the whole table
+onyx tables mode tasks r                     # change access mode (r=read, w=write, rw=readwrite)
+```
+
+**Column-spec mini-DSL.** The `--columns` argument to `onyx tables create`
+takes a comma-separated list of column specs, each in the form:
+
+```
+name:TYPE[:pk][:ai][:notnull][:default=VALUE]
+```
+
+`name` is any SQL-safe identifier; `TYPE` is one of `INTEGER`, `TEXT`, `REAL`,
+`NUMERIC`, `BLOB`, `DATETIME`, `BOOLEAN`; `pk` marks the column as `PRIMARY KEY`;
+`ai` adds `AUTOINCREMENT` (implies `INTEGER` + `pk`); `notnull` adds `NOT NULL`;
+`default=VALUE` sets a `DEFAULT`. Colons inside a quoted `default=…` value are
+respected, e.g. `"ts:DATETIME:default=2024-01-01 12:00:00"` is one column, not
+four. The CLI parses this spec client-side and POSTs the same
+`{ name, columns: ColumnDef[], accessMode }` body the REST API expects.
+
+```bash
 # Share tokens
 onyx share --key visits --mode read --ttl 3600   # mint a scoped share token
 onyx share --list                               # list your share tokens
@@ -673,9 +746,28 @@ Authorization: Bearer kv_live_…
 | `GET` | `/v1/stats` | Account statistics (records, files, activity, …) |
 | `GET` | `/v1/logs` | Recent audit log entries (`?limit=50&action=…`) |
 | `GET` | `/v1/health` | Service + Telegram storage status |
+| `GET` | `/llms.txt` | **LLM-friendly single-page spec** — combines every Docs tab into one markdown document (the [llmstxt.org](https://llmstxt.org) convention). No auth. Cached for 1 hour. The dashboard's "Copy for LLMs" button fetches this same text. |
 | `GET` | `/v1/collections` | List collections (with record counts) |
 | `POST` | `/v1/collections` | Create a collection (body: `{"name":"cache"}`) |
 | `DELETE` | `/v1/collections/:name` | Delete a collection + all its records |
+| `GET` | `/v1/tables` | List your tables (account-scoped SQL tables) |
+| `POST` | `/v1/tables` | Create a table — body: `{ name, columns: ColumnDef[], accessMode? }` |
+| `GET` | `/v1/tables/:name` | Describe a table (schema + rowCount + sample rows + accessMode) |
+| `PATCH` | `/v1/tables/:name` | Update the access mode (`read` / `write` / `readwrite`) |
+| `DELETE` | `/v1/tables/:name` | Drop a table (SQLite `DROP TABLE` + metadata delete) |
+| `GET` | `/v1/tables/:name/rows` | List rows (default 100, `?limit=` max 1000; honors access mode) |
+| `POST` | `/v1/tables/:name/rows` | Insert a row — body: `{ row: { col: value, … } }` |
+| `PATCH` | `/v1/tables/:name/rows` | Update a row by PK — body: `{ pk: { col: value }, patch: { col: value } }` |
+| `DELETE` | `/v1/tables/:name/rows` | Delete a row by PK — body: `{ pk: { col: value } }` |
+| `GET` | `/api/dashboard/tables` | List your tables (dashboard — no access-mode enforcement) |
+| `POST` | `/api/dashboard/tables` | Create a table (dashboard) |
+| `GET` | `/api/dashboard/tables/:name` | Describe a table (dashboard) |
+| `PATCH` | `/api/dashboard/tables/:name` | Update access mode (dashboard) |
+| `DELETE` | `/api/dashboard/tables/:name` | Drop a table (dashboard) |
+| `GET` | `/api/dashboard/tables/:name/rows` | List rows (dashboard) |
+| `POST` | `/api/dashboard/tables/:name/rows` | Insert a row (dashboard) |
+| `PATCH` | `/api/dashboard/tables/:name/rows` | Update a row by PK (dashboard) |
+| `DELETE` | `/api/dashboard/tables/:name/rows` | Delete a row by PK (dashboard) |
 | `GET` | `/v1/share/:token` | **Public** scoped read (no auth) |
 | `POST` | `/v1/write/:token` | **Public** scoped write (incr / set / append) |
 | `POST` | `/api/dashboard/share-tokens` | Create a scoped share token |
@@ -698,6 +790,23 @@ Authorization: Bearer kv_live_…
 | `POST` | `/api/admin/promote` | Promote a `kv_live_` key to an `onyxbase_` key (body: `{kvLiveKey, label}`) |
 | `GET` | `/api/admin/admins` | List all admin keys (bootstrap flagged) |
 | `DELETE` | `/api/admin/admins?id=` | Revoke an admin key (bootstrap cannot be revoked → 409) |
+
+**Advanced surface** — `/api/v1/*` (Supabase-style) and DB branching. Same Bearer
+auth, scoped to the calling user (admin key sees the admin's own data, not
+cross-user):
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `GET` | `/api/v1/views` | List named views (SQL VIEW equivalent). Create with `POST /api/v1/views { name, collection, projection, filter? }`. |
+| `GET` | `/api/v1/views/:name` | Execute a stored view — applies the substring filter, projects the requested columns. |
+| `GET` | `/api/v1/matviews` | List materialized views (cached aggregations). Create with `POST /api/v1/matviews { name, query }`. Refresh-all with `POST /api/v1/matviews { action: "refresh_all" }`. |
+| `GET/POST/DELETE` | `/api/v1/matviews/:name` | O(1) read of the cached result (`GET`); refresh (`POST`); drop (`DELETE`). |
+| `POST` | `/api/v1/functions` | Create a server-side function. Body: `{ name, code }`. Runs in a `new Function("ctx", code)` sandbox with `{ record, db, user }` — `db` is read-only and user-scoped. 5s timeout, syntax-checked at create. |
+| `POST` | `/api/v1/functions/:name` | Test-invoke a stored function with the supplied `ctx` body. |
+| `POST` | `/api/v1/rpc/:name` | Built-in RPC: `count_records`, `sum { key }`, `aggregate { collection, type }`, `search { query, collection?, limit? }`, `touch { key, value, collection? }`. All user-scoped. |
+| `POST` | `/api/v1/graphql` | Minimal hand-rolled GraphQL (no Apollo/graphql deps). Queries for `records`, `collections`, `apiKeys`, `logs`, `me` — all user-scoped. Args + variables on `records(limit, collection)` and `logs(limit, action)`. Standard `{ data, errors }` response. |
+| `GET/POST` | `/api/admin/branches` | List / create DB branches (snapshot SQLite + JSON cache under a named branch). |
+| `DELETE` | `/api/admin/branches/:name` | Drop a branch (delete the snapshot, keep the live DB). |
 
 <br/>
 
@@ -812,6 +921,117 @@ backend), so downloads and deletes keep working seamlessly.
 
 > The server's default bot is **shared** and intended for evaluation / demos
 > only. For production, **bring your own bot.**
+
+<br/>
+
+<!-- ───────────────────────── ROADMAP ───────────────────────── -->
+## Roadmap — 25 more Telegram-powered features
+
+The features below are **ideas only** — none of them are implemented yet. Each
+one leans on a unique property of the Telegram Bot API (chat-as-storage,
+message-edit, pinned messages, file attachments, channels, topic threads,
+replies, inline keyboards, callback queries, `forwardMessage`,
+`copyMessage`, `editMessageText`, `setMyCommands`, Telegram Passport, message
+scheduling, polls, stickers, etc.). They are grouped into five categories of
+five. Vote for your favourites by opening an issue, or build one yourself on
+top of the existing `/v1/*` surface and `/v1/tables/*` endpoints.
+
+### Storage models
+
+1. **Channel-as-collection** — each Telegram channel maps 1-to-1 to a KV
+   collection; posting a message in the channel creates a record, deleting the
+   message drops the key. Channels become first-class, externally-addressable
+   namespaces.
+2. **Topic-thread collections** — in a supergroup with topics enabled, each
+   topic thread is a sub-collection. One chat can host dozens of parallel
+   collections, partitioned by `topic_id`, with per-topic ACLs inherited from
+   the group.
+3. **Message-thread transactions** — group a multi-key transaction as a reply
+   thread: each reply is one mutated key, and the thread closes atomically when
+   the parent message is edited to `committed`. Rollback = deleting the thread.
+4. **Pinned-message indexes** — maintain B-tree-like secondary indexes as
+   pinned messages — one pinned JSON document per indexed column, re-pinned on
+   every write. Lookups become O(1) chat reads instead of full scans.
+5. **File-dedup via `file_unique_id`** — Telegram assigns every uploaded file
+   a globally-unique `file_unique_id`. Detect duplicate uploads by it and
+   dedupe — store one Telegram document, reference-count the rest.
+
+### Bot interactions
+
+6. **Telegram-native CRUD bot** — reply to a KV mirror message in the chat to
+   update the corresponding record; the bot parses the reply and mutates the
+   store. Edit a mirror message to overwrite, delete it to drop the key.
+7. **Bot-command SQL REPL** — `setMyCommands` registers `/sql`, `/get`,
+   `/set`, `/list`. Run `/sql SELECT * FROM tasks WHERE done=0` directly in
+   the chat; the bot returns the result as a formatted message or CSV
+   attachment.
+8. **Inline-keyboard TTL controls** — every mirror message ships with inline
+   buttons: `+1h`, `+1d`, `revoke`. Tapping a button fires a `callback_query`
+   that adjusts the record's TTL without an API call.
+9. **Sticker-as-boolean toggle** — react to a mirror message with a 👍 sticker
+   to flip a boolean key true, 👎 to flip it false. The bot watches
+   `message_reactions` and mutates the store in response.
+10. **Webhook-from-reply** — reply `retry` to a failed-write mirror message to
+    replay the operation. Reply `rollback` to undo. The reply chain becomes a
+    per-record operations console.
+
+### Replication & backup
+
+11. **Cross-chat replication** — mirror the same record to N Telegram chats
+    for multi-region redundancy. Reads fail over to the next chat on a 404;
+    writes fan out and reconcile via the pinned manifest.
+12. **Bot-2-bot hot backup** — a second bot mirrors the first bot's chat via
+    `getUpdates` + `forwardMessage`, giving a hot-standby that can take over
+    instantly if the primary bot token is compromised or revoked.
+13. **Message-edit diff log** — every KV edit's Telegram mirror keeps the
+    previous value as a reply in the thread — free, append-only version
+    history with no extra storage cost.
+14. **Channel-topic partitions** — shard a hot collection across multiple
+    topics in a channel for write throughput. The bot hashes the key →
+    `topic_id`, so writes spread across topics instead of contending on one.
+15. **Forwarded-message provenance** — when a record is copied from another
+    chat, store the original `chat_id` + `message_id` as provenance metadata —
+    giving every value an audit trail back to its source.
+
+### Developer experience
+
+16. **Telegram-login-widget sessions** — replace the email+password recovery
+    flow with Telegram's login widget — sign in with one tap, no OTP, no
+    password to forget. The bot's signed identity proof becomes the session.
+17. **Chat-as-a-queue** — use a dedicated chat as a FIFO work queue: producers
+    send messages, consumers poll via `getUpdates` with a long-poll offset.
+    `ack` = `deleteMessage`, `retry` = `editMessage` + repost.
+18. **Scheduled writes via message scheduling** — Telegram's
+    `schedule_message` becomes a delayed KV write: schedule a message 24h
+    out, and the bot applies it as a `set` when it fires. Cron, but stored in
+    Telegram.
+19. **QR-code value replies** — after every `set`, the bot replies with a QR
+    code image of the value — scan-to-share on mobile without copy-paste.
+    Optional per-collection toggle.
+20. **Voice-note transcriptions** — upload a voice message; the bot
+    transcribes it via Whisper and stores the text as the value. Audio +
+    transcript both live in Telegram, retrievable as a paired album.
+
+### Integrations
+
+21. **Telegram-passport-backed auth** — use Telegram Passport for KYC-verified
+    accounts — the bot requests identity documents, the user approves via
+    Telegram's native UI, and the verified status is mirrored to the manifest.
+22. **Poll-backed aggregations** — a Telegram poll mirrors a numeric KV
+    counter; votes update it via `getUpdates`. Closing the poll freezes the
+    counter, exporting the result as a snapshot matview.
+23. **Album-as-document** — group multiple file uploads as a single logical
+    document via Telegram's media-album feature. One record, N attachments,
+    atomic download.
+24. **Message-reply-graph for FKs** — model foreign-key relationships as reply
+    chains — a child record's mirror message replies to its parent's.
+    Cascading deletes = walk the reply tree with `deleteMessage`.
+25. **Animated-avatar config reflection** — store user profile config (theme,
+    avatar, status text) as KV; the bot's own avatar and bio reflect the live
+    state, so the bot's profile is a live status board.
+
+> None of these are implemented yet — they are design notes to show how much
+> further Telegram-as-a-database can go.
 
 <br/>
 
