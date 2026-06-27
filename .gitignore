@@ -82,3 +82,4 @@ desktop-*.png
 worklog.md
 agent-ctx/
 plan.md
+.env*
