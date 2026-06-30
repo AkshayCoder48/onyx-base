@@ -1728,6 +1728,21 @@ Examples:
                 key keeps working as if nothing happened.
               </p>
             </Card>
+            <Card className="p-5 bg-card/40 border-border/60">
+              <div className="flex items-center gap-2 mb-2">
+                <Server className="size-4 text-primary" />
+                <h4 className="font-semibold text-[14px]">Per-account storage (V4)</h4>
+              </div>
+              <p className="text-[13px] text-muted-foreground leading-relaxed">
+                Storage is split by account: a tiny pinned <strong>account index</strong> message maps your{' '}
+                <code className="font-mono">userId</code> to a separate <strong>account manifest</strong> document that
+                holds <em>only your</em> records, logs, files, and API keys. A write by one user re-uploads only that
+                user&apos;s manifest — not the whole platform&apos;s data. Each account grows independently toward the
+                50 MB cloud limit (2 GB with a local Bot API server), so one power user can never crowd out the others.
+                The legacy single-file manifest is kept in the chat history as a backup; the admin panel&apos;s{' '}
+                <strong>Storage</strong> tab shows the per-account status live.
+              </p>
+            </Card>
           </div>
 
           <Card className="p-5 bg-card/40 border-border/60">
