@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import { listLogs } from '@/lib/data-store'
 
 export const runtime = 'nodejs'
@@ -16,6 +16,9 @@ export const runtime = 'nodejs'
 export async function GET(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(user, req, { scope: 'read' })
+  if (!z.ok) return authorizeFailResponse(z)
 
   const limitParam = req.nextUrl.searchParams.get('limit')
   const actionFilter = req.nextUrl.searchParams.get('action')

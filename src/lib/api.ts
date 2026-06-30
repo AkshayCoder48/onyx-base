@@ -57,6 +57,18 @@ export interface ApiKeyView {
   createdAt: string
   lastUsedAt: string | null
   revoked: boolean
+  /** v3: empty = full access (backward compat). */
+  scopes: import('@/lib/data-store').ApiKeyScope[]
+  /** v3: ISO timestamp, null = never expires. */
+  expiresAt: string | null
+  /** v3: empty = all collections. */
+  collectionAllowList: string[]
+  /** v3: empty = all tables. */
+  tableAllowList: string[]
+  /** v3: null/0 = unlimited. */
+  rateLimitPerMin: number | null
+  /** v3: null/0 = unlimited. */
+  rateLimitMbPerDay: number | null
 }
 
 export interface CollectionView {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Onyx Base CLI — terminal client for the Telegram-backed key-value store.
+// Onyx Base CLI - terminal client for the Telegram-backed key-value store.
 //
 // Pure Node.js ESM, no external dependencies. Runs on Node 18+ (uses global
 // fetch) or Bun. Install globally with `npm i -g .` or run directly via
@@ -13,7 +13,7 @@ import readline from 'node:readline/promises'
 import { stdin as processStdin, stdout as processStdout } from 'node:process'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ANSI color helpers — kept tiny so the file stays dependency-free.
+// ANSI color helpers - kept tiny so the file stays dependency-free.
 // Always no-op when stdout is not a TTY (so piping stays clean).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -36,12 +36,12 @@ const Cerr = { dim: isTTYerr ? '\x1b[2m' : '', reset: isTTYerr ? '\x1b[0m' : '' 
 const dimErr = (s) => `${Cerr.dim}${s}${Cerr.reset}`
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Config — stored at ~/.onyx/config.json
+// Config - stored at ~/.onyx/config.json
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CONFIG_DIR = path.join(os.homedir(), '.onyx')
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json')
-// No localhost default — the server is a hosted service.
+// No localhost default - the server is a hosted service.
 // Users set ONYX_URL or pass --server, or run `onyx login` which
 // discovers the server from the dashboard's /api/config endpoint.
 const DEFAULT_SERVER = ''
@@ -97,7 +97,7 @@ function ensureServer(cfg) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// HTTP — small fetch wrapper that throws on non-2xx with the server's message.
+// HTTP - small fetch wrapper that throws on non-2xx with the server's message.
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function request(method, serverUrl, pathname, { body, apiKey } = {}) {
@@ -142,7 +142,7 @@ async function request(method, serverUrl, pathname, { body, apiKey } = {}) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Value coercion — mirrors src/lib/auth.ts on the server.
+// Value coercion - mirrors src/lib/auth.ts on the server.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function coerceValue(raw) {
@@ -166,7 +166,7 @@ function coerceValue(raw) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Argument parsing — minimal, no deps.
+// Argument parsing - minimal, no deps.
 //   args: ["set", "coins", "500", "--collection", "default", "-v"]
 //   → { positional: ["set","coins","500"], flags: { collection: "default", v: true } }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -318,6 +318,129 @@ function normalizeAccessMode(raw) {
   return null
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// API key restriction helpers - used by `onyx api-keys create` + `update`.
+// Mirrors the 7 scopes the backend knows about (see src/lib/data-store.ts).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VALID_API_KEY_SCOPES = ['read', 'write', 'delete', 'files', 'tables', 'collections', 'export']
+
+/** Split a comma-separated CLI flag value into a clean list. */
+function parseCsvList(raw) {
+  if (!raw) return []
+  return String(raw)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+/**
+ * Normalise an `--expires-at` value:
+ *   - "YYYY-MM-DD"        → "${input}T23:59:59.000Z" (end of day UTC)
+ *   - ISO 8601 string      → pass through (backend will validate)
+ *   - anything else        → pass through (backend will validate)
+ * Returns undefined when the input is empty / not a string.
+ */
+function normalizeExpiresAt(raw) {
+  if (raw == null) return undefined
+  const s = String(raw).trim()
+  if (s === '') return undefined
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return `${s}T23:59:59.000Z`
+  return s
+}
+
+/**
+ * Collect API-key restriction options from parsed CLI flags. Only fields that
+ * were explicitly supplied are returned; the caller decides whether to merge
+ * them into a POST body (create - defaults apply on the server) or send them
+ * as-is to PATCH (update - only supplied fields change).
+ *
+ * Clearing semantics (PATCH only): pass `--expires-at ""`, `--rate-limit-per-min ""`,
+ * or `--rate-limit-mb-per-day ""` to send `null` and clear the field server-side.
+ * Pass `--scopes ""` / `--collections ""` / `--tables ""` to send `[]` (which
+ * the data store treats as "full access" / "all collections" / "all tables").
+ */
+function parseApiKeyOpts(flags) {
+  const opts = {}
+  if (typeof flags.scopes === 'string') {
+    // Filter to valid scopes; an explicit empty list = full access (sent as []).
+    opts.scopes = parseCsvList(flags.scopes).filter((s) => VALID_API_KEY_SCOPES.includes(s))
+  }
+  if (typeof flags['expires-at'] === 'string') {
+    const s = flags['expires-at'].trim()
+    if (s === '') {
+      // Explicit empty string = clear expiry (send null; meaningful for PATCH).
+      opts.expiresAt = null
+    } else {
+      const iso = normalizeExpiresAt(s)
+      if (iso !== undefined) opts.expiresAt = iso
+    }
+  }
+  if (typeof flags.collections === 'string') {
+    opts.collectionAllowList = parseCsvList(flags.collections)
+  }
+  if (typeof flags.tables === 'string') {
+    opts.tableAllowList = parseCsvList(flags.tables)
+  }
+  if (typeof flags['rate-limit-per-min'] === 'string') {
+    const s = flags['rate-limit-per-min'].trim()
+    if (s === '') {
+      // Explicit empty string = clear (send null; meaningful for PATCH).
+      opts.rateLimitPerMin = null
+    } else {
+      const n = Number(s)
+      if (Number.isFinite(n) && n > 0) opts.rateLimitPerMin = Math.floor(n)
+    }
+  }
+  if (typeof flags['rate-limit-mb-per-day'] === 'string') {
+    const s = flags['rate-limit-mb-per-day'].trim()
+    if (s === '') {
+      opts.rateLimitMbPerDay = null
+    } else {
+      const n = Number(s)
+      if (Number.isFinite(n) && n > 0) opts.rateLimitMbPerDay = Math.floor(n)
+    }
+  }
+  return opts
+}
+
+/** Render a key's restriction lines for `create` / `update` confirmation output. */
+function formatApiKeyRestrictions(k) {
+  const scopes = Array.isArray(k.scopes) ? k.scopes : []
+  const cols = Array.isArray(k.collectionAllowList) ? k.collectionAllowList : []
+  const tbls = Array.isArray(k.tableAllowList) ? k.tableAllowList : []
+  const limitsParts = []
+  if (typeof k.rateLimitPerMin === 'number' && k.rateLimitPerMin > 0) limitsParts.push(`${k.rateLimitPerMin}/min`)
+  if (typeof k.rateLimitMbPerDay === 'number' && k.rateLimitMbPerDay > 0) limitsParts.push(`${k.rateLimitMbPerDay}MB/day`)
+  return [
+    `  ${c('dim', 'scopes:')}  ${scopes.length ? c('cyan', scopes.join(',')) : c('yellow', '* (full access)')}`,
+    `  ${c('dim', 'limits:')}  ${limitsParts.length ? limitsParts.join(', ') : c('dim', '— (unlimited)')}`,
+    `  ${c('dim', 'expires:')} ${k.expiresAt ? c('dim', new Date(k.expiresAt).toISOString()) : c('dim', 'never')}`,
+    `  ${c('dim', 'colls:')}   ${cols.length ? cols.join(',') : c('dim', '* (all)')}`,
+    `  ${c('dim', 'tables:')}  ${tbls.length ? tbls.join(',') : c('dim', '* (all)')}`,
+  ]
+}
+
+/** Render a single row's Scopes cell for `onyx api-keys` list. */
+function scopesCell(k) {
+  const scopes = Array.isArray(k.scopes) ? k.scopes : []
+  return scopes.length ? c('cyan', scopes.join(',')) : c('yellow', '*')
+}
+
+/** Render a single row's Limits cell for `onyx api-keys` list. */
+function limitsCell(k) {
+  const parts = []
+  if (typeof k.rateLimitPerMin === 'number' && k.rateLimitPerMin > 0) parts.push(`${k.rateLimitPerMin}/min`)
+  if (typeof k.rateLimitMbPerDay === 'number' && k.rateLimitMbPerDay > 0) parts.push(`${k.rateLimitMbPerDay}MB/day`)
+  return parts.length ? parts.join(', ') : c('dim', '—')
+}
+
+/** Render a single row's Expires cell for `onyx api-keys` list. */
+function expiresCell(k) {
+  if (!k.expiresAt) return c('dim', 'never')
+  return c('dim', new Date(k.expiresAt).toISOString().slice(0, 10))
+}
+
 /**
  * Hand-rolled multipart/form-data POST for environments without global
  * FormData/Blob (older Node). Builds a single buffer and sends it with the
@@ -374,7 +497,7 @@ const cmd = {
     // --server <url> overrides everything (env var, config, default).
     const serverFlag = flags.server && typeof flags.server === 'string' ? flags.server : null
 
-    // `onyx login --key kv_live_xxx` — connect an existing account (e.g. one
+    // `onyx login --key kv_live_xxx` - connect an existing account (e.g. one
     // created via the web signup form) without minting a new one. Validates the
     // key against /api/auth/verify and persists it locally.
     if (flags.key && typeof flags.key === 'string') {
@@ -1132,7 +1255,7 @@ const cmd = {
   //   onyx telegram-config set          → set (--chat-id, --bot-token, --label)
   //   onyx telegram-config clear        → clear custom config
   //
-  // NOTE: the server route implements PUT (not POST) for set — we use PUT so
+  // NOTE: the server route implements PUT (not POST) for set - we use PUT so
   // the command actually works against the live API.
   'telegram-config': async function telegramConfig(args) {
     const { positional, flags } = parseArgs(args)
@@ -1205,11 +1328,20 @@ const cmd = {
   },
 
   // ─── API keys ──────────────────────────────────────────────────────────────
-  //   onyx api-keys                       → list
-  //   onyx api-keys create <name>         → POST (prints FULL key)
+  //   onyx api-keys                       → list (shows scopes / limits / expiry)
+  //   onyx api-keys create <name> [opts]  → POST (prints FULL key)
+  //   onyx api-keys update <id>   [opts]  → PATCH (changes only supplied fields)
   //   onyx api-keys revoke <id>           → DELETE
+  //
+  //   [opts] (apply to create + update):
+  //     --scopes read,write               comma list from read,write,delete,files,tables,collections,export
+  //     --expires-at 2025-12-31           YYYY-MM-DD (→ end-of-day UTC) or full ISO string
+  //     --collections users,logs          collection allowlist (omit = all)
+  //     --tables orders,items             table allowlist (omit = all)
+  //     --rate-limit-per-min 100          integer (omit = unlimited)
+  //     --rate-limit-mb-per-day 50        integer (omit = unlimited)
   'api-keys': async function apiKeys(args) {
-    const { positional } = parseArgs(args)
+    const { positional, flags } = parseArgs(args)
     const cfg = await requireAuth()
     if (!cfg) return
     const server = ensureServer(cfg)
@@ -1228,7 +1360,7 @@ const cmd = {
         return
       }
       console.log(
-        `  ${'NAME'.padEnd(20)}  ${'KEY'.padEnd(28)}  ${'CREATED'.padEnd(11)}  ${'LAST USED'.padEnd(11)}  STATUS`,
+        `  ${'NAME'.padEnd(20)}  ${'KEY'.padEnd(28)}  ${'CREATED'.padEnd(11)}  ${'LAST USED'.padEnd(11)}  ${'STATUS'.padEnd(8)}  ${'SCOPES'.padEnd(22)}  ${'LIMITS'.padEnd(18)}  EXPIRES`,
       )
       for (const k of keys) {
         const status = k.revoked ? c('red', 'revoked') : c('green', 'active')
@@ -1237,7 +1369,11 @@ const cmd = {
           `  ${c('cyan', (k.name ?? '').padEnd(20))}  ` +
           `${c('yellow', maskApiKey(k.key).padEnd(28))}  ` +
           `${c('dim', timeAgo(k.createdAt).padEnd(11))}  ` +
-          `${c('dim', last.padEnd(11))}  ${status}`,
+          `${c('dim', last.padEnd(11))}  ` +
+          `${status.padEnd(8)}  ` +
+          `${scopesCell(k).padEnd(22)}  ` +
+          `${limitsCell(k).padEnd(18)}  ` +
+          `${expiresCell(k)}`,
         )
       }
       process.stderr.write(dimErr(`# ${keys.length} API key(s)\n`))
@@ -1247,13 +1383,15 @@ const cmd = {
     if (sub === 'create') {
       const name = positional[1]
       if (!name) {
-        console.error(c('red', '✗ Usage: onyx api-keys create <name>'))
+        console.error(c('red', '✗ Usage: onyx api-keys create <name> [--scopes read,write] [--expires-at 2025-12-31] [--collections a,b] [--tables t,u] [--rate-limit-per-min N] [--rate-limit-mb-per-day M]'))
         process.exit(1)
       }
+      const opts = parseApiKeyOpts(flags)
+      const body = { name, ...opts }
       let data
       try {
         data = await request('POST', server, '/api/dashboard/api-keys', {
-          body: { name },
+          body,
           apiKey: cfg.apiKey,
         })
       } catch (err) {
@@ -1264,7 +1402,39 @@ const cmd = {
       console.log(`  ${c('dim', 'name:')}    ${k?.name ?? name}`)
       console.log(`  ${c('dim', 'id:')}      ${k?.id ?? ''}`)
       console.log(`  ${c('yellow', 'key:')}     ${k?.key ?? ''}`)
+      for (const line of formatApiKeyRestrictions(k ?? {})) console.log(line)
       console.log(c('dim', '  (Copy this key now — it will not be shown in full again.)'))
+      return
+    }
+
+    if (sub === 'update') {
+      const id = positional[1]
+      if (!id) {
+        console.error(c('red', '✗ Usage: onyx api-keys update <id> [--scopes read,write] [--expires-at 2025-12-31] [--collections a,b] [--tables t,u] [--rate-limit-per-min N] [--rate-limit-mb-per-day M]'))
+        process.exit(1)
+      }
+      const opts = parseApiKeyOpts(flags)
+      if (Object.keys(opts).length === 0) {
+        console.error(c('red', '✗ Nothing to update. Pass at least one of --scopes / --expires-at / --collections / --tables / --rate-limit-per-min / --rate-limit-mb-per-day.'))
+        process.exit(1)
+      }
+      let data
+      try {
+        data = await request('PATCH', server, `/api/dashboard/api-keys/${encodeURIComponent(id)}`, {
+          body: opts,
+          apiKey: cfg.apiKey,
+        })
+      } catch (err) {
+        if (err.status === 404) {
+          console.error(c('red', `✗ API key not found: ${id}`))
+          process.exit(1)
+        }
+        return failNetwork(err, server)
+      }
+      const k = data?.apiKey
+      console.log(c('green', `✓ Updated API key ${id}`))
+      console.log(`  ${c('dim', 'name:')}    ${k?.name ?? ''}`)
+      for (const line of formatApiKeyRestrictions(k ?? {})) console.log(line)
       return
     }
 
@@ -1290,7 +1460,7 @@ const cmd = {
     }
 
     console.error(c('red', `✗ Unknown subcommand: onyx api-keys ${sub}`))
-    console.error(c('dim', `  Usage: onyx api-keys [list|create <name>|revoke <id>]`))
+    console.error(c('dim', `  Usage: onyx api-keys [list|create <name>|update <id>|revoke <id>]`))
     process.exit(1)
   },
 
@@ -1758,7 +1928,7 @@ const cmd = {
       return
     }
 
-    // ── update (row) — PATCH with { pk, patch } in body ──
+    // ── update (row) - PATCH with { pk, patch } in body ──
     if (sub === 'update') {
       const name = positional[1]
       const pkRaw = flags.pk
@@ -1800,7 +1970,7 @@ const cmd = {
       return
     }
 
-    // ── delete (row) — DELETE with { pk } in body ──
+    // ── delete (row) - DELETE with { pk } in body ──
     if (sub === 'delete' || sub === 'rm-row' || sub === 'delete-row') {
       const name = positional[1]
       const pkRaw = flags.pk
@@ -1926,7 +2096,7 @@ function printHelp() {
     ['file-revoke <fileId>', 'Revoke a file\'s cached download link'],
     ['file-delete <fileId> [--yes]', 'Permanently delete a file'],
     ['share [list|create|revoke]', 'Manage public share tokens'],
-    ['api-keys [list|create|revoke]', 'Manage API keys'],
+    ['api-keys [list|create|update|revoke]', 'Manage API keys + per-key scopes / limits / expiry'],
     ['tables [list|create|describe|drop|mode|rows|insert|update|delete]', 'Manage account-scoped SQL tables'],
     ['telegram-config [view|set|clear]', 'View / set / clear custom Telegram config'],
     ['whoami', 'Show current credentials'],
@@ -1954,11 +2124,18 @@ function printHelp() {
   console.log(`  ${c('gray', '--action <filter>')}       Filter logs by action`)
   console.log(`  ${c('gray', '--mode read|write|rw')}    Share token / tables access mode`)
   console.log(`  ${c('gray', '--access r|w|rw')}         Table access mode (tables create)`)
-  console.log(`  ${c('gray', '--columns <spec>')}        Table columns (tables create) — "name:TYPE:pk:ai" or JSON`)
+  console.log(`  ${c('gray', '--columns <spec>')}        Table columns (tables create) - "name:TYPE:pk:ai" or JSON`)
   console.log(`  ${c('gray', '--data <json>')}           Row data (tables insert/update)`)
   console.log(`  ${c('gray', '--pk <json>')}             Primary key object (tables update/delete) e.g. '{"id":1}'`)
   console.log(`  ${c('gray', '--chat-id <id>')}          Telegram chat id (telegram-config set)`)
   console.log(`  ${c('gray', '--bot-token <token>')}     Telegram bot token (telegram-config set)`)
+  console.log(`  ${c('gray', '--scopes a,b')}           API key scopes (api-keys create/update)`)
+  console.log(`  ${c('gray', '                          ')}  read,write,delete,files,tables,collections,export — omit for full access`)
+  console.log(`  ${c('gray', '--expires-at <date>')}     API key expiry (api-keys create/update) — YYYY-MM-DD or ISO string`)
+  console.log(`  ${c('gray', '--collections a,b')}        API key collection allowlist (api-keys create/update) — omit for all`)
+  console.log(`  ${c('gray', '--tables a,b')}            API key table allowlist (api-keys create/update) — omit for all`)
+  console.log(`  ${c('gray', '--rate-limit-per-min N')}  API key per-minute request limit (api-keys create/update)`)
+  console.log(`  ${c('gray', '--rate-limit-mb-per-day M')} API key daily write quota in MB (api-keys create/update)`)
   console.log()
   console.log(c('bold', 'ENV'))
   console.log(`  ${c('gray', 'ONYX_URL')}              Override the server URL (default ${DEFAULT_SERVER})`)

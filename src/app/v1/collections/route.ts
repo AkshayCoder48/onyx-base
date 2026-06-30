@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import { listCollections, createCollectionName, resolveChatId } from '@/lib/data-store'
 import { logAction } from '@/lib/kv'
 import { sendEventMessage } from '@/lib/telegram'
@@ -15,6 +15,9 @@ export const runtime = 'nodejs'
 export async function GET(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(user, req, { scope: 'collections' })
+  if (!z.ok) return authorizeFailResponse(z)
 
   const collections = listCollections(user.dbUserId)
   return ok({
@@ -35,6 +38,13 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}))
   const name = (body.name as string)?.trim()
   if (!name) return fail('Collection name is required.', 400)
+
+  const z = authorize(user, req, {
+    scope: 'collections',
+    collection: name,
+    bytesWritten: Buffer.byteLength(JSON.stringify(body)),
+  })
+  if (!z.ok) return authorizeFailResponse(z)
 
   const result = createCollectionName(user.dbUserId, name)
   if (!result.ok) return fail(result.error, 400)

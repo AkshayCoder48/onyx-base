@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import {
   findUserTable,
   listRows,
@@ -39,6 +39,10 @@ export async function GET(
   const { name } = await params
   const ctx = await resolveOwner(req, name)
   if (!ctx) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(ctx.user, req, { scope: 'tables', table: name })
+  if (!z.ok) return authorizeFailResponse(z)
+
   if (!ctx.meta) return fail(`Table "${name}" does not exist.`, 404)
   if (!canRead(ctx.meta.accessMode)) {
     return fail(
@@ -65,6 +69,7 @@ export async function POST(
   const { name } = await params
   const ctx = await resolveOwner(req, name)
   if (!ctx) return fail('Unauthorized — invalid or missing API key.', 401)
+
   if (!ctx.meta) return fail(`Table "${name}" does not exist.`, 404)
   if (!canWrite(ctx.meta.accessMode)) {
     return fail(
@@ -79,6 +84,14 @@ export async function POST(
   if (!body || typeof body.row !== 'object' || body.row === null) {
     return fail('`row` (object) is required.', 400)
   }
+
+  const z = authorize(ctx.user, req, {
+    scope: 'tables',
+    table: name,
+    bytesWritten: Buffer.byteLength(JSON.stringify(body.row)),
+  })
+  if (!z.ok) return authorizeFailResponse(z)
+
   try {
     const inserted = await insertRow(
       ctx.user.dbUserId,
@@ -102,6 +115,10 @@ export async function PATCH(
   const { name } = await params
   const ctx = await resolveOwner(req, name)
   if (!ctx) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(ctx.user, req, { scope: 'tables', table: name })
+  if (!z.ok) return authorizeFailResponse(z)
+
   if (!ctx.meta) return fail(`Table "${name}" does not exist.`, 404)
   if (!canWrite(ctx.meta.accessMode)) {
     return fail(
@@ -144,6 +161,10 @@ export async function DELETE(
   const { name } = await params
   const ctx = await resolveOwner(req, name)
   if (!ctx) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(ctx.user, req, { scope: 'tables', table: name })
+  if (!z.ok) return authorizeFailResponse(z)
+
   if (!ctx.meta) return fail(`Table "${name}" does not exist.`, 404)
   if (!canWrite(ctx.meta.accessMode)) {
     return fail(

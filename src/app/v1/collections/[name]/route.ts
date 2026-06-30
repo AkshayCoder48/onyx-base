@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import { deleteCollection, resolveChatId } from '@/lib/data-store'
 import { logAction } from '@/lib/kv'
 import { sendEventMessage } from '@/lib/telegram'
@@ -19,6 +19,10 @@ export async function DELETE(
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const { name } = await params
+
+  const z = authorize(user, req, { scope: 'collections', collection: name })
+  if (!z.ok) return authorizeFailResponse(z)
+
   if (name === 'default') return fail('The default collection cannot be deleted.', 400)
 
   const chatId = resolveChatId(user.dbUserId)

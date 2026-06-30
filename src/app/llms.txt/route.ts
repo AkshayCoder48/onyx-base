@@ -94,14 +94,18 @@ by itself.
 
 Your master credential. The Bearer token used by the dashboard, the \`onyx\`
 CLI, and every REST call. Grants full read/write access to everything you
-own.
+own — **unless** you mint it with a non-empty \`scopes\` array, in which case
+it's limited to those capabilities (see §4.6 for the full scopes + rate-limit
++ expiry + allowlist surface).
 
 | Property | Value |
 |:---|:---|
 | **Format** | \`kv_live_<28 hex>\` |
 | **Minted** | Dashboard → **API Keys** tab (or returned once at signup). Shown exactly once at creation — copy it before closing the dialog. |
-| **Scope** | Full account access: every collection, every key, every file, every share token, every log. Not scoped — it is you. |
-| **Lifetime** | No expiry. Lives until you revoke it. Stored as a salted hash on the server; the plaintext is only ever shown once. |
+| **Scope** | Full account access by default: every collection, every key, every file, every share token, every log. Mint with \`scopes: ["read","write"]\` etc. for least-privilege keys (see §4.6). |
+| **Lifetime** | No expiry by default. Pass \`expiresAt\` to mint a time-limited key. Lives until you revoke it. Stored as a salted hash on the server; the plaintext is only ever shown once. |
+| **Rate limits** | Unlimited by default. Pass \`rateLimitPerMin\` / \`rateLimitMbPerDay\` to cap (see §4.6). |
+| **Allowlists** | No restriction by default. Pass \`collectionAllowList\` / \`tableAllowList\` to lock a key to specific resources (see §4.6). |
 | **Revocation** | Revoke instantly from the API Keys tab (\`DELETE /api/dashboard/api-keys/:id\`). The key stops authenticating on the very next request. |
 
 \`\`\`http
@@ -338,7 +342,89 @@ curl -H "Authorization: Bearer kv_live_…" https://onyx.example.com/v1/tables/t
 | \`GET\` | \`/v1/stats\` | Account statistics (records / collections / apiKeys / logs / files counts, activity by day, recent activity). |
 | \`GET\` | \`/v1/logs?limit=50&action=…\` | Recent audit log entries, optionally filtered by action. |
 
-### 4.6 · Share tokens (public surface)
+### 4.6 · API Keys management (\`/api/dashboard/api-keys\`)
+
+Mint, list, update, and revoke \`kv_live_…\` API keys. Every route requires the
+Bearer header from an existing valid key on the same account. The full key
+string is returned **exactly once** at create time — store it immediately.
+
+> **Empty \`scopes\` = full access (backward compat).** Keys minted before
+> scopes existed (manifest v2) keep working unchanged after the v3 upgrade:
+> they have \`scopes: []\` and can do everything. To mint a real
+> least-privilege key, pass at least one scope.
+
+#### The 7 scopes
+
+A scope is a single capability granted to a key. Pick any subset; the empty
+set means full access.
+
+| Scope | What it allows |
+|:---|:---|
+| \`read\` | \`GET /v1/get/:key\`, \`/v1/list\`, \`/v1/stats\`, \`/v1/logs\`, \`/v1/health\`, \`/v1/whoami\`, \`GET /v1/collections\`, \`GET /v1/tables\`, \`GET /v1/tables/:name\`, \`GET /v1/tables/:name/rows\` |
+| \`write\` | \`POST /v1/set\` |
+| \`delete\` | \`DELETE /v1/delete/:key\` |
+| \`files\` | \`/v1/files/*\` (upload, list, metadata, link mint/revoke, delete) and the public download proxy |
+| \`tables\` | \`/v1/tables/*\` (create, drop, mode change, row insert/update/delete) |
+| \`collections\` | \`/v1/collections/*\` (create, delete, detail) |
+| \`export\` | \`GET /v1/export\` |
+
+Invalid scope names are silently filtered; the rest are kept in the order
+supplied.
+
+#### Endpoints
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| \`GET\` | \`/api/dashboard/api-keys\` | List your keys (id, name, createdAt, lastUsedAt, revoked, scopes, expiresAt, collectionAllowList, tableAllowList, rateLimitPerMin, rateLimitMbPerDay). The full key is **not** returned. |
+| \`POST\` | \`/api/dashboard/api-keys\` | Mint a new key. Body: \`{ name, scopes?, expiresAt?, collectionAllowList?, tableAllowList?, rateLimitPerMin?, rateLimitMbPerDay? }\`. Returns \`{ apiKey }\` with the full key (shown once). |
+| \`PATCH\` | \`/api/dashboard/api-keys/:id\` | Update an existing key's restrictions. Body: any subset of \`{ scopes, expiresAt, collectionAllowList, tableAllowList, rateLimitPerMin, rateLimitMbPerDay }\`. Omitted fields are left unchanged; pass \`null\` to clear a field. Returns the updated \`{ apiKey }\`. |
+| \`DELETE\` | \`/api/dashboard/api-keys/:id\` | Revoke a key instantly. The key stops authenticating on the next request. |
+
+#### Body fields (POST + PATCH)
+
+| Field | Type | Default | Meaning |
+|:---|:---|:---|:---|
+| \`name\` | \`string\` | \`"new-key"\` | Human label shown in the dashboard + CLI. |
+| \`scopes\` | \`string[]\` | \`[]\` (= full access) | Subset of \`read,write,delete,files,tables,collections,export\`. Invalid entries filtered. |
+| \`expiresAt\` | \`string \\| null\` | \`null\` (never) | ISO 8601 timestamp. After it passes, the key returns \`401 key_expired\`. Pass \`null\` to clear. |
+| \`collectionAllowList\` | \`string[]\` | \`[]\` (all) | When non-empty, the key can only touch these collections. |
+| \`tableAllowList\` | \`string[]\` | \`[]\` (all) | When non-empty, the key can only touch these tables. |
+| \`rateLimitPerMin\` | \`number \\| null\` | \`null\` (unlimited) | Max requests per 60s sliding window. \`0\` / \`null\` = unlimited. |
+| \`rateLimitMbPerDay\` | \`number \\| null\` | \`null\` (unlimited) | Max MB written per UTC day (sum of \`bytesWritten\` on write paths). \`0\` / \`null\` = unlimited. |
+
+#### Enforcement — \`authorize()\` error responses
+
+Every \`/v1/*\` route runs the key through \`authorize()\` before handling the
+request. Admin keys (\`onyxbase_…\`) bypass all checks. Otherwise the key's
+restrictions are evaluated in order; the first failure short-circuits with a
+JSON error body. Rate-limit responses also set a \`Retry-After\` header so
+clients can back off precisely.
+
+| Status | \`error\` code | When | Headers |
+|:---|:---|:---|:---|
+| \`401\` | \`key_expired\` | \`expiresAt\` is in the past. | — |
+| \`403\` | \`insufficient_scope\` | The key's \`scopes\` array is non-empty and doesn't include the scope required by the route (e.g. a \`read\`-only key hitting \`POST /v1/set\`). | — |
+| \`403\` | \`collection_not_allowed\` | The key has a non-empty \`collectionAllowList\` and the requested collection isn't in it. | — |
+| \`403\` | \`table_not_allowed\` | The key has a non-empty \`tableAllowList\` and the requested table isn't in it. | — |
+| \`429\` | \`rate_limited\` | Per-minute request count exceeded. | \`Retry-After: <seconds>\` (until the 60s sliding window resets) |
+| \`429\` | \`daily_quota_exceeded\` | Daily write-byte quota exceeded. | \`Retry-After: <seconds>\` (until UTC midnight) |
+
+\`\`\`bash
+# Mint a least-privilege key for a public-facing widget: read+write only,
+# capped at 100 req/min and 50 MB/day of writes, expiring end-of-2026.
+curl -X POST https://onyx.example.com/api/dashboard/api-keys \\
+  -H "Authorization: Bearer kv_live_YOUR_ADMIN_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"widget","scopes":["read","write"],"rateLimitPerMin":100,"rateLimitMbPerDay":50,"expiresAt":"2026-12-31T23:59:59.000Z"}'
+
+# Tighten an existing key: drop to read-only and scope it to one collection.
+curl -X PATCH https://onyx.example.com/api/dashboard/api-keys/abc123 \\
+  -H "Authorization: Bearer kv_live_YOUR_ADMIN_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"scopes":["read"],"collectionAllowList":["visits"]}'
+\`\`\`
+
+### 4.7 · Share tokens (public surface)
 
 | Method | Path | Purpose |
 |:---|:---|:---|
@@ -348,7 +434,7 @@ curl -H "Authorization: Bearer kv_live_…" https://onyx.example.com/v1/tables/t
 | \`GET\` | \`/api/dashboard/share-tokens\` | List your share tokens (auth required). |
 | \`DELETE\` | \`/api/dashboard/share-tokens/:id\` | Revoke a share token instantly (auth required). The public URL returns 404 on the next request. |
 
-### 4.7 · Advanced surface (\`/api/v1/*\`)
+### 4.8 · Advanced surface (\`/api/v1/*\`)
 
 A Supabase-style advanced surface lives under \`/api/v1/*\` (note the \`/api\`
 prefix, distinct from the basic \`/v1/*\` surface). All routes require the
@@ -365,7 +451,7 @@ Bearer API key and are scoped to the authenticated user.
 | \`POST\` | \`/api/v1/rpc/:name\` | Built-in RPC: \`count_records\`, \`sum { key }\`, \`aggregate { collection, type }\`, \`search { query, collection?, limit? }\`, \`touch { key, value, collection? }\`. All user-scoped. |
 | \`POST\` | \`/api/v1/graphql\` | Minimal hand-rolled GraphQL endpoint (no Apollo/graphql deps). Queries for \`records\`, \`collections\`, \`apiKeys\`, \`logs\`, \`me\` — all user-scoped. Args + variables supported on \`records(limit, collection)\` and \`logs(limit, action)\`. Standard \`{ data, errors }\` response. |
 
-### 4.8 · Admin routes (\`/api/admin/*\`)
+### 4.9 · Admin routes (\`/api/admin/*\`)
 
 Require \`Authorization: Bearer onyxbase_…\`.
 
@@ -682,7 +768,12 @@ onyx logs --limit 50               # recent audit log entries
 # Settings
 onyx telegram-config --show        # show your current storage backend
 onyx telegram-config --token "<bot_token>" --chat "<chat_id>"  # switch to BYOB
-onyx api-keys                      # list / rotate / revoke your API keys
+
+# API keys (per-key scopes, expiry, allowlists, rate limits — see §4.6)
+onyx api-keys                                                # list (with SCOPES / LIMITS / EXPIRES columns)
+onyx api-keys create prod --scopes read,write --rate-limit-per-min 100 --expires-at 2026-12-31
+onyx api-keys update <id> --scopes read --collections visits,logs
+onyx api-keys revoke <id>                                     # revoke instantly
 
 # Admin (requires an onyxbase_ key)
 onyx admin whoami                  # confirm admin identity

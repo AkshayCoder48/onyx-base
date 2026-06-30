@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import {
   describeUserTable,
   dropUserTable,
@@ -25,6 +25,9 @@ export async function GET(
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const { name } = await params
+  const z = authorize(user, req, { scope: 'tables', table: name })
+  if (!z.ok) return authorizeFailResponse(z)
+
   try {
     const result = await describeUserTable(user.dbUserId, name)
     return ok({ table: result })
@@ -45,6 +48,9 @@ export async function PATCH(
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const { name } = await params
+  const z = authorize(user, req, { scope: 'tables', table: name })
+  if (!z.ok) return authorizeFailResponse(z)
+
   const body = (await req.json().catch(() => null)) as {
     accessMode?: unknown
   } | null
@@ -71,6 +77,9 @@ export async function DELETE(
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const { name } = await params
+  const z = authorize(user, req, { scope: 'tables', table: name })
+  if (!z.ok) return authorizeFailResponse(z)
+
   try {
     await dropUserTable(user.dbUserId, name)
     return ok({ message: 'Table dropped' })
