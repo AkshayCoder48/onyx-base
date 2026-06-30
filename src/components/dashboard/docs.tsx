@@ -530,10 +530,10 @@ export function DocsView() {
             icon={<KeyRound className="size-4" />}
             name="API Key"
             format="kv_live_…"
-            blurb="Your master credential. The Bearer token used by the dashboard, the CLI, and every REST call. Grants full read/write access to everything you own."
-            mintedAt="Minted in the dashboard → API Keys tab (or returned once at signup). Shown exactly once at creation — copy it before closing the dialog."
-            scope="Full account access: every collection, every key, every file, every share token, every log. Not scoped — it is you."
-            lifetime="No expiry. Lives until you revoke it. Stored as a salted hash on the server; the plaintext is only ever shown once."
+            blurb="Your master credential. The Bearer token used by the dashboard, the CLI, and every REST call. Grants full read/write access to everything you own by default — and can be scoped, rate-limited, time-limited, and allowlisted down to a least-privilege credential (see the per-key restrictions card below)."
+            mintedAt="Minted in the dashboard → API Keys tab (or returned once at signup). Shown exactly once at creation — copy it before closing the dialog. The full plaintext is never retrievable after creation."
+            scope="Full account access by default: every collection, every key, every file, every share token, every log. Mint with a non-empty scopes array (read, write, delete, files, tables, collections, export) to limit the key to those capabilities."
+            lifetime="No expiry by default. Lives until you revoke it. Optionally pass an ISO expiresAt to mint a time-limited key. Stored as a salted hash on the server."
             revocation="Revoke instantly from the API Keys tab (DELETE /api/dashboard/api-keys/:id). The key stops authenticating on the very next request."
             exampleLang="http"
             example={`# Every /v1/* and /api/dashboard/* request carries this header:
@@ -545,6 +545,141 @@ curl -X POST ${apiBase}/v1/set \\
   -H "Content-Type: application/json" \\
   -d '{"key":"coins","value":500}'`}
           />
+
+          {/* Per-key scopes, rate limits, expiry, allowlists */}
+          <Card className="p-5 sm:p-6 bg-card/40 border-border/60">
+            <div className="flex items-center gap-2.5 mb-3">
+              <ShieldCheck className="size-4 text-primary" />
+              <div>
+                <h3 className="font-semibold text-[15px]">Per-key scopes, rate limits, expiry &amp; allowlists</h3>
+                <p className="text-[12.5px] text-muted-foreground mt-0.5">
+                  Lock a key down to exactly what it needs. Backward compatible — empty scopes = full access.
+                </p>
+              </div>
+            </div>
+            <p className="text-[13.5px] text-foreground/90 leading-relaxed mb-4">
+              Every <code className="font-mono text-primary">kv_live_…</code> key carries six optional restriction
+              fields. Empty / null = unrestricted (the default, and the behavior of every key minted before this feature
+              shipped). Setting any of them turns the key into a least-privilege credential — perfect for handing a
+              production app a write-only key, capping a public widget at 100 req/min, or expiring a contractor&apos;s
+              access at year-end.
+            </p>
+
+            <div className="rounded-md border border-border/40 bg-muted/20 px-4 py-1 mb-4">
+              <DefRow label="scopes">
+                Array of <code className="font-mono text-primary">read</code>,{' '}
+                <code className="font-mono text-primary">write</code>,{' '}
+                <code className="font-mono text-primary">delete</code>,{' '}
+                <code className="font-mono text-primary">files</code>,{' '}
+                <code className="font-mono text-primary">tables</code>,{' '}
+                <code className="font-mono text-primary">collections</code>,{' '}
+                <code className="font-mono text-primary">export</code>. Empty / omitted = full
+                access (all 7). Pick any subset for least-privilege keys.
+              </DefRow>
+              <DefRow label="expiresAt">
+                ISO 8601 timestamp; <code className="font-mono">null</code> = never. After it
+                passes, the key returns <code className="font-mono">401 key_expired</code>.
+              </DefRow>
+              <DefRow label="collectionAllowList">
+                String array of collection names. Empty / omitted = all collections. When
+                non-empty, requests to other collections return{' '}
+                <code className="font-mono">403 collection_not_allowed</code>.
+              </DefRow>
+              <DefRow label="tableAllowList">
+                String array of table names. Empty / omitted = all tables. When non-empty,
+                requests to other tables return{' '}
+                <code className="font-mono">403 table_not_allowed</code>.
+              </DefRow>
+              <DefRow label="rateLimitPerMin">
+                Max requests per 60-second sliding window. <code className="font-mono">null</code>{' '}
+                / <code className="font-mono">0</code> = unlimited. Breach returns{' '}
+                <code className="font-mono">429 rate_limited</code> with a{' '}
+                <code className="font-mono">Retry-After</code> header.
+              </DefRow>
+              <DefRow label="rateLimitMbPerDay">
+                Max megabytes written per UTC day (sum of write-path bytes).{' '}
+                <code className="font-mono">null</code> / <code className="font-mono">0</code> = unlimited.
+                Breach returns <code className="font-mono">429 daily_quota_exceeded</code> with a{' '}
+                <code className="font-mono">Retry-After</code> header (seconds to UTC midnight).
+              </DefRow>
+            </div>
+
+            <div className="grid sm:grid-cols-2 gap-3 mb-4">
+              <div className="rounded-md border border-sky-300/60 bg-sky-100/40 p-3">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-sky-800 mb-1">read</div>
+                <p className="text-[12px] text-muted-foreground leading-relaxed">
+                  <code className="font-mono">GET /v1/get/:key</code>, <code className="font-mono">/v1/list</code>,{' '}
+                  <code className="font-mono">/v1/stats</code>, <code className="font-mono">/v1/logs</code>,{' '}
+                  <code className="font-mono">/v1/health</code>, <code className="font-mono">/v1/whoami</code>,{' '}
+                  <code className="font-mono">GET /v1/collections</code>,{' '}
+                  <code className="font-mono">GET /v1/tables</code>, table describe + row list.
+                </p>
+              </div>
+              <div className="rounded-md border border-amber-300/60 bg-amber-100/40 p-3">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-amber-800 mb-1">write</div>
+                <p className="text-[12px] text-muted-foreground leading-relaxed">
+                  <code className="font-mono">POST /v1/set</code>. Pairs naturally with{' '}
+                  <code className="font-mono">read</code> for a typical app backend key.
+                </p>
+              </div>
+              <div className="rounded-md border border-rose-300/60 bg-rose-100/40 p-3">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-rose-800 mb-1">delete</div>
+                <p className="text-[12px] text-muted-foreground leading-relaxed">
+                  <code className="font-mono">DELETE /v1/delete/:key</code>. Issue separately so a
+                  read/write key can&apos;t destroy data.
+                </p>
+              </div>
+              <div className="rounded-md border border-violet-300/60 bg-violet-100/40 p-3">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-violet-800 mb-1">files</div>
+                <p className="text-[12px] text-muted-foreground leading-relaxed">
+                  <code className="font-mono">/v1/files/*</code> — upload, list, metadata, link
+                  mint/revoke, delete, and the public download proxy.
+                </p>
+              </div>
+              <div className="rounded-md border border-emerald-300/60 bg-emerald-100/40 p-3">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-800 mb-1">tables</div>
+                <p className="text-[12px] text-muted-foreground leading-relaxed">
+                  <code className="font-mono">/v1/tables/*</code> — create, drop, mode change,
+                  row insert/update/delete.
+                </p>
+              </div>
+              <div className="rounded-md border border-primary/30 bg-primary/10 p-3">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-primary mb-1">collections · export</div>
+                <p className="text-[12px] text-muted-foreground leading-relaxed">
+                  <code className="font-mono">/v1/collections/*</code> (create / delete / detail) and{' '}
+                  <code className="font-mono">GET /v1/export</code>. Use to gate destructive
+                  collection ops and full-database dumps.
+                </p>
+              </div>
+            </div>
+
+            <div className="rounded-md border border-rose-300/60 bg-rose-50 p-3 mb-4">
+              <div className="text-[11px] font-mono uppercase tracking-wider text-rose-800 mb-1.5">
+                Authorize() error responses
+              </div>
+              <div className="text-[12px] text-muted-foreground leading-relaxed space-y-1">
+                <div><code className="font-mono">401 key_expired</code> — <code className="font-mono">expiresAt</code> is in the past.</div>
+                <div><code className="font-mono">403 insufficient_scope</code> — key&apos;s scopes array is non-empty and doesn&apos;t include the route&apos;s required scope.</div>
+                <div><code className="font-mono">403 collection_not_allowed</code> — key has a non-empty collection allowlist and the request hits a different collection.</div>
+                <div><code className="font-mono">403 table_not_allowed</code> — key has a non-empty table allowlist and the request hits a different table.</div>
+                <div><code className="font-mono">429 rate_limited</code> — per-minute count exceeded. <code className="font-mono">Retry-After</code> set.</div>
+                <div><code className="font-mono">429 daily_quota_exceeded</code> — daily MB quota exceeded. <code className="font-mono">Retry-After</code> set (seconds to UTC midnight).</div>
+              </div>
+            </div>
+
+            <CodeBlock lang="bash" code={`# Mint a least-privilege key for a public widget:
+# read+write only, 100 req/min, 50 MB/day writes, expiring end-of-2026.
+curl -X POST ${apiBase}/api/dashboard/api-keys \\
+  -H "Authorization: Bearer ${keyForCode}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"widget","scopes":["read","write"],"rateLimitPerMin":100,"rateLimitMbPerDay":50,"expiresAt":"2026-12-31T23:59:59.000Z"}'
+
+# Tighten an existing key: drop to read-only and scope it to one collection.
+curl -X PATCH ${apiBase}/api/dashboard/api-keys/abc123 \\
+  -H "Authorization: Bearer ${keyForCode}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"scopes":["read"],"collectionAllowList":["visits"]}'`} />
+          </Card>
 
           {/* Self-healing note for the API key */}
           <Card className="p-4 bg-card/40 border-border/60">
@@ -1318,6 +1453,38 @@ curl -H "Authorization: Bearer ${keyForCode}" ${apiBase}/v1/tables/tasks/rows`} 
             <EndpointCard method="GET" path="/v1/logs?limit=50&action=…" title="Recent audit log" auth="required" description="Returns the most recent log entries, optionally filtered by action. Each entry: action, key, detail, source, ts." />
           </div>
 
+          {/* API key management endpoints */}
+          <div className="space-y-3">
+            <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">API keys (dashboard)</h4>
+            <Card className="p-4 bg-card/40 border-border/60">
+              <p className="text-[13px] text-muted-foreground leading-relaxed">
+                Mint, list, update, and revoke <code className="font-mono text-primary">kv_live_…</code> keys. Every key
+                carries six optional restriction fields — <code className="font-mono">scopes</code>,{' '}
+                <code className="font-mono">expiresAt</code>, <code className="font-mono">collectionAllowList</code>,{' '}
+                <code className="font-mono">tableAllowList</code>, <code className="font-mono">rateLimitPerMin</code>,{' '}
+                <code className="font-mono">rateLimitMbPerDay</code>. Empty / null = unrestricted (the default, and the
+                behavior of every key minted before this feature shipped). See the{' '}
+                <strong>Keys &amp; Tokens</strong> tab for the full restriction reference + authorize() error table.
+              </p>
+            </Card>
+            <EndpointCard method="GET" path="/api/dashboard/api-keys" title="List your API keys" auth="required" description="Returns every key on the account with id, name, createdAt, lastUsedAt, revoked, scopes, expiresAt, collectionAllowList, tableAllowList, rateLimitPerMin, rateLimitMbPerDay. The full key string is not returned." />
+            <EndpointCard method="POST" path="/api/dashboard/api-keys" title="Mint a new API key" auth="required" description={'Body: { name, scopes?, expiresAt?, collectionAllowList?, tableAllowList?, rateLimitPerMin?, rateLimitMbPerDay? }. Returns { apiKey } with the full key — shown exactly once.'}>
+              <CodeBlock lang="bash" code={`# Least-privilege widget key: read+write, 100 req/min, 50 MB/day, end-of-2026 expiry.
+curl -X POST ${apiBase}/api/dashboard/api-keys \\
+  -H "Authorization: Bearer ${keyForCode}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"widget","scopes":["read","write"],"rateLimitPerMin":100,"rateLimitMbPerDay":50,"expiresAt":"2026-12-31T23:59:59.000Z"}'`} />
+            </EndpointCard>
+            <EndpointCard method="PATCH" path="/api/dashboard/api-keys/:id" title="Update an API key's restrictions" auth="required" description={'Body: any subset of { scopes, expiresAt, collectionAllowList, tableAllowList, rateLimitPerMin, rateLimitMbPerDay }. Omitted fields are left unchanged; pass null to clear a field. Returns the updated { apiKey }.'}>
+              <CodeBlock lang="bash" code={`# Tighten an existing key: drop to read-only and scope to one collection.
+curl -X PATCH ${apiBase}/api/dashboard/api-keys/abc123 \\
+  -H "Authorization: Bearer ${keyForCode}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"scopes":["read"],"collectionAllowList":["visits"]}'`} />
+            </EndpointCard>
+            <EndpointCard method="DELETE" path="/api/dashboard/api-keys/:id" title="Revoke an API key" auth="required" description="Instant kill switch. The key stops authenticating on the very next request. The full plaintext is never recoverable; create a new key to replace it." />
+          </div>
+
           {/* Advanced endpoints under /api/v1/* */}
           <div className="space-y-3">
             <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">
@@ -1408,7 +1575,13 @@ onyx tables insert tasks --data '{"title":"Buy milk","done":false}'
 onyx tables update tasks --pk '{"id":1}' --data '{"done":true}'
 onyx tables delete tasks --pk '{"id":1}' --yes
 onyx tables drop tasks --yes                         # drop the whole table
-onyx tables mode tasks r                             # change access mode (r=read, w=write, rw=readwrite)`} />
+onyx tables mode tasks r                             # change access mode (r=read, w=write, rw=readwrite)
+
+# API keys (per-key scopes / expiry / allowlists / rate limits)
+onyx api-keys                                                # list (with SCOPES / LIMITS / EXPIRES columns)
+onyx api-keys create prod --scopes read,write --rate-limit-per-min 100 --expires-at 2026-12-31
+onyx api-keys update <id> --scopes read --collections visits,logs
+onyx api-keys revoke <id>                                     # revoke instantly`} />
 
           <Card className="p-4 bg-card/40 border-border/60">
             <div className="flex items-center gap-2.5 mb-2">

@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, coerceValue, fail, ok } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, coerceValue, fail, ok } from '@/lib/auth'
 import { setKey } from '@/lib/kv'
 
 export const runtime = 'nodejs'
@@ -31,6 +31,13 @@ export async function POST(req: NextRequest) {
   if (body.value === undefined) {
     return fail('`value` is required.', 400)
   }
+
+  const z = authorize(user, req, {
+    scope: 'write',
+    collection,
+    bytesWritten: Buffer.byteLength(JSON.stringify(body.value)),
+  })
+  if (!z.ok) return authorizeFailResponse(z)
 
   // If value already came typed (JSON), keep it; else coerce from string.
   const isRawString = typeof body.value === 'string'

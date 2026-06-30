@@ -56,6 +56,40 @@ export interface UserRecord {
   updatedAt: string
 }
 
+/**
+ * Fine-grained scopes an API key can carry.
+ *
+ * - `read`        → GET /v1/get, /v1/list, /v1/stats, /v1/logs, /v1/health, /v1/whoami
+ * - `write`       → POST /v1/set + any create/update mutation on records
+ * - `delete`      → DELETE /v1/delete, record deletion
+ * - `files`       → /v1/files/* (upload, list, download, delete, link, revoke)
+ * - `tables`      → /v1/tables/* (schema + row CRUD)
+ * - `collections` → /v1/collections/* (list/create/delete)
+ * - `export`      → /v1/export
+ *
+ * An EMPTY scopes array = full access (backward compatibility for keys
+ * minted before scopes existed). This keeps every existing key working
+ * unchanged after the v3 manifest upgrade.
+ */
+export type ApiKeyScope =
+  | 'read'
+  | 'write'
+  | 'delete'
+  | 'files'
+  | 'tables'
+  | 'collections'
+  | 'export'
+
+export const ALL_API_KEY_SCOPES: ApiKeyScope[] = [
+  'read',
+  'write',
+  'delete',
+  'files',
+  'tables',
+  'collections',
+  'export',
+]
+
 export interface ApiKeyRecord {
   id: string
   key: string
@@ -64,6 +98,28 @@ export interface ApiKeyRecord {
   createdAt: string
   lastUsedAt: string | null
   revoked: boolean
+  /** v3: scopes granted to this key. Empty = full access (backward compat). */
+  scopes: ApiKeyScope[]
+  /** v3: ISO timestamp; null = never expires. */
+  expiresAt: string | null
+  /** v3: when non-empty, only these collections are accessible. Empty = all. */
+  collectionAllowList: string[]
+  /** v3: when non-empty, only these tables are accessible. Empty = all. */
+  tableAllowList: string[]
+  /** v3: max requests per minute. null/0 = unlimited. */
+  rateLimitPerMin: number | null
+  /** v3: max megabytes written per UTC day. null/0 = unlimited. */
+  rateLimitMbPerDay: number | null
+}
+
+/** Options accepted by createApiKey / updateApiKey. */
+export interface ApiKeyOpts {
+  scopes?: ApiKeyScope[]
+  expiresAt?: string | null
+  collectionAllowList?: string[]
+  tableAllowList?: string[]
+  rateLimitPerMin?: number | null
+  rateLimitMbPerDay?: number | null
 }
 
 export interface RecordEntry {
@@ -353,7 +409,18 @@ function ensureShape(loaded: Partial<StoreShape>): StoreShape {
   }))
   return {
     users,
-    apiKeys: loaded.apiKeys ?? [],
+    // v3 migration: backfill scopes / expiresAt / allowlists / rate limits on
+    // any key persisted before these fields existed. Missing scopes = [] which
+    // means full access (backward compatible — old keys keep working unchanged).
+    apiKeys: (loaded.apiKeys ?? []).map((k) => ({
+      ...k,
+      scopes: Array.isArray(k.scopes) ? k.scopes : [],
+      expiresAt: k.expiresAt ?? null,
+      collectionAllowList: Array.isArray(k.collectionAllowList) ? k.collectionAllowList : [],
+      tableAllowList: Array.isArray(k.tableAllowList) ? k.tableAllowList : [],
+      rateLimitPerMin: k.rateLimitPerMin ?? null,
+      rateLimitMbPerDay: k.rateLimitMbPerDay ?? null,
+    })),
     records: loaded.records ?? [],
     logs: loaded.logs ?? [],
     telegramConfigs: (loaded.telegramConfigs ?? []).map((c) => ({
@@ -496,6 +563,12 @@ export function createUser(opts: {
     createdAt: now,
     lastUsedAt: null,
     revoked: false,
+    scopes: [],
+    expiresAt: null,
+    collectionAllowList: [],
+    tableAllowList: [],
+    rateLimitPerMin: null,
+    rateLimitMbPerDay: null,
   }
   store.users.push(user)
   store.apiKeys.push(apiKey)
@@ -577,6 +650,15 @@ export function findUserByApiKey(key: string): {
   return { user, apiKey }
 }
 
+/**
+ * Resolve a raw API key string to its full ApiKeyRecord (without touching
+ * lastUsedAt and without resolving the user). Used by authorize() to inspect
+ * scopes / expiry / allowlists / rate limits on every protected request.
+ */
+export function findApiKeyRecord(key: string): ApiKeyRecord | null {
+  return store.apiKeys.find((k) => k.key === key && !k.revoked) ?? null
+}
+
 // ─── ApiKey operations ───────────────────────────────────────────────────────
 
 export function listApiKeys(dbUserId: string): ApiKeyRecord[] {
@@ -585,9 +667,14 @@ export function listApiKeys(dbUserId: string): ApiKeyRecord[] {
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
 }
 
+/**
+ * Mint a new API key. Opts.scopes empty/omitted = full access (backward
+ * compatible). All other opts default to "no restriction".
+ */
 export function createApiKey(
   dbUserId: string,
   name: string,
+  opts: ApiKeyOpts = {},
 ): ApiKeyRecord {
   const now = new Date().toISOString()
   const apiKey: ApiKeyRecord = {
@@ -598,8 +685,44 @@ export function createApiKey(
     createdAt: now,
     lastUsedAt: null,
     revoked: false,
+    scopes: normaliseScopes(opts.scopes),
+    expiresAt: normaliseExpiry(opts.expiresAt),
+    collectionAllowList: normaliseAllowList(opts.collectionAllowList),
+    tableAllowList: normaliseAllowList(opts.tableAllowList),
+    rateLimitPerMin: normalisePositiveInt(opts.rateLimitPerMin),
+    rateLimitMbPerDay: normalisePositiveInt(opts.rateLimitMbPerDay),
   }
   store.apiKeys.push(apiKey)
+  saveToDisk()
+  void syncIdentityToTelegram()
+  void syncUserIdentityToTelegram(dbUserId)
+  return apiKey
+}
+
+/**
+ * Update an existing API key's restrictions. Only the fields supplied in opts
+ * are changed; omitted fields keep their current value. Pass `null`
+ * explicitly to clear a field (e.g. expiresAt: null → never expire).
+ */
+export function updateApiKey(
+  dbUserId: string,
+  keyId: string,
+  opts: Partial<ApiKeyOpts>,
+): ApiKeyRecord | null {
+  const apiKey = store.apiKeys.find(
+    (k) => k.id === keyId && k.userId === dbUserId,
+  )
+  if (!apiKey) return null
+  if (opts.scopes !== undefined) apiKey.scopes = normaliseScopes(opts.scopes)
+  if (opts.expiresAt !== undefined) apiKey.expiresAt = normaliseExpiry(opts.expiresAt)
+  if (opts.collectionAllowList !== undefined)
+    apiKey.collectionAllowList = normaliseAllowList(opts.collectionAllowList)
+  if (opts.tableAllowList !== undefined)
+    apiKey.tableAllowList = normaliseAllowList(opts.tableAllowList)
+  if (opts.rateLimitPerMin !== undefined)
+    apiKey.rateLimitPerMin = normalisePositiveInt(opts.rateLimitPerMin)
+  if (opts.rateLimitMbPerDay !== undefined)
+    apiKey.rateLimitMbPerDay = normalisePositiveInt(opts.rateLimitMbPerDay)
   saveToDisk()
   void syncIdentityToTelegram()
   void syncUserIdentityToTelegram(dbUserId)
@@ -621,6 +744,49 @@ export function revokeApiKey(
   return apiKey
 }
 
+// ─── ApiKey option normalisers ───────────────────────────────────────────────
+
+function normaliseScopes(scopes: ApiKeyScope[] | undefined): ApiKeyScope[] {
+  if (!Array.isArray(scopes)) return []
+  const seen = new Set<ApiKeyScope>()
+  const out: ApiKeyScope[] = []
+  for (const s of scopes) {
+    if (ALL_API_KEY_SCOPES.includes(s) && !seen.has(s)) {
+      seen.add(s)
+      out.push(s)
+    }
+  }
+  return out
+}
+
+function normaliseExpiry(expiresAt: string | null | undefined): string | null {
+  if (!expiresAt) return null
+  const t = Date.parse(expiresAt)
+  if (Number.isNaN(t)) return null
+  return new Date(t).toISOString()
+}
+
+function normaliseAllowList(list: string[] | undefined): string[] {
+  if (!Array.isArray(list)) return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const item of list) {
+    const s = String(item ?? '').trim()
+    if (s && !seen.has(s)) {
+      seen.add(s)
+      out.push(s)
+    }
+  }
+  return out
+}
+
+function normalisePositiveInt(n: number | null | undefined): number | null {
+  if (n === null || n === undefined) return null
+  const i = Math.floor(Number(n))
+  if (!Number.isFinite(i) || i <= 0) return null
+  return i
+}
+
 // ─── Identity manifest (Telegram-backed recovery) ────────────────────────────
 //
 // Every identity mutation (createUser / createApiKey / revokeApiKey) mirrors
@@ -630,7 +796,7 @@ export function revokeApiKey(
 
 interface IdentityManifest {
   cloudkv: true
-  version: 2
+  version: 3
   exportedAt: string
   users: UserRecord[]
   apiKeys: ApiKeyRecord[]
@@ -647,6 +813,10 @@ interface IdentityManifest {
 /**
  * Build the FULL-state manifest (every array in the store) as JSON.
  *
+ * v3: ApiKeyRecord now carries scopes / expiresAt / collectionAllowList /
+ * tableAllowList / rateLimitPerMin / rateLimitMbPerDay. Old v2 manifests
+ * restore fine — missing fields are defaulted in restoreIdentityFromBackup.
+ *
  * v2: the manifest now carries records, logs, files, shareTokens,
  * collectionNames, telegramConfigs, and adminKeys — not just users + apiKeys.
  * This is the durability layer that makes Onyx Base work on serverless:
@@ -657,7 +827,7 @@ interface IdentityManifest {
 export function buildIdentityManifest(): string {
   const manifest: IdentityManifest = {
     cloudkv: true,
-    version: 2,
+    version: 3,
     exportedAt: new Date().toISOString(),
     users: store.users,
     apiKeys: store.apiKeys,
@@ -910,7 +1080,23 @@ export function restoreIdentityFromBackup(rawJson: string): {
   for (const k of parsed.apiKeys) {
     if (!k.id || !k.key || !k.userId) continue
     const exists = store.apiKeys.some((x) => x.id === k.id || x.key === k.key)
-    if (exists) continue
+    if (exists) {
+      // v2→v3 migration: backfill new fields on a pre-existing local key that
+      // was restored from an older manifest and is still missing them.
+      const local = store.apiKeys.find((x) => x.id === k.id || x.key === k.key)
+      if (local) {
+        if (!Array.isArray(local.scopes)) local.scopes = Array.isArray(k.scopes) ? k.scopes : []
+        if (local.expiresAt === undefined) local.expiresAt = k.expiresAt ?? null
+        if (!Array.isArray(local.collectionAllowList))
+          local.collectionAllowList = Array.isArray(k.collectionAllowList) ? k.collectionAllowList : []
+        if (!Array.isArray(local.tableAllowList))
+          local.tableAllowList = Array.isArray(k.tableAllowList) ? k.tableAllowList : []
+        if (local.rateLimitPerMin === undefined) local.rateLimitPerMin = k.rateLimitPerMin ?? null
+        if (local.rateLimitMbPerDay === undefined) local.rateLimitMbPerDay = k.rateLimitMbPerDay ?? null
+      }
+      continue
+    }
+    // v3 restored key (with v2 manifest fields defaulted for safety).
     store.apiKeys.push({
       id: k.id,
       key: k.key,
@@ -919,6 +1105,12 @@ export function restoreIdentityFromBackup(rawJson: string): {
       createdAt: k.createdAt ?? new Date().toISOString(),
       lastUsedAt: k.lastUsedAt ?? null,
       revoked: k.revoked ?? false,
+      scopes: Array.isArray(k.scopes) ? k.scopes.filter((s) => ALL_API_KEY_SCOPES.includes(s)) : [],
+      expiresAt: k.expiresAt ?? null,
+      collectionAllowList: Array.isArray(k.collectionAllowList) ? k.collectionAllowList : [],
+      tableAllowList: Array.isArray(k.tableAllowList) ? k.tableAllowList : [],
+      rateLimitPerMin: k.rateLimitPerMin ?? null,
+      rateLimitMbPerDay: k.rateLimitMbPerDay ?? null,
     })
     keysRestored++
   }

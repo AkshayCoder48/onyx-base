@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, fail, ok } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, fail, ok } from '@/lib/auth'
 import { exportData, logAction } from '@/lib/kv'
 import { sendEventMessage } from '@/lib/telegram'
 
@@ -17,6 +17,10 @@ export async function GET(req: NextRequest) {
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const collection = req.nextUrl.searchParams.get('collection') || undefined
+
+  const z = authorize(user, req, { scope: 'export', ...(collection ? { collection } : {}) })
+  if (!z.ok) return authorizeFailResponse(z)
+
   const data = await exportData(user, collection)
   await logAction(user, 'export', undefined, collection ? `collection=${collection}` : 'all', 'api')
   void sendEventMessage({

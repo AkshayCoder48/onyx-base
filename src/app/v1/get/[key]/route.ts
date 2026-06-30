@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, fail, ok } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, fail, ok } from '@/lib/auth'
 import { getKey } from '@/lib/kv'
 
 export const runtime = 'nodejs'
@@ -18,6 +18,10 @@ export async function GET(
 
   const { key } = await params
   const collection = req.nextUrl.searchParams.get('collection') || 'default'
+
+  const z = authorize(user, req, { scope: 'read', collection })
+  if (!z.ok) return authorizeFailResponse(z)
+
   const record = await getKey(user, key, collection)
   if (!record) {
     return fail(`Key "${key}" not found in collection "${collection}".`, 404)

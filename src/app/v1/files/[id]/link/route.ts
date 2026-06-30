@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail, getPublicOrigin } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail, getPublicOrigin } from '@/lib/auth'
 import { findFileById, resolveFileBotToken } from '@/lib/data-store'
 import {
   getCachedTelegramDirectUrl,
@@ -22,6 +22,9 @@ export const runtime = 'nodejs'
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const user = await authenticate(req.headers.get('authorization'))
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(user, req, { scope: 'files' })
+  if (!z.ok) return authorizeFailResponse(z)
 
   const { id } = await params
   const file = findFileById(user.dbUserId, id)

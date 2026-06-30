@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import { countRecords, countCollections } from '@/lib/data-store'
 import { pingTelegram } from '@/lib/telegram'
 
@@ -14,6 +14,9 @@ export const runtime = 'nodejs'
 export async function GET(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(user, req, { scope: 'read' })
+  if (!z.ok) return authorizeFailResponse(z)
 
   const [recordCount, collectionCount, telegram] = await Promise.all([
     Promise.resolve(countRecords(user.dbUserId)),

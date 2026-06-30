@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail, getPublicOrigin } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail, getPublicOrigin } from '@/lib/auth'
 import {
   findFileById,
   deleteFileRecord,
@@ -14,6 +14,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   const user = await authenticate(req.headers.get('authorization'))
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
+  const z = authorize(user, req, { scope: 'files' })
+  if (!z.ok) return authorizeFailResponse(z)
+
   const { id } = await params
   const file = findFileById(user.dbUserId, id)
   if (!file) return fail('File not found.', 404)
@@ -25,6 +28,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const user = await authenticate(req.headers.get('authorization'))
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(user, req, { scope: 'files' })
+  if (!z.ok) return authorizeFailResponse(z)
 
   const { id } = await params
   const removed = deleteFileRecord(user.dbUserId, id)

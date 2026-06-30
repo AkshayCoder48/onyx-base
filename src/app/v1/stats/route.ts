@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import { getStats } from '@/lib/data-store'
 
 export const runtime = 'nodejs'
@@ -15,6 +15,9 @@ export const runtime = 'nodejs'
 export async function GET(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(user, req, { scope: 'read' })
+  if (!z.ok) return authorizeFailResponse(z)
 
   return ok({ user: user.userId, stats: getStats(user.dbUserId) })
 }

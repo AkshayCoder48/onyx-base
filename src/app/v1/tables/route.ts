@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import {
   listUserTables,
   createUserTable,
@@ -24,6 +24,9 @@ export const runtime = 'nodejs'
 export async function GET(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(user, req, { scope: 'tables' })
+  if (!z.ok) return authorizeFailResponse(z)
 
   try {
     const tables = await listUserTables(user.dbUserId)
@@ -54,6 +57,13 @@ export async function POST(req: NextRequest) {
     const name = validateTableName(body.name)
     const columns = validateColumns(body.columns) as ColumnDef[]
     const accessMode = validateAccessMode(body.accessMode)
+
+    const z = authorize(user, req, {
+      scope: 'tables',
+      table: name,
+      bytesWritten: Buffer.byteLength(JSON.stringify(body)),
+    })
+    if (!z.ok) return authorizeFailResponse(z)
 
     const meta = await createUserTable(user.dbUserId, name, columns, accessMode)
     return ok({ table: meta, message: 'Table created' })

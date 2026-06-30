@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail, getPublicOrigin } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, ok, fail, getPublicOrigin } from '@/lib/auth'
 import {
   listFileRecords,
   uploadFile,
@@ -23,6 +23,9 @@ export const maxDuration = 300
 export async function GET(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+
+  const z = authorize(user, req, { scope: 'files' })
+  if (!z.ok) return authorizeFailResponse(z)
 
   const files = listFileRecords(user.dbUserId).map((f) => fileView(f, getPublicOrigin(req)))
   const maxFileUploadBytes = effectiveUploadLimitBytes(resolveBotApiBaseUrl(user.dbUserId))
@@ -60,6 +63,9 @@ export async function POST(req: NextRequest) {
   if (!(file instanceof File)) {
     return fail('No `file` field found in the upload.', 400)
   }
+
+  const z = authorize(user, req, { scope: 'files', bytesWritten: file.size })
+  if (!z.ok) return authorizeFailResponse(z)
 
   const label = (form.get('label') as string | null)?.trim() || null
   const publicFlag = form.get('public')

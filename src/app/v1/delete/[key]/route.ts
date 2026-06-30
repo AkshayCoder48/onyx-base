@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, fail, ok } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, fail, ok } from '@/lib/auth'
 import { deleteKey } from '@/lib/kv'
 
 export const runtime = 'nodejs'
@@ -17,6 +17,10 @@ export async function DELETE(
 
   const { key } = await params
   const collection = req.nextUrl.searchParams.get('collection') || 'default'
+
+  const z = authorize(user, req, { scope: 'delete', collection })
+  if (!z.ok) return authorizeFailResponse(z)
+
   const removed = await deleteKey(user, key, collection, 'api')
   if (!removed) {
     return fail(`Key "${key}" not found in collection "${collection}".`, 404)

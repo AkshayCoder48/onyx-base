@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, fail, ok } from '@/lib/auth'
+import { authenticate, authorize, authorizeFailResponse, fail, ok } from '@/lib/auth'
 import { listKeys } from '@/lib/kv'
 
 export const runtime = 'nodejs'
@@ -15,6 +15,10 @@ export async function GET(req: NextRequest) {
   if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const collection = req.nextUrl.searchParams.get('collection') || undefined
+
+  const z = authorize(user, req, { scope: 'read', ...(collection ? { collection } : {}) })
+  if (!z.ok) return authorizeFailResponse(z)
+
   const records = await listKeys(user, collection)
   return ok({ keys: records.map((r) => r.key), count: records.length })
 }
