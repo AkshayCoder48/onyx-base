@@ -582,6 +582,284 @@ export async function sendAndPinFullState(
   }
 }
 
+// ─── V4: Per-account manifests ───────────────────────────────────────────────
+//
+// Problem with V3 (sendAndPinFullState): ONE pinned document holds ALL users'
+// data. As any single user grows, the whole blob grows, and every write
+// re-uploads the entire world's data. A single power user could push the file
+// toward the 50 MB cloud limit and break the platform for everyone.
+//
+// V4 splits storage by account:
+//
+//   1. A tiny PINNED INDEX message (text, <4 KB, always fits) carries a
+//      `userId → { messageId, fileId, recordCount, bytes, updatedAt }` map.
+//      This is the only pinned message — cheap to fetch + re-pin.
+//
+//   2. One NON-PINNED document message per account, captioned
+//      `CLOUDKV_ACCOUNT_MANIFEST_V4\nuserId=usr_xxx`. Each carries ONLY that
+//      user's records / logs / files / shareTokens / collectionNames /
+//      telegramConfigs. Each grows independently — one user hitting 40 MB
+//      doesn't affect anyone else.
+//
+//   3. System data (adminKeys, the admin user itself) lives in a special
+//      account manifest with userId='__system__'.
+//
+// Telegram only allows ONE pinned message per chat, so per-account manifests
+// are regular messages whose message_ids are tracked by the pinned index.
+//
+// Backward compatibility: the old V3 full-state pin is left IN PLACE during
+// migration (never deleted) — it serves as a fallback + backup. The V4 index
+// is pinned on top of it (Telegram auto-unpins the old one), but the old
+// message stays in the chat history and `fetchPinnedManifest` (V3 path) is
+// kept working as a fallback if the V4 index is ever lost.
+
+/** Marker for the V4 pinned account index. */
+const ACCOUNT_INDEX_MARKER = 'CLOUDKV_ACCOUNT_INDEX_V4'
+
+/** Marker prefix for per-account manifest documents (caption). */
+const ACCOUNT_MANIFEST_MARKER = 'CLOUDKV_ACCOUNT_MANIFEST_V4'
+
+/** Special userId for system-wide data (adminKeys, admin user). */
+export const SYSTEM_ACCOUNT_ID = '__system__'
+
+/** One entry in the pinned V4 account index. */
+export interface AccountIndexEntry {
+  /** Public userId (e.g. `usr_abc123`) or `__system__`. */
+  userId: string
+  /** Telegram message_id of the account's manifest document. */
+  messageId: number
+  /** Telegram file_id of the manifest document (for re-download). */
+  fileId: string
+  /** Approximate byte size of the manifest document. */
+  bytes: number
+  /** Number of records in this account's manifest (for admin display). */
+  recordCount: number
+  /** ISO timestamp of the last sync. */
+  updatedAt: string
+}
+
+/** Shape of the pinned V4 index message body. */
+export interface AccountIndex {
+  cloudkv: true
+  kind: 'account-index'
+  version: 4
+  exportedAt: string
+  /** `userId → entry`. */
+  accounts: Record<string, AccountIndexEntry>
+}
+
+/** Shape of a single account's manifest document. */
+export interface AccountManifest {
+  cloudkv: true
+  kind: 'account-manifest'
+  version: 4
+  /** Which account this manifest belongs to (`usr_xxx` or `__system__`). */
+  userId: string
+  exportedAt: string
+  user: unknown | null
+  apiKeys: unknown[]
+  records: unknown[]
+  logs: unknown[]
+  files: unknown[]
+  shareTokens: unknown[]
+  collectionNames: unknown[]
+  telegramConfigs: unknown[]
+  /** Present only on the __system__ manifest. */
+  adminKeys?: unknown[]
+}
+
+/**
+ * Fetch + parse the pinned V4 account index. Returns null if Telegram is not
+ * configured, the pin is missing, or the pin is not ours (e.g. still a V3
+ * full-state manifest — caller should fall back to fetchPinnedManifest).
+ */
+export async function fetchAccountIndex(
+  chatIdOverride?: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<AccountIndex | null> {
+  const chatId = chatIdOverride ?? ENV_CHAT_ID
+  if (!isTelegramConfigured(chatId, botTokenOverride)) return null
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
+  try {
+    const chatRes = await fetchWithTimeout(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)
+    const chat = (await chatRes.json()) as GetChatResult
+    if (!chat.ok || !chat.result) return null
+    const pinned = chat.result.pinned_message
+    if (!pinned) return null
+    // The index is a TEXT message (small). If the pin is a document, it's a
+    // V3 full-state manifest — not ours.
+    const text = pinned.text ?? null
+    if (!text || !text.startsWith(ACCOUNT_INDEX_MARKER)) return null
+    const json = text.slice(ACCOUNT_INDEX_MARKER.length).trim()
+    const parsed = JSON.parse(json) as AccountIndex
+    if (parsed.cloudkv !== true || parsed.kind !== 'account-index' || parsed.version !== 4) return null
+    return parsed
+  } catch (err) {
+    console.error('[telegram] fetchAccountIndex error:', err)
+    return null
+  }
+}
+
+/**
+ * Write (or overwrite) the pinned V4 account index. Replaces whatever is
+ * currently pinned (including a V3 full-state document — that message stays in
+ * the chat history but is no longer pinned). Returns the new pinned message_id
+ * or null on failure.
+ */
+export async function pinAccountIndex(
+  index: AccountIndex,
+  chatIdOverride?: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<number | null> {
+  const chatId = chatIdOverride ?? ENV_CHAT_ID
+  if (!isTelegramConfigured(chatId, botTokenOverride)) return null
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
+  const text = `${ACCOUNT_INDEX_MARKER}\n${JSON.stringify(index)}`
+  try {
+    const chatRes = await fetchWithTimeout(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)
+    const chat = (await chatRes.json()) as GetChatResult
+    const pinned = chat.result?.pinned_message
+    const pinnedText = pinned?.text ?? null
+    const pinnedIsOurIndex = !!pinned && !!pinnedText && pinnedText.startsWith(ACCOUNT_INDEX_MARKER)
+    if (pinnedIsOurIndex && pinned) {
+      const editRes = await fetchWithTimeout(`${apiBase}/editMessageText`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: pinned.message_id,
+          text,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        }),
+      })
+      const editData = (await editRes.json()) as { ok: boolean }
+      if (editData.ok) return pinned.message_id
+    }
+    const sendRes = await fetchWithTimeout(`${apiBase}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+    })
+    const sendData = (await sendRes.json()) as { ok: boolean; description?: string; result?: { message_id: number } }
+    if (!sendData.ok || !sendData.result) {
+      console.error('[telegram] pinAccountIndex sendMessage failed:', sendData.description)
+      return null
+    }
+    const newMessageId = sendData.result.message_id
+    const pinRes = await fetchWithTimeout(`${apiBase}/pinChatMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: newMessageId, disable_notification: true }),
+    })
+    const pinData = (await pinRes.json()) as { ok: boolean; description?: string }
+    if (!pinData.ok) console.warn('[telegram] pinAccountIndex pinChatMessage failed:', pinData.description)
+    return newMessageId
+  } catch (err) {
+    console.error('[telegram] pinAccountIndex error:', err)
+    return null
+  }
+}
+
+/**
+ * Send (or replace) a single account's manifest document. Returns the new
+ * message_id + file_id, or null on failure. Does NOT touch the pinned index —
+ * the caller must update the index afterwards via pinAccountIndex.
+ *
+ * If `replaceMessageId` is supplied, that old message is deleted first
+ * (Telegram has no editMessageDocument for arbitrary files). The new message is
+ * NOT pinned (only the index is pinned in V4).
+ */
+export async function sendAccountManifest(
+  manifest: AccountManifest,
+  replaceMessageId?: number,
+  chatIdOverride?: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<{ messageId: number; fileId: string; bytes: number } | null> {
+  const chatId = chatIdOverride ?? ENV_CHAT_ID
+  if (!isTelegramConfigured(chatId, botTokenOverride)) return null
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
+  const json = JSON.stringify(manifest)
+  const bytes = Buffer.byteLength(json, 'utf-8')
+  const caption = `${ACCOUNT_MANIFEST_MARKER}\nuserId=${manifest.userId}`
+  try {
+    // Delete the previous version of this account's manifest (if any).
+    if (replaceMessageId) {
+      try {
+        await fetchWithTimeout(`${apiBase}/deleteMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: chatId, message_id: replaceMessageId }),
+        })
+      } catch {
+        /* swallow — stale message will be orphaned, not fatal */
+      }
+    }
+    const blob = new Blob([Buffer.from(json, 'utf-8')], { type: 'application/json' })
+    const fileName = `onyxbase-account-${manifest.userId}.json`
+    const form = new FormData()
+    form.append('chat_id', chatId)
+    form.append('document', blob, fileName)
+    form.append('caption', caption.slice(0, 1024))
+    form.append('disable_notification', 'true')
+    const sendRes = await fetch(`${apiBase}/sendDocument`, { method: 'POST', body: form })
+    const sendData = (await sendRes.json()) as {
+      ok: boolean
+      description?: string
+      result?: { message_id: number; document?: { file_id: string } }
+    }
+    if (!sendData.ok || !sendData.result || !sendData.result.document) {
+      console.error('[telegram] sendAccountManifest sendDocument failed:', sendData.description)
+      return null
+    }
+    return {
+      messageId: sendData.result.message_id,
+      fileId: sendData.result.document.file_id,
+      bytes,
+    }
+  } catch (err) {
+    console.error('[telegram] sendAccountManifest error:', err)
+    return null
+  }
+}
+
+/**
+ * Fetch + parse a single account's manifest document by its message_id +
+ * file_id (both tracked in the pinned index). Returns null if the message is
+ * gone or the download fails.
+ */
+export async function fetchAccountManifest(
+  fileId: string,
+  chatIdOverride?: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<AccountManifest | null> {
+  const chatId = chatIdOverride ?? ENV_CHAT_ID
+  if (!isTelegramConfigured(chatId, botTokenOverride)) return null
+  try {
+    const dl = await getFileDownloadUrl(fileId, botTokenOverride, botApiBaseUrlOverride)
+    if (!dl) {
+      console.error('[telegram] fetchAccountManifest: getFile failed for', fileId)
+      return null
+    }
+    const fileRes = await fetchWithTimeout(dl.url)
+    if (!fileRes.ok) {
+      console.error('[telegram] fetchAccountManifest: download failed', fileRes.status)
+      return null
+    }
+    const text = await fileRes.text()
+    const parsed = JSON.parse(text) as AccountManifest
+    if (parsed.cloudkv !== true || parsed.kind !== 'account-manifest' || parsed.version !== 4) return null
+    return parsed
+  } catch (err) {
+    console.error('[telegram] fetchAccountManifest error:', err)
+    return null
+  }
+}
+
 /**
  * Health check used by the dashboard status panel. Calls getChat to verify the
  * bot can actually reach the configured chat (without sending a message) and

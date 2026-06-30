@@ -16,6 +16,8 @@ import { NextRequest } from 'next/server'
 import {
   findUserByApiKey,
   rehydrateFromTelegram,
+  rehydrateAccountFromTelegram,
+  getAccountIndex,
   findAdminKey,
   isAdminKey,
   getOrCreateAdminUser,
@@ -307,20 +309,46 @@ export async function authenticate(
     }
   }
 
-  // Slow path: the key isn't in the local store. Try to fetch the identity
-  // manifest from the Telegram pinned message and rehydrate, then retry.
-  // This handles the "sandbox reset wiped db/cloudkv.json" case.
+  // Slow path: the key isn't in the local store. Try to fetch the account
+  // manifests from Telegram and rehydrate, then retry.
+  //
+  // V4 strategy (preferred): fetch the tiny pinned account index, then fetch
+  // each account's manifest in turn until the key is found. This avoids
+  // downloading the entire world's data when only one account is needed —
+  // critical as the platform grows.
+  //
+  // V3 fallback: if no V4 index is pinned (e.g. migration hasn't run yet),
+  // fall back to the legacy full-state rehydrate (one big document).
   try {
-    const rehydrated = await rehydrateFromTelegram()
-    if (rehydrated.attempted && (rehydrated.usersRestored || rehydrated.keysRestored)) {
-      result = findUserByApiKey(token)
-      if (result) {
-        return {
-          userId: result.user.userId,
-          dbUserId: result.user.id,
-          apiKeyId: result.apiKey.id,
-          apiKeyName: result.apiKey.name,
-          isAdmin: false,
+    const idx = await getAccountIndex()
+    if (idx) {
+      // V4: iterate accounts, fetch each manifest, retry the key lookup after each.
+      for (const entry of Object.values(idx.accounts)) {
+        await rehydrateAccountFromTelegram(entry.userId)
+        result = findUserByApiKey(token)
+        if (result) {
+          return {
+            userId: result.user.userId,
+            dbUserId: result.user.id,
+            apiKeyId: result.apiKey.id,
+            apiKeyName: result.apiKey.name,
+            isAdmin: false,
+          }
+        }
+      }
+    } else {
+      // V3 fallback: pull the whole-world document.
+      const rehydrated = await rehydrateFromTelegram()
+      if (rehydrated.attempted && (rehydrated.usersRestored || rehydrated.keysRestored)) {
+        result = findUserByApiKey(token)
+        if (result) {
+          return {
+            userId: result.user.userId,
+            dbUserId: result.user.id,
+            apiKeyId: result.apiKey.id,
+            apiKeyName: result.apiKey.name,
+            isAdmin: false,
+          }
         }
       }
     }

@@ -31,10 +31,12 @@ import {
   File as FileIcon,
   AlertCircle,
   Info,
+  HardDrive,
+  ArrowUpCircle,
 } from 'lucide-react'
 import { useApi } from '@/lib/api'
 import { useOnyxBase } from '@/lib/store'
-import { Card } from '@/components/ui/card'
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -74,6 +76,7 @@ import {
 import { TypeBadge, formatBytes, timeAgo, maskKey } from '@/components/dashboard/shared'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
+import { Skeleton } from '@/components/ui/skeleton'
 
 /* ===================================================================
  *  Types — these mirror the admin API response shapes (Task 13).
@@ -170,7 +173,7 @@ interface AdminKeyView {
   revoked: boolean
 }
 
-type AdminTab = 'users' | 'files' | 'admins'
+type AdminTab = 'users' | 'files' | 'admins' | 'storage'
 
 /* ===================================================================
  *  Telegram link cache (localStorage, 55-min TTL).
@@ -376,6 +379,15 @@ export function AdminDashboard() {
                 icon={ShieldCheck}
                 label="Admins"
               />
+              <TabButton
+                active={activeTab === 'storage'}
+                onClick={() => {
+                  setSelectedUserId(null)
+                  setActiveTab('storage')
+                }}
+                icon={HardDrive}
+                label="Storage"
+              />
             </nav>
           </div>
         </div>
@@ -392,6 +404,7 @@ export function AdminDashboard() {
           )}
           {activeTab === 'files' && <AllFilesView />}
           {activeTab === 'admins' && <AdminsView />}
+          {activeTab === 'storage' && <StorageTab />}
         </div>
       </main>
 
@@ -1712,6 +1725,258 @@ function AdminsView() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </div>
+  )
+}
+
+/* ===================================================================
+ *  Storage tab — per-account V4 manifest status.
+ * =================================================================== */
+
+interface ManifestAccount {
+  userId: string
+  isSystem: boolean
+  name: string | null
+  email: string | null
+  messageId: number
+  bytes: number
+  recordCount: number
+  updatedAt: string
+}
+
+interface ManifestsResponse {
+  ok: boolean
+  v4Mode: boolean
+  storageMode: string
+  totalAccounts: number
+  totalBytes: number
+  accounts: ManifestAccount[]
+}
+
+interface MigrateResponse {
+  ok: boolean
+  result: { migrated: boolean; accounts: number; error?: string }
+}
+
+/** Format bytes as KB if <1 MB, otherwise MB — single-decimal precision. */
+function formatManifestBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
+function StorageTab() {
+  const api = useApi()
+  const qc = useQueryClient()
+  const [migrating, setMigrating] = useState(false)
+
+  const { data, isLoading, isFetching, refetch } = useQuery({
+    queryKey: ['admin', 'manifests'],
+    queryFn: () => api<ManifestsResponse>('/api/admin/manifests'),
+  })
+
+  const v4Mode = data?.v4Mode ?? false
+  const accounts = data?.accounts ?? []
+
+  async function migrateToV4() {
+    setMigrating(true)
+    try {
+      const res = await api<MigrateResponse>('/api/admin/manifests', { method: 'POST' })
+      if (res.ok && res.result.migrated) {
+        toast.success(
+          `Migration complete — ${res.result.accounts} account manifest(s) uploaded.`,
+        )
+      } else if (res.ok && !res.result.migrated) {
+        toast.info('No migration needed — already on per-account storage.')
+      } else {
+        toast.error(res.result?.error ?? 'Migration failed.')
+      }
+      qc.invalidateQueries({ queryKey: ['admin', 'manifests'] })
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Migration failed.')
+    } finally {
+      setMigrating(false)
+    }
+  }
+
+  return (
+    <div>
+      <PageHeader
+        title="Storage"
+        description="Per-account V4 manifest status. Each developer account has its own pinned Telegram message holding its data."
+        actions={
+          <Button variant="outline" size="sm" onClick={() => refetch()} title="Refresh">
+            <RefreshCw className={cn('size-4', isFetching && 'animate-spin')} />
+          </Button>
+        }
+      />
+
+      {/* Status header card */}
+      <Card className="bg-card/40 border-border/60 mb-6">
+        <CardHeader className="border-b border-border/40">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-3">
+              <div className="size-10 rounded-md bg-primary/10 border border-primary/20 flex items-center justify-center shrink-0">
+                <HardDrive className="size-5 text-primary" />
+              </div>
+              <div className="space-y-1">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  Storage mode
+                  {v4Mode ? (
+                    <Badge className="bg-emerald-500/15 text-emerald-600 border-emerald-500/30 hover:bg-emerald-500/15 font-mono text-[10px] uppercase tracking-wider">
+                      V4 Per-Account
+                    </Badge>
+                  ) : (
+                    <Badge className="bg-amber-500/15 text-amber-700 border-amber-500/30 hover:bg-amber-500/15 font-mono text-[10px] uppercase tracking-wider">
+                      V3 Full-State
+                    </Badge>
+                  )}
+                </CardTitle>
+                <CardDescription className="text-xs font-mono">
+                  {data?.storageMode ?? '—'} · {data?.totalAccounts ?? 0} account(s) ·{' '}
+                  {data ? formatManifestBytes(data.totalBytes) : '—'}
+                </CardDescription>
+              </div>
+            </div>
+            <div className="shrink-0">
+              {v4Mode ? (
+                <p className="text-[11px] text-muted-foreground italic flex items-center gap-1.5">
+                  <Check className="size-3.5 text-emerald-600" />
+                  Already on per-account storage
+                </p>
+              ) : (
+                <Button
+                  onClick={migrateToV4}
+                  disabled={migrating}
+                  aria-label="Migrate to V4"
+                  className="bg-primary hover:bg-primary/90 text-primary-foreground"
+                >
+                  {migrating ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <ArrowUpCircle className="size-4" />
+                  )}
+                  Migrate to V4
+                </Button>
+              )}
+            </div>
+          </div>
+        </CardHeader>
+      </Card>
+
+      {/* Accounts table */}
+      <Card className="bg-card/40 border-border/60 overflow-hidden">
+        <CardHeader className="border-b border-border/40">
+          <CardTitle className="text-sm">Account manifests</CardTitle>
+          <CardDescription className="text-xs">
+            One pinned Telegram message per account. The system row holds admin keys and global state.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          {isLoading ? (
+            <div className="px-6 py-4 space-y-3">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
+            </div>
+          ) : accounts.length === 0 ? (
+            <div className="py-16 px-6 text-center">
+              <HardDrive className="size-8 mx-auto mb-3 text-muted-foreground/50" />
+              <p className="text-sm font-medium">No accounts yet</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Manifest data will appear here after the first sync.
+              </p>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader className="bg-card/95 backdrop-blur-sm">
+                  <TableRow className="hover:bg-transparent border-border/40">
+                    <TableHead className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground/70">
+                      Account
+                    </TableHead>
+                    <TableHead className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground/70 text-right">
+                      Message ID
+                    </TableHead>
+                    <TableHead className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground/70 text-right">
+                      Records
+                    </TableHead>
+                    <TableHead className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground/70 text-right">
+                      Size
+                    </TableHead>
+                    <TableHead className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground/70 hidden sm:table-cell">
+                      Last Synced
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {accounts.map((a) => (
+                    <TableRow
+                      key={a.userId}
+                      className={cn(
+                        'border-border/30 hover:bg-primary/[0.03]',
+                        a.isSystem && 'bg-muted/30',
+                      )}
+                    >
+                      <TableCell className="py-2.5">
+                        <div className="flex items-start gap-2.5">
+                          <div
+                            className={cn(
+                              'size-8 rounded-md flex items-center justify-center text-[11px] font-mono shrink-0 border',
+                              a.isSystem
+                                ? 'bg-amber-500/10 border-amber-500/20 text-amber-700'
+                                : 'bg-primary/10 border-primary/20 text-primary',
+                            )}
+                          >
+                            {a.isSystem ? <Server className="size-4" /> : (a.name ?? a.userId).slice(0, 2).toUpperCase()}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-medium text-foreground/90 truncate">
+                                {a.isSystem ? 'System' : a.name ?? 'Unnamed'}
+                              </span>
+                              {a.isSystem && (
+                                <Badge
+                                  variant="outline"
+                                  className="bg-amber-500/10 text-amber-700 border-amber-500/30 font-mono text-[10px] uppercase"
+                                >
+                                  System
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="text-[11px] text-muted-foreground truncate max-w-[220px]">
+                              {a.email ?? 'no email'}
+                            </div>
+                            <code className="text-[10px] text-muted-foreground/70 font-mono">
+                              {a.userId}
+                            </code>
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-2.5 text-right font-mono text-sm tabular-nums">
+                        {a.messageId}
+                      </TableCell>
+                      <TableCell className="py-2.5 text-right font-mono text-sm tabular-nums">
+                        {a.recordCount}
+                      </TableCell>
+                      <TableCell className="py-2.5 text-right font-mono text-sm tabular-nums">
+                        {formatManifestBytes(a.bytes)}
+                      </TableCell>
+                      <TableCell className="py-2.5 hidden sm:table-cell text-[11px] text-muted-foreground/70 font-mono">
+                        {timeAgo(a.updatedAt)}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <div className="mt-3 text-xs text-muted-foreground/70 font-mono">
+        {accounts.length} account{accounts.length === 1 ? '' : 's'} ·{' '}
+        {data ? formatManifestBytes(data.totalBytes) : '—'} total
+      </div>
     </div>
   )
 }

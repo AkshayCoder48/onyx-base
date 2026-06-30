@@ -83,3 +83,5 @@ worklog.md
 agent-ctx/
 plan.md
 .env*
+storage-*.png
+*.png.bak

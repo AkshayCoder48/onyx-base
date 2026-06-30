@@ -32,6 +32,15 @@ import {
   LOCAL_BOT_API_LIMIT_BYTES,
   type TelegramPayload,
   type SentDocument,
+  // V4 per-account manifest transport
+  fetchAccountIndex,
+  pinAccountIndex,
+  sendAccountManifest,
+  fetchAccountManifest,
+  SYSTEM_ACCOUNT_ID,
+  type AccountIndex,
+  type AccountIndexEntry,
+  type AccountManifest,
 } from '@/lib/telegram'
 import { hashPassword, verifyPassword } from '@/lib/password'
 
@@ -491,8 +500,15 @@ const store: StoreShape = globalForStore.__cloudkvStore
 seedBootstrapAdminKey()
 
 // Cold-boot rehydration: if Telegram is configured (env bot token + chat id),
-// pull the pinned FULL-STATE manifest and restore everything (users, keys,
-// records, logs, files, …) that's missing from the local cache.
+// pull the pinned manifest and restore everything (users, keys, records, logs,
+// files, …) that's missing from the local cache.
+//
+// V4 flow: on cold boot we FIRST try to migrate V3→V4 (which is a no-op if a
+// V4 index is already pinned). If migration runs, it restores the full state
+// from the V3 document. If we're already in V4 mode, the per-account
+// rehydrateAccountFromTelegram() calls (triggered by auth-on-miss) fetch each
+// account's data on demand. The legacy rehydrateFromTelegram() is kept as a
+// fallback for the case where no V4 index exists AND migration fails.
 //
 // On Vercel (serverless), every cold boot starts with an empty /tmp + empty
 // in-memory store — so we ALWAYS rehydrate there. Locally, we only rehydrate
@@ -502,14 +518,50 @@ seedBootstrapAdminKey()
 //
 // NOTE: this is fire-and-forget. If a request comes in before rehydration
 // completes, the auth layer's rehydrate-on-miss fallback (in authenticate())
-// handles it — it awaits rehydrateFromTelegram() and retries the key lookup.
+// handles it — it awaits rehydrateFromTelegram()/rehydrateAccountFromTelegram()
+// and retries the key lookup.
 const isServerless = !!process.env.VERCEL
 const localNeedsRehydrate = store.users.length === 0 || store.apiKeys.length === 0
 if (isServerless || localNeedsRehydrate) {
   setImmediate(() => {
-    void rehydrateFromTelegram().catch((err) =>
-      console.error('[store] cold-boot rehydrate failed:', err),
-    )
+    void (async () => {
+      // 1. Try V4 migration first (no-op if already migrated). This restores
+      //    the full state from the V3 document if it runs.
+      try {
+        const m = await migrateV3ToV4()
+        if (m.migrated) {
+          // Migration restored everything — done.
+          return
+        }
+        if (m.accounts > 0) {
+          // Already in V4 mode. Per-account rehydration happens on demand via
+          // auth-on-miss. But to warm the admin panel, pull the __system__
+          // account + every account listed in the index.
+          try {
+            await rehydrateAccountFromTelegram(SYSTEM_ACCOUNT_ID)
+          } catch { /* best-effort */ }
+          return
+        }
+      } catch (err) {
+        console.error('[store] V3→V4 migration failed:', err)
+      }
+      // 2. Fallback: legacy V3 full-state rehydration.
+      try {
+        await rehydrateFromTelegram()
+      } catch (err) {
+        console.error('[store] cold-boot rehydrate failed:', err)
+      }
+    })()
+  })
+} else {
+  // Local dev with a warm cache: still detect V4 mode so the admin panel's
+  // Storage tab shows the correct status + per-account manifests. This is a
+  // single cheap getChat call (no rehydration, just sets v4Mode + caches the
+  // index). Fire-and-forget.
+  setImmediate(() => {
+    void getAccountIndex().catch(() => {
+      /* best-effort — V3 mode remains active */
+    })
   })
 }
 
@@ -573,11 +625,10 @@ export function createUser(opts: {
   store.users.push(user)
   store.apiKeys.push(apiKey)
   saveToDisk()
-  // Mirror the new identity (user + key + password hash) to the Telegram
-  // pinned manifest so it survives full local-store resets. Fire-and-forget.
-  // This is the "save keys to Telegram automatically" half of the durability
-  // contract — every key ever created is persisted to the public Telegram DB.
-  void syncIdentityToTelegram()
+  // V4: sync this account's own manifest (creates the account entry in the
+  // pinned index on first sync). Falls back to the legacy global sync if not
+  // yet in V4 mode.
+  scheduleAccountSync(user.userId)
   // Also push a per-user manifest to the user's OWN custom chat if they have
   // one configured (they won't at signup, but this is a no-op then).
   void syncUserIdentityToTelegram(user.id)
@@ -629,9 +680,9 @@ export function setUserPassword(
   user.passwordHash = hashPassword(password)
   user.updatedAt = new Date().toISOString()
   saveToDisk()
-  // Re-sync the identity manifest so the new password hash is persisted to
-  // the Telegram public database.
-  void syncIdentityToTelegram()
+  // V4: re-sync this account's own manifest so the new password hash is
+  // persisted to the Telegram public database.
+  scheduleAccountSyncForDbUser(dbUserId)
   void syncUserIdentityToTelegram(user.id)
   return user
 }
@@ -694,7 +745,7 @@ export function createApiKey(
   }
   store.apiKeys.push(apiKey)
   saveToDisk()
-  void syncIdentityToTelegram()
+  scheduleAccountSyncForDbUser(dbUserId)
   void syncUserIdentityToTelegram(dbUserId)
   return apiKey
 }
@@ -724,7 +775,7 @@ export function updateApiKey(
   if (opts.rateLimitMbPerDay !== undefined)
     apiKey.rateLimitMbPerDay = normalisePositiveInt(opts.rateLimitMbPerDay)
   saveToDisk()
-  void syncIdentityToTelegram()
+  scheduleAccountSyncForDbUser(dbUserId)
   void syncUserIdentityToTelegram(dbUserId)
   return apiKey
 }
@@ -739,7 +790,7 @@ export function revokeApiKey(
   if (!apiKey) return null
   apiKey.revoked = true
   saveToDisk()
-  void syncIdentityToTelegram()
+  scheduleAccountSyncForDbUser(dbUserId)
   void syncUserIdentityToTelegram(dbUserId)
   return apiKey
 }
@@ -1258,6 +1309,459 @@ export async function rehydrateFromTelegram(chatId?: string, botToken?: string, 
   }
 }
 
+// ─── V4: Per-account manifests ───────────────────────────────────────────────
+//
+// V4 splits the single full-state document into one document PER ACCOUNT,
+// coordinated by a tiny pinned index. This section implements:
+//   - buildAccountManifest(userId): serialize one account's data.
+//   - syncAccountManifestToTelegram(userId): upload + index update for one account.
+//   - rehydrateAccountFromTelegram(userId): fetch + restore one account.
+//   - migrateV3ToV4(): one-time split of the legacy full-state blob.
+//   - scheduleAccountSync(userId): debounced per-account sync (replaces the
+//     global scheduleFullStateSync for V4-mode writes).
+//
+// The V3 full-state path (buildIdentityManifest / syncIdentityToTelegram /
+// rehydrateFromTelegram) is KEPT for backward compatibility and as a fallback.
+// V4 does NOT delete the V3 pinned document — it just unpins it (by pinning
+// the V4 index on top) and leaves it in the chat history as a backup.
+
+/** In-memory cache of the V4 account index (survives across requests). */
+let accountIndexCache: AccountIndex | null = null
+
+/** True once we've confirmed the pinned message is a V4 index (set by fetchAccountIndex). */
+let v4ModeActive = false
+
+/**
+ * Build the V4 manifest for a single account (or the __system__ account).
+ * Returns null if the account doesn't exist locally.
+ */
+export function buildAccountManifest(userId: string): AccountManifest | null {
+  // __system__ account: admin user + admin keys + any apiKeys owned by 'admin'.
+  if (userId === SYSTEM_ACCOUNT_ID) {
+    return {
+      cloudkv: true,
+      kind: 'account-manifest',
+      version: 4,
+      userId: SYSTEM_ACCOUNT_ID,
+      exportedAt: new Date().toISOString(),
+      user: null,
+      apiKeys: store.apiKeys.filter((k) => k.userId === ADMIN_DB_USER_ID),
+      records: [],
+      logs: store.logs.filter((l) => l.userId === ADMIN_DB_USER_ID),
+      files: [],
+      shareTokens: [],
+      collectionNames: [],
+      telegramConfigs: [],
+      adminKeys: store.adminKeys,
+    }
+  }
+  // Regular user account: match by public userId (usr_xxx).
+  const user = store.users.find((u) => u.userId === userId && u.id !== ADMIN_DB_USER_ID)
+  if (!user) return null
+  return {
+    cloudkv: true,
+    kind: 'account-manifest',
+    version: 4,
+    userId: user.userId,
+    exportedAt: new Date().toISOString(),
+    user,
+    apiKeys: store.apiKeys.filter((k) => k.userId === user.id),
+    records: store.records.filter((r) => r.userId === user.id),
+    logs: store.logs.filter((l) => l.userId === user.id),
+    files: store.files.filter((f) => f.userId === user.id),
+    shareTokens: store.shareTokens.filter((t) => t.userId === user.id),
+    collectionNames: store.collectionNames.filter((c) => c.userId === user.id),
+    telegramConfigs: store.telegramConfigs.filter((t) => t.userId === user.id),
+  }
+}
+
+/**
+ * Restore a single V4 account manifest into the local store. Idempotent —
+ * existing matching items are left untouched. Used by rehydrateAccountFromTelegram.
+ */
+function restoreAccountManifest(m: AccountManifest): {
+  users: number
+  apiKeys: number
+  records: number
+  logs: number
+  files: number
+} {
+  let usersRestored = 0
+  let keysRestored = 0
+  let recordsRestored = 0
+  let logsRestored = 0
+  let filesRestored = 0
+
+  // User (skip for __system__).
+  if (m.userId !== SYSTEM_ACCOUNT_ID && m.user) {
+    const u = m.user as UserRecord
+    if (u.id && u.userId && !store.users.some((x) => x.id === u.id || x.userId === u.userId)) {
+      store.users.push({
+        id: u.id,
+        userId: u.userId,
+        name: u.name ?? null,
+        email: u.email ?? null,
+        passwordHash: u.passwordHash ?? null,
+        plan: u.plan ?? 'unlimited',
+        createdAt: u.createdAt ?? new Date().toISOString(),
+        updatedAt: u.updatedAt ?? u.createdAt ?? new Date().toISOString(),
+      })
+      usersRestored++
+    } else if (u.passwordHash) {
+      const local = store.users.find((x) => x.id === u.id || x.userId === u.userId)
+      if (local && !local.passwordHash) {
+        local.passwordHash = u.passwordHash
+        local.updatedAt = new Date().toISOString()
+      }
+    }
+  }
+
+  // API keys.
+  for (const k of (m.apiKeys ?? []) as ApiKeyRecord[]) {
+    if (!k.id || !k.key || !k.userId) continue
+    if (store.apiKeys.some((x) => x.id === k.id || x.key === k.key)) continue
+    store.apiKeys.push({
+      id: k.id,
+      key: k.key,
+      name: k.name ?? 'restored',
+      userId: k.userId,
+      createdAt: k.createdAt ?? new Date().toISOString(),
+      lastUsedAt: k.lastUsedAt ?? null,
+      revoked: k.revoked ?? false,
+      scopes: Array.isArray(k.scopes) ? k.scopes.filter((s) => ALL_API_KEY_SCOPES.includes(s)) : [],
+      expiresAt: k.expiresAt ?? null,
+      collectionAllowList: Array.isArray(k.collectionAllowList) ? k.collectionAllowList : [],
+      tableAllowList: Array.isArray(k.tableAllowList) ? k.tableAllowList : [],
+      rateLimitPerMin: k.rateLimitPerMin ?? null,
+      rateLimitMbPerDay: k.rateLimitMbPerDay ?? null,
+    })
+    keysRestored++
+  }
+
+  // Records.
+  for (const r of (m.records ?? []) as RecordEntry[]) {
+    if (!r || !r.userId || !r.collection || !r.key) continue
+    if (store.records.some((x) => x.userId === r.userId && x.collection === r.collection && x.key === r.key)) continue
+    store.records.push({
+      id: r.id || (r.userId + ':' + r.collection + ':' + r.key),
+      userId: r.userId,
+      collection: r.collection,
+      key: r.key,
+      value: r.value ?? '',
+      valueType: r.valueType ?? 'string',
+      telegramMessageId: r.telegramMessageId ?? null,
+      createdAt: r.createdAt ?? new Date().toISOString(),
+      updatedAt: r.updatedAt ?? r.createdAt ?? new Date().toISOString(),
+    })
+    recordsRestored++
+  }
+
+  // Logs.
+  for (const l of (m.logs ?? []) as LogEntry[]) {
+    if (!l || !l.id) continue
+    if (store.logs.some((x) => x.id === l.id)) continue
+    store.logs.push({
+      id: l.id,
+      userId: l.userId ?? '',
+      action: l.action ?? 'unknown',
+      key: l.key ?? null,
+      detail: l.detail ?? null,
+      source: l.source ?? 'api',
+      ip: l.ip ?? null,
+      createdAt: l.createdAt ?? new Date().toISOString(),
+    })
+    logsRestored++
+  }
+
+  // Files.
+  for (const f of (m.files ?? []) as FileRecord[]) {
+    if (!f || !f.id) continue
+    if (store.files.some((x) => x.id === f.id)) continue
+    store.files.push(f)
+    filesRestored++
+  }
+
+  // Share tokens.
+  for (const t of (m.shareTokens ?? []) as ShareTokenRecord[]) {
+    if (!t || !t.id) continue
+    if (store.shareTokens.some((x) => x.id === t.id)) continue
+    store.shareTokens.push(t)
+  }
+
+  // Collection names.
+  for (const c of (m.collectionNames ?? []) as CollectionNameRecord[]) {
+    if (!c || !c.userId || !c.name) continue
+    if (store.collectionNames.some((x) => x.userId === c.userId && x.name === c.name)) continue
+    store.collectionNames.push({ userId: c.userId, name: c.name, createdAt: c.createdAt ?? new Date().toISOString() })
+  }
+
+  // Telegram configs.
+  for (const tc of (m.telegramConfigs ?? []) as TelegramConfigRecord[]) {
+    if (!tc || !tc.userId) continue
+    if (store.telegramConfigs.some((x) => x.userId === tc.userId)) continue
+    store.telegramConfigs.push(tc)
+  }
+
+  // Admin keys (only on __system__ manifest).
+  if (m.userId === SYSTEM_ACCOUNT_ID && Array.isArray(m.adminKeys)) {
+    for (const ak of m.adminKeys as AdminKeyRecord[]) {
+      if (!ak || !ak.key) continue
+      if (store.adminKeys.some((x) => x.key === ak.key)) continue
+      store.adminKeys.push({
+        id: ak.id ?? ('admin_' + ak.key.slice(-8)),
+        key: ak.key,
+        label: ak.label ?? 'restored',
+        createdAt: ak.createdAt ?? new Date().toISOString(),
+        createdBy: ak.createdBy ?? 'restored',
+        promotedFromUserId: ak.promotedFromUserId ?? null,
+        promotedFromUserEmail: ak.promotedFromUserEmail ?? null,
+        revoked: ak.revoked ?? false,
+      })
+    }
+  }
+
+  if (usersRestored || keysRestored || recordsRestored || logsRestored || filesRestored) saveToDisk()
+  return { users: usersRestored, apiKeys: keysRestored, records: recordsRestored, logs: logsRestored, files: filesRestored }
+}
+
+/**
+ * Fetch the V4 index (cached after first fetch). Sets v4ModeActive=true if the
+ * pinned message is our V4 index. Returns null if not in V4 mode (caller should
+ * fall back to the V3 path).
+ */
+export async function getAccountIndex(): Promise<AccountIndex | null> {
+  if (accountIndexCache) return accountIndexCache
+  const idx = await fetchAccountIndex()
+  if (idx) {
+    accountIndexCache = idx
+    v4ModeActive = true
+  }
+  return idx
+}
+
+/**
+ * Sync ONE account's manifest to Telegram + update the pinned index. Used after
+ * a write that affects only one account (the common case). Debounced per-account
+ * via scheduleAccountSync.
+ *
+ * Returns the updated index entry, or null on failure.
+ */
+export async function syncAccountManifestToTelegram(userId: string): Promise<AccountIndexEntry | null> {
+  const manifest = buildAccountManifest(userId)
+  if (!manifest) return null
+  const idx = (await getAccountIndex()) ?? {
+    cloudkv: true as const,
+    kind: 'account-index' as const,
+    version: 4 as const,
+    exportedAt: new Date().toISOString(),
+    accounts: {},
+  }
+  const existing = idx.accounts[userId]
+  const sent = await sendAccountManifest(manifest, existing?.messageId)
+  if (!sent) return null
+  const recordCount = (manifest.records ?? []).length
+  const entry: AccountIndexEntry = {
+    userId,
+    messageId: sent.messageId,
+    fileId: sent.fileId,
+    bytes: sent.bytes,
+    recordCount,
+    updatedAt: new Date().toISOString(),
+  }
+  idx.accounts[userId] = entry
+  idx.exportedAt = new Date().toISOString()
+  await pinAccountIndex(idx)
+  accountIndexCache = idx
+  v4ModeActive = true
+  return entry
+}
+
+/**
+ * Fetch + restore ONE account's manifest from Telegram (by userId). Used by the
+ * auth layer on a key-miss: instead of pulling the whole-world V3 document, we
+ * pull only the affected account's document. Best-effort, never throws.
+ */
+export async function rehydrateAccountFromTelegram(userId: string): Promise<{
+  attempted: boolean
+  users: number
+  apiKeys: number
+  records: number
+  logs: number
+  files: number
+  error?: string
+}> {
+  const idx = await getAccountIndex()
+  if (!idx) return { attempted: false, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0 }
+  const entry = idx.accounts[userId]
+  if (!entry) return { attempted: false, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0 }
+  try {
+    const manifest = await fetchAccountManifest(entry.fileId)
+    if (!manifest) return { attempted: true, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0, error: 'download failed' }
+    const r = restoreAccountManifest(manifest)
+    if (r.users || r.apiKeys || r.records || r.logs || r.files) {
+      console.log(`[store] V4 rehydrated account ${userId}: +${r.users} user, +${r.apiKeys} keys, +${r.records} records, +${r.logs} logs, +${r.files} files`)
+    }
+    return { attempted: true, ...r }
+  } catch (err) {
+    return { attempted: true, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0, error: (err as Error).message }
+  }
+}
+
+/**
+ * One-time V3 → V4 migration. Reads the legacy full-state pinned document,
+ * splits it into one manifest per account (+ one __system__ manifest), uploads
+ * each, and pins the V4 index. The V3 document is NOT deleted — it stays in
+ * the chat history as a backup.
+ *
+ * Idempotent: if a V4 index is already pinned, this is a no-op. Safe to call
+ * on every cold boot.
+ */
+export async function migrateV3ToV4(): Promise<{
+  migrated: boolean
+  accounts: number
+  error?: string
+}> {
+  // Already in V4 mode? Nothing to do.
+  if (v4ModeActive || accountIndexCache) {
+    return { migrated: false, accounts: accountIndexCache ? Object.keys(accountIndexCache.accounts).length : 0 }
+  }
+  const existing = await fetchAccountIndex()
+  if (existing) {
+    accountIndexCache = existing
+    v4ModeActive = true
+    return { migrated: false, accounts: Object.keys(existing.accounts).length }
+  }
+  // No V4 index pinned → pull the V3 full-state document and split it.
+  const v3Json = await fetchPinnedManifest()
+  if (!v3Json) {
+    return { migrated: false, accounts: 0 }
+  }
+  let parsed: ParsedManifest
+  try {
+    parsed = JSON.parse(v3Json) as ParsedManifest
+  } catch (err) {
+    return { migrated: false, accounts: 0, error: 'V3 manifest JSON parse failed: ' + (err as Error).message }
+  }
+  if (!parsed || parsed.cloudkv !== true) {
+    return { migrated: false, accounts: 0 }
+  }
+  // Ensure the local store has everything from V3 first (so buildAccountManifest
+  // can serialize per-account from the in-memory store).
+  restoreIdentityFromBackup(v3Json)
+
+  // Build the list of accounts to split into: every real user + __system__.
+  const accountIds = [
+    ...store.users.filter((u) => u.id !== ADMIN_DB_USER_ID).map((u) => u.userId),
+    SYSTEM_ACCOUNT_ID,
+  ]
+
+  const newIndex: AccountIndex = {
+    cloudkv: true,
+    kind: 'account-index',
+    version: 4,
+    exportedAt: new Date().toISOString(),
+    accounts: {},
+  }
+  let migratedCount = 0
+  for (const userId of accountIds) {
+    const manifest = buildAccountManifest(userId)
+    if (!manifest) continue
+    const sent = await sendAccountManifest(manifest)
+    if (!sent) {
+      console.error(`[store] V4 migration: failed to upload manifest for ${userId}`)
+      continue
+    }
+    newIndex.accounts[userId] = {
+      userId,
+      messageId: sent.messageId,
+      fileId: sent.fileId,
+      bytes: sent.bytes,
+      recordCount: (manifest.records ?? []).length,
+      updatedAt: new Date().toISOString(),
+    }
+    migratedCount++
+  }
+  if (migratedCount === 0) {
+    return { migrated: false, accounts: 0, error: 'no accounts uploaded' }
+  }
+  const pinned = await pinAccountIndex(newIndex)
+  if (!pinned) {
+    return { migrated: false, accounts: migratedCount, error: 'index pin failed' }
+  }
+  accountIndexCache = newIndex
+  v4ModeActive = true
+  console.log(`[store] V3→V4 migration complete: ${migratedCount} account manifest(s) uploaded, index pinned. V3 document left in chat as backup.`)
+  return { migrated: true, accounts: migratedCount }
+}
+
+/**
+ * Per-account debounced sync. Each account gets its own 1s timer — a burst of
+ * writes by user A doesn't delay user B's sync. Falls back to the legacy global
+ * full-state sync if not yet in V4 mode (e.g. migration hasn't run).
+ */
+const accountSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
+export function scheduleAccountSync(userId: string): void {
+  // If we're not yet in V4 mode and haven't attempted migration, fall back to
+  // the legacy global sync. The cold-boot migration (in instrumentation /
+  // module load) will switch us to V4 shortly.
+  if (!v4ModeActive) {
+    scheduleFullStateSync()
+    return
+  }
+  const existing = accountSyncTimers.get(userId)
+  if (existing) clearTimeout(existing)
+  const timer = setTimeout(() => {
+    accountSyncTimers.delete(userId)
+    void syncAccountManifestToTelegram(userId).catch((err) =>
+      console.error(`[store] scheduled account sync failed for ${userId}:`, err),
+    )
+  }, 1000)
+  accountSyncTimers.set(userId, timer)
+}
+
+/**
+ * Admin helper: list every account's V4 index entry (for the admin panel).
+ * Returns null if not yet in V4 mode.
+ */
+export async function adminListAccountManifests(): Promise<AccountIndexEntry[] | null> {
+  const idx = await getAccountIndex()
+  if (!idx) return null
+  return Object.values(idx.accounts).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+}
+
+/** Whether the store has completed V3→V4 migration (V4 index is pinned). */
+export function isV4ModeActive(): boolean {
+  return v4ModeActive
+}
+
+/**
+ * Resolve an internal dbUserId to the public userId (`usr_xxx`) used as the V4
+ * account key. Admin-user records map to the `__system__` account. Returns
+ * null if the user isn't in the store (caller should fall back to the legacy
+ * global sync).
+ */
+function publicUserIdForDbUser(dbUserId: string): string | null {
+  if (dbUserId === ADMIN_DB_USER_ID) return SYSTEM_ACCOUNT_ID
+  const u = store.users.find((x) => x.id === dbUserId)
+  return u ? u.userId : null
+}
+
+/**
+ * Schedule a per-account V4 sync for the account that owns `dbUserId`. Falls
+ * back to the legacy global full-state sync when not in V4 mode or when the
+ * user can't be resolved. This is the drop-in replacement for
+ * `scheduleFullStateSync()` at every write site.
+ */
+function scheduleAccountSyncForDbUser(dbUserId: string): void {
+  const pub = publicUserIdForDbUser(dbUserId)
+  if (pub) {
+    scheduleAccountSync(pub)
+  } else {
+    // Unknown user (shouldn't happen) — fall back to global sync.
+    scheduleFullStateSync()
+  }
+}
+
 // ─── Record (KV) operations ──────────────────────────────────────────────────
 
 export function findRecord(
@@ -1294,7 +1798,7 @@ export function upsertRecord(
     existing.valueType = opts.valueType
     existing.updatedAt = now
     saveToDisk()
-    scheduleFullStateSync(opts.chatId, opts.botToken, opts.botApiBaseUrl)
+    scheduleAccountSyncForDbUser(dbUserId)
 
     // Edit the existing Telegram backup message.
     const payload: TelegramPayload = {
@@ -1332,7 +1836,7 @@ export function upsertRecord(
   }
   store.records.push(record)
   saveToDisk()
-  scheduleFullStateSync(opts.chatId, opts.botToken, opts.botApiBaseUrl)
+  scheduleAccountSyncForDbUser(dbUserId)
   const payload: TelegramPayload = {
     owner: publicUserId,
     collection: opts.collection,
@@ -1366,7 +1870,7 @@ export function deleteRecord(
   if (idx === -1) return null
   const [removed] = store.records.splice(idx, 1)
   saveToDisk()
-  scheduleFullStateSync(chatId, botToken, botApiBaseUrl)
+  scheduleAccountSyncForDbUser(dbUserId)
   if (removed.telegramMessageId) {
     void deleteKvMessage(removed.telegramMessageId, chatId, botToken, botApiBaseUrl)
   }
@@ -1463,7 +1967,7 @@ export function createCollectionName(
     createdAt: new Date().toISOString(),
   })
   saveToDisk()
-  scheduleFullStateSync()
+  scheduleAccountSyncForDbUser(dbUserId)
   return { ok: true }
 }
 
@@ -1508,7 +2012,7 @@ export function deleteCollection(dbUserId: string, name: string, chatId?: string
   store.records = store.records.filter((r) => !(r.userId === dbUserId && r.collection === name))
   removeCollectionName(dbUserId, name)
   saveToDisk()
-  scheduleFullStateSync(chatId, botToken, botApiBaseUrl)
+  scheduleAccountSyncForDbUser(dbUserId)
   return toRemove.length
 }
 
@@ -1540,7 +2044,7 @@ export function addLog(opts: {
     store.logs = store.logs.filter((l) => l.userId !== opts.dbUserId || keep.includes(l.id))
   }
   saveToDisk()
-  scheduleFullStateSync()
+  scheduleAccountSyncForDbUser(opts.dbUserId)
   return entry
 }
 
@@ -1803,6 +2307,8 @@ export function setTelegramConfig(
     store.telegramConfigs.push(record)
     saveToDisk()
   }
+  // V4: persist this account's manifest (now includes the updated telegramConfig).
+  scheduleAccountSyncForDbUser(dbUserId)
   // Now that the user has a custom chat (+ optionally their own bot token),
   // push a per-user manifest to their chat so they can recover keys later.
   // Fire-and-forget — syncUserIdentityToTelegram is a no-op when the user
@@ -1907,7 +2413,7 @@ export function createShareToken(opts: CreateShareTokenOpts): ShareTokenRecord {
   }
   store.shareTokens.push(record)
   saveToDisk()
-  scheduleFullStateSync()
+  scheduleAccountSyncForDbUser(dbUserId)
   return record
 }
 
@@ -1930,7 +2436,7 @@ export function revokeShareToken(dbUserId: string, id: string): ShareTokenRecord
   if (!t) return null
   t.revoked = true
   saveToDisk()
-  scheduleFullStateSync()
+  scheduleAccountSyncForDbUser(dbUserId)
   return t
 }
 
@@ -2054,7 +2560,7 @@ export function createFileRecord(
   }
   store.files.push(record)
   saveToDisk()
-  scheduleFullStateSync()
+  scheduleAccountSyncForDbUser(dbUserId)
   return record
 }
 
@@ -2090,7 +2596,7 @@ export function deleteFileRecord(dbUserId: string, id: string): FileRecord | nul
   if (idx === -1) return null
   const [removed] = store.files.splice(idx, 1)
   saveToDisk()
-  scheduleFullStateSync()
+  scheduleAccountSyncForDbUser(dbUserId)
   if (removed.telegramMessageId) {
     const chatId = resolveFileChatId(removed)
     const botToken = resolveFileBotToken(removed)
@@ -2480,6 +2986,8 @@ export function adminPromoteUser(kvLiveKey: string, label?: string): AdminKeyRec
   }
   store.adminKeys.push(adminKey)
   saveToDisk()
+  // V4: adminKeys live in the __system__ account manifest.
+  scheduleAccountSync(SYSTEM_ACCOUNT_ID)
   return adminKey
 }
 
@@ -2505,5 +3013,7 @@ export function adminRevokeAdminKey(id: string): AdminKeyRecord | null {
   if (!k) return null
   k.revoked = true
   saveToDisk()
+  // V4: adminKeys live in the __system__ account manifest.
+  scheduleAccountSync(SYSTEM_ACCOUNT_ID)
   return k
 }
