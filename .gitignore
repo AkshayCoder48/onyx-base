@@ -90,3 +90,5 @@ storage-*.png
 .open-next/
 
 .wrangler/
+
+.dev.vars
