@@ -348,11 +348,14 @@ export const ADMIN_PUBLIC_USER_ID = 'usr_admin'
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
-// On serverless platforms (Vercel) the working directory is read-only, so the
-// JSON cache must live in /tmp (the only writable, per-instance-ephemeral dir).
-// Locally we keep it in ./db so the cache survives hot reloads. Telegram is
-// always the durable layer; this file is only a fast local index.
-const DATA_DIR = process.env.VERCEL ? '/tmp' : path.join(process.cwd(), 'db')
+// On serverless platforms (Vercel / Cloudflare Pages / Workers) the working
+// directory is read-only, so the JSON cache must live in /tmp (the only
+// writable, per-instance-ephemeral dir). Locally we keep it in ./db so the
+// cache survives hot reloads. Telegram is always the durable layer; this file
+// is only a fast local index.
+const isServerlessRuntime =
+  !!process.env.VERCEL || !!process.env.CF_PAGES || !!process.env.CLOUDFLARE
+const DATA_DIR = isServerlessRuntime ? '/tmp' : path.join(process.cwd(), 'db')
 const STORE_PATH = path.join(DATA_DIR, 'cloudkv.json')
 
 const EMPTY_STORE: StoreShape = { users: [], apiKeys: [], records: [], logs: [], telegramConfigs: [], shareTokens: [], files: [], collectionNames: [], adminKeys: [] }
@@ -520,7 +523,7 @@ seedBootstrapAdminKey()
 // completes, the auth layer's rehydrate-on-miss fallback (in authenticate())
 // handles it — it awaits rehydrateFromTelegram()/rehydrateAccountFromTelegram()
 // and retries the key lookup.
-const isServerless = !!process.env.VERCEL
+const isServerless = isServerlessRuntime
 const localNeedsRehydrate = store.users.length === 0 || store.apiKeys.length === 0
 if (isServerless || localNeedsRehydrate) {
   setImmediate(() => {
