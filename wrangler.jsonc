@@ -1,0 +1,17 @@
+{
+  "main": ".open-next/worker.js",
+  "name": "onyxbase",
+  "compatibility_date": "2024-09-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "enabled": true
+  },
+  "vars": {
+    "TELEGRAM_BOT_TOKEN": "0000000000:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "TELEGRAM_CHAT_ID": "-1001234567890"
+  }
+}

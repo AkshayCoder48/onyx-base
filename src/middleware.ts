@@ -1,5 +1,10 @@
 /**
- * Onyx Base — CORS proxy + IP allowlist (Next.js 16 renamed middleware → proxy).
+ * Onyx Base — CORS middleware + IP allowlist.
+ *
+ * NOTE: This is the legacy `middleware.ts` (not Next.js 16's `proxy.ts`)
+ * because Cloudflare Workers requires Edge Runtime for middleware, and
+ * Next.js 16's `proxy.ts` forces Node.js runtime (incompatible). The
+ * `middleware.ts` form still supports `runtime = 'edge'`.
  *
  * Two concerns handled here so every API request goes through ONE place:
  *
@@ -26,7 +31,14 @@ import {
   getClientIp,
 } from '@/lib/ip-allowlist'
 
-export function proxy(req: NextRequest) {
+// Edge Runtime is required for middleware on Cloudflare Workers.
+// The ip-allowlist module uses only process.env + pure JS (no Node fs/net),
+// so it is fully edge-compatible.
+export const config = {
+  matcher: ['/api/:path*', '/v1/:path*'],
+}
+
+export function middleware(req: NextRequest) {
   const origin = req.headers.get('origin') || '*'
 
   // ── IP allowlist enforcement ──────────────────────────────────────────────
@@ -78,11 +90,4 @@ export function proxy(req: NextRequest) {
   res.headers.set('Access-Control-Allow-Credentials', 'true')
   res.headers.set('Vary', 'Origin')
   return res
-}
-
-export const config = {
-  // Apply CORS + IP allowlist to all API routes (REST + dashboard) and the
-  // v1 surface. Static assets are not matched — they don't need CORS or
-  // IP gating.
-  matcher: ['/api/:path*', '/v1/:path*'],
 }

@@ -1,22 +1,55 @@
-import { PrismaClient } from '@prisma/client'
+import type { PrismaClient } from '@prisma/client'
+
+// ─── Lazy Prisma initialization ─────────────────────────────────────────────
+//
+// WHY LAZY: On Cloudflare Workers/Pages the filesystem is read-only, so
+// Prisma's SQLite engine cannot connect to `file:.../custom.db`. If we
+// instantiated `new PrismaClient()` at module load it would crash every
+// cold start. Instead we defer creation until the first actual query — so
+// the core app (KV store + Telegram sync + auth + files, which uses the
+// in-memory `data-store.ts`, NOT Prisma) boots and runs without ever
+// touching Prisma. The SQL Editor / Tables / Views / Functions features
+// (which DO use Prisma) will surface a clean error when called on
+// serverless runtimes that lack a writable SQLite file.
+//
+// The dynamic `import('@prisma/client')` also keeps the Prisma WASM engine
+// OUT of the main bundle — it is only loaded if a SQL feature is actually
+// invoked, which keeps the Cloudflare bundle small.
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
 }
 
-const basePrisma = globalForPrisma.prisma ?? new PrismaClient({ log: ['query'] })
+let prismaPromise: Promise<PrismaClient> | null = null
 
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = basePrisma
+function getPrisma(): Promise<PrismaClient> {
+  if (prismaPromise) return prismaPromise
+  if (globalForPrisma.prisma) {
+    prismaPromise = Promise.resolve(globalForPrisma.prisma)
+    return prismaPromise
+  }
+  prismaPromise = (async () => {
+    const mod = await import('@prisma/client')
+    const instance = new mod.PrismaClient({ log: ['query'] })
+    if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = instance
+    return instance
+  })().catch((err) => {
+    // Reset so the next call retries; re-throw so the caller sees the error.
+    prismaPromise = null
+    throw err
+  })
+  return prismaPromise
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Runtime schema bootstrap (idempotent, lazy).
 //
-// WHY: on serverless platforms (Vercel) `prisma db push` / `migrate deploy`
-// never run, and the SQLite file is a fresh empty file on every cold start.
-// Without these tables, every SQL Editor / Tables / Views query would fail
-// with "no such table". CREATE TABLE IF NOT EXISTS is a no-op locally (the
-// tables already exist from `bun run db:push`) and creates them on-demand in
-// the serverless /tmp database.
+// WHY: on serverless platforms (Vercel / Cloudflare) `prisma db push` /
+// `migrate deploy` never run, and the SQLite file is a fresh empty file on
+// every cold start. Without these tables, every SQL Editor / Tables / Views
+// query would fail with "no such table". CREATE TABLE IF NOT EXISTS is a
+// no-op locally (the tables already exist from `bun run db:push`) and
+// creates them on-demand in the serverless /tmp database.
 //
 // The DDL mirrors prisma/schema.prisma exactly. If the schema changes, update
 // both files.
@@ -53,32 +86,29 @@ const SCHEMA_DDL: string[] = [
   `CREATE INDEX IF NOT EXISTS "UserTable_userId_idx" ON "UserTable"("userId")`,
 ]
 
-let schemaInitialized = false
-let schemaPromise: Promise<void> | null = null
+const schemaReadyMap = new WeakMap<PrismaClient, Promise<void>>()
 
-async function ensureSchema(): Promise<void> {
-  if (schemaInitialized) return
-  if (!schemaPromise) {
-    schemaPromise = (async () => {
-      try {
-        for (const stmt of SCHEMA_DDL) {
-          await basePrisma.$executeRawUnsafe(stmt)
-        }
-        schemaInitialized = true
-      } catch (err) {
-        // Reset so the next call retries; log but never crash the request.
-        console.error('[db] runtime schema init failed:', err)
-        schemaPromise = null
+function ensureSchema(prisma: PrismaClient): Promise<void> {
+  const existing = schemaReadyMap.get(prisma)
+  if (existing) return existing
+  const p = (async () => {
+    try {
+      for (const stmt of SCHEMA_DDL) {
+        await prisma.$executeRawUnsafe(stmt)
       }
-    })()
-  }
-  await schemaPromise
+    } catch (err) {
+      // Log but never crash the request — the caller will see the query error.
+      console.error('[db] runtime schema init failed:', err)
+      throw err
+    }
+  })()
+  schemaReadyMap.set(prisma, p)
+  return p
 }
 
-// Wrap the raw-query methods so the schema is ensured before the first query.
-// This is lazy (runs on first actual query, NOT at module load) so it is safe
-// during `next build` page-data collection. Non-query property access passes
-// through unchanged.
+// Wrap the raw-query methods so the schema is ensured before the first query
+// AND PrismaClient is lazily instantiated. Non-query property access is not
+// supported on the lazy proxy — callers should only use the raw query methods.
 const RAW_QUERY_METHODS = new Set([
   '$queryRaw',
   '$queryRawUnsafe',
@@ -87,20 +117,29 @@ const RAW_QUERY_METHODS = new Set([
   '$transaction',
 ])
 
-export const db = new Proxy(basePrisma, {
-  get(target, prop, receiver) {
-    const value = Reflect.get(target, prop, receiver)
+/**
+ * Lazy Prisma client. PrismaClient is instantiated + the SQLite schema is
+ * ensured on the FIRST raw query, not at module load. This is critical for
+ * Cloudflare (read-only filesystem) and serverless cold-start performance.
+ */
+export const db = new Proxy({} as PrismaClient, {
+  get(_target, prop, receiver) {
     if (
       typeof prop === 'string' &&
-      RAW_QUERY_METHODS.has(prop) &&
-      typeof value === 'function'
+      RAW_QUERY_METHODS.has(prop)
     ) {
-      const bound = value.bind(target)
-      // Return a function that ensures the schema, then forwards the call.
-      // The original method already returns a Promise, so the chain resolves
-      // to the query result.
-      return (...args: unknown[]) => ensureSchema().then(() => bound(...args))
+      return async (...args: unknown[]) => {
+        const prisma = await getPrisma()
+        await ensureSchema(prisma)
+        const method = Reflect.get(prisma, prop, receiver)
+        if (typeof method === 'function') {
+          return method.apply(prisma, args)
+        }
+        throw new Error(`Prisma method "${prop}" is not a function`)
+      }
     }
-    return value
+    // Non-query property access (e.g. prisma.user) is not supported on the
+    // lazy proxy. Return undefined — callers using raw queries won't hit this.
+    return undefined
   },
 })
