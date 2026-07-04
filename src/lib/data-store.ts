@@ -2413,7 +2413,7 @@ export function createShareToken(opts: CreateShareTokenOpts): ShareTokenRecord {
   }
   store.shareTokens.push(record)
   saveToDisk()
-  scheduleAccountSyncForDbUser(dbUserId)
+  scheduleAccountSyncForDbUser(opts.dbUserId)
   return record
 }
 
@@ -2898,7 +2898,7 @@ export function adminGetUserDetail(dbUserId: string) {
     })),
     collections: collections.map((c) => ({
       name: c.name,
-      count: c.count,
+      count: c.records,
       createdAt: c.createdAt,
     })),
     telegramConfig: telegramConfig

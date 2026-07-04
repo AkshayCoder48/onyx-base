@@ -414,8 +414,11 @@ export function coerceValue(raw: string): { value: unknown; type: string } {
 }
 
 /** Standard JSON success response. */
-export function ok(data: unknown, init?: ResponseInit) {
-  return Response.json({ ok: true, ...data }, init)
+export function ok<T extends object = Record<string, unknown>>(
+  data: T,
+  init?: ResponseInit,
+) {
+  return Response.json({ ok: true, ...(data as Record<string, unknown>) }, init)
 }
 
 /** Standard JSON error response. */

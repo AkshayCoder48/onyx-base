@@ -17,9 +17,11 @@ export async function api<T = unknown>(
   const data = text ? safeJson(text) : null
 
   if (!res.ok) {
-    const message =
-      (data && typeof data === 'object' && 'error' in data && String((data as Record<string, unknown>).error)) ||
-      `Request failed (${res.status})`
+    let message = `Request failed (${res.status})`
+    if (data && typeof data === 'object' && 'error' in data) {
+      const errVal = (data as Record<string, unknown>).error
+      message = typeof errVal === 'string' ? errVal : String(errVal)
+    }
     throw new Error(message)
   }
   return (data as { ok?: boolean } & T) ?? ({} as T)

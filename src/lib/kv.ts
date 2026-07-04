@@ -25,6 +25,8 @@ import {
 import { notifyRealtime } from '@/lib/realtime'
 
 export interface SetOptions {
+  /** The record key (required for set/touch operations). */
+  key?: string
   collection?: string
   source?: string
   /** Raw string value; will be coerced. Mutually exclusive with `json`. */

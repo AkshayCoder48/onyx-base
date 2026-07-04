@@ -88,7 +88,11 @@ async function runFunction(
   }
   // Compile the code into a callable. We already syntax-checked at create
   // time, but re-check here for safety.
-  const fn = new Function('ctx', code) as (ctx: typeof ctx) => unknown
+  const fn = new Function('ctx', code) as (ctx: {
+    record: unknown
+    db: ReturnType<typeof buildSandboxDb>
+    user: ReturnType<typeof buildSandboxUser>
+  }) => unknown
 
   // 5-second timeout. We race the function against a timer — if it doesn't
   // resolve in 5s, we throw. (Note: this doesn't actually KILL the function's
