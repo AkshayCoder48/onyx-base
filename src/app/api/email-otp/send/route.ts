@@ -89,7 +89,7 @@ export async function POST(req: NextRequest) {
   const cfg = getRawMcpeConfig(user.dbUserId)
   if (!cfg) {
     return fail(
-      'No MCPEmail API key configured. Open the dashboard → Email OTP tab and paste your mcpe_live_* key first.',
+      'No MCPEmail API key configured. Open the dashboard → Email OTP tab and paste your mcpe_* key first.',
       400,
       { code: 'no_mcpe_config' },
     )

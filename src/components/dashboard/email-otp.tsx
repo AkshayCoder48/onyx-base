@@ -102,7 +102,7 @@ export function EmailOtpView() {
                     )}
                   </>
                 ) : (
-                  <>Paste your <code className="font-mono">mcpe_live_*</code> API key below to enable the OTP API.</>
+                  <>Paste your <code className="font-mono">mcpe_*</code> API key below to enable the OTP API.</>
                 )}
               </p>
             </div>
@@ -170,8 +170,8 @@ function ConfigCard({
       toast.error('Paste your MCPEmail API key first')
       return
     }
-    if (!trimmed.startsWith('mcpe_live_')) {
-      toast.error('Key must start with "mcpe_live_"')
+    if (!trimmed.startsWith('mcpe_') || trimmed.length < 25) {
+      toast.error('Key must start with "mcpe_" (e.g. mcpe_live_… or mcpe_4c7b1e9a…) and be at least 25 chars')
       return
     }
     setSaving(true)
@@ -263,7 +263,7 @@ function ConfigCard({
       <div className="space-y-3">
         <div className="space-y-1.5">
           <Label htmlFor="mcpe-key" className="text-xs font-medium uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
-            <Lock className="size-3" /> MCPEmail API key <span className="text-muted-foreground/50 normal-case">(mcpe_live_…)</span>
+            <Lock className="size-3" /> MCPEmail API key <span className="text-muted-foreground/50 normal-case">(mcpe_…)</span>
           </Label>
           <div className="relative">
             <Input
@@ -271,7 +271,7 @@ function ConfigCard({
               type={showKey ? 'text' : 'password'}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={config?.hasConfig ? '•••••••• (saved — paste a new key to replace)' : 'mcpe_live_AbCdEfGhIjKlMnOpQrStUvWxYz123456'}
+              placeholder={config?.hasConfig ? '•••••••• (saved — paste a new key to replace)' : 'mcpe_live_AbCdEfGhIjKlMnOpQrStUvWxYz123456 or mcpe_4c7b1e9aAbCd…'}
               className="font-mono text-sm h-9 pr-16"
               autoComplete="off"
               spellCheck={false}

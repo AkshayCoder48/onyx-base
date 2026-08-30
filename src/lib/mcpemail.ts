@@ -3,8 +3,9 @@
  *
  * MCPEmails (https://mcpemails.com) is a Streamable HTTP MCP server that
  * exposes a JSON-RPC 2.0 endpoint at https://mcpemails.com/api/mcp.
- * Authentication is a Bearer API key (`mcpe_live_*`) issued from the
- * MCPEmails dashboard.
+ * Authentication is a Bearer API key (`mcpe_*`) issued from the
+ * MCPEmails dashboard — multiple key families exist (`mcpe_live_*`,
+ * `mcpe_4c7b1e9a*`, …) and all are accepted here.
  *
  * This module is a thin server-side wrapper that:
  *   1. Performs the `initialize` handshake so we know the key is valid.

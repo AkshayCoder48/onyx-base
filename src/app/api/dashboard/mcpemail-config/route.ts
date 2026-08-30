@@ -4,6 +4,7 @@ import {
   getMcpeConfigView,
   setMcpeConfig,
   clearMcpeConfig,
+  isValidMcpeKey,
   MCPEMAIL_DEFAULT_SUBJECT,
   MCPEMAIL_DEFAULT_BODY,
 } from '@/lib/mcpemail-config'
@@ -31,12 +32,13 @@ export async function GET(req: NextRequest) {
 
 /**
  * PUT /api/dashboard/mcpemail-config
- * Body: { "apiKey": "mcpe_live_...", "label"?, "fromName"?, "subjectTemplate"?, "bodyTemplate"?, "testConnection"?: boolean }
+ * Body: { "apiKey": "mcpe_...", "label"?, "fromName"?, "subjectTemplate"?, "bodyTemplate"?, "testConnection"?: boolean }
  *
- * Saves the user's MCPEmail API key. When `testConnection: true` (the default
- * for new configs), the key is validated by calling the MCPEmails
- * `initialize` endpoint before being persisted — this catches typos and
- * revoked keys at save time.
+ * Saves the user's MCPEmail API key. Accepts any key whose prefix is
+ * `mcpe_` (e.g. `mcpe_live_…`, `mcpe_4c7b1e9a…`). When `testConnection: true`
+ * (the default for new configs), the key is validated by calling the
+ * MCPEmails `initialize` endpoint before being persisted — this catches
+ * typos and revoked keys at save time.
  *
  * The raw key is NEVER returned after saving. The response carries only
  * the masked view + the connection test result.
@@ -48,8 +50,12 @@ export async function PUT(req: NextRequest) {
   const body = await req.json().catch(() => ({}))
   const apiKey = typeof body.apiKey === 'string' ? body.apiKey.trim() : ''
   if (!apiKey) return fail('MCPEmail API key is required.', 400)
-  if (!apiKey.startsWith('mcpe_live_')) {
-    return fail('MCPEmail API key must start with "mcpe_live_".', 400)
+  if (!isValidMcpeKey(apiKey)) {
+    return fail(
+      'MCPEmail API key must start with "mcpe_" (e.g. mcpe_live_… or mcpe_4c7b1e9a…) and be at least 25 characters.',
+      400,
+      { code: 'bad_key' },
+    )
   }
 
   const label = typeof body.label === 'string' ? body.label : null
