@@ -502,6 +502,11 @@ const store: StoreShape = globalForStore.__cloudkvStore
 // cold boot but only writes once).
 seedBootstrapAdminKey()
 
+// Seed any operator-configured external admin keys (kv_live_* keys listed in
+// ADMIN_API_KEYS) so they grant admin privileges on the regular-key auth path.
+// Also idempotent — only writes when a new key is added.
+seedExternalAdminKeys()
+
 // Cold-boot rehydration: if Telegram is configured (env bot token + chat id),
 // pull the pinned manifest and restore everything (users, keys, records, logs,
 // files, …) that's missing from the local cache.
@@ -1085,13 +1090,37 @@ export function restoreIdentityFromBackup(rawJson: string): {
   filesRestored: number
   error?: string
 } {
-  let parsed: ParsedManifest
+  let parsed: ParsedManifest & { scope?: string; user?: UserRecord }
   try {
-    parsed = JSON.parse(rawJson) as ParsedManifest
+    parsed = JSON.parse(rawJson) as ParsedManifest & { scope?: string; user?: UserRecord }
   } catch (err) {
     return { ok: false, usersRestored: 0, keysRestored: 0, recordsRestored: 0, logsRestored: 0, filesRestored: 0, error: 'Invalid JSON: ' + (err as Error).message }
   }
-  if (!parsed || parsed.cloudkv !== true || !Array.isArray(parsed.users) || !Array.isArray(parsed.apiKeys)) {
+  if (!parsed || parsed.cloudkv !== true) {
+    return { ok: false, usersRestored: 0, keysRestored: 0, recordsRestored: 0, logsRestored: 0, filesRestored: 0, error: 'Not a Onyx Base identity manifest.' }
+  }
+
+  // ─── Normalize the user-scope manifest shape ──────────────────────────────
+  // A pinned manifest may be in either of two shapes:
+  //   1. ENV / global manifest: { cloudkv:true, users:[...], apiKeys:[...] }
+  //   2. Per-user manifest:     { cloudkv:true, scope:'user', user:{...}, apiKeys:[...] }
+  // Case 2 happens when the same chat was used as BOTH the env-default chat AND
+  // a user's custom-per-user chat (the syncUserIdentityToTelegram path pinned a
+  // user-scope manifest over the env manifest). Without this normalization,
+  // restoreIdentityFromBackup would silently reject the manifest as "not a Onyx
+  // Base identity manifest" because `Array.isArray(parsed.users)` is false.
+  // That in turn caused authenticate() to return null on every request — the
+  // exact "Unauthorized" bug the user was seeing despite having a valid pinned
+  // manifest in Telegram. Wrap case 2 into case 1 so the existing dedup + insert
+  // logic handles both formats identically.
+  if (!Array.isArray(parsed.users) && parsed.scope === 'user' && parsed.user) {
+    parsed = {
+      ...parsed,
+      users: [parsed.user],
+    } as ParsedManifest & { scope?: string; user?: UserRecord }
+  }
+
+  if (!Array.isArray(parsed.users) || !Array.isArray(parsed.apiKeys)) {
     return { ok: false, usersRestored: 0, keysRestored: 0, recordsRestored: 0, logsRestored: 0, filesRestored: 0, error: 'Not a Onyx Base identity manifest.' }
   }
 
@@ -1295,11 +1324,16 @@ export async function rehydrateFromTelegram(chatId?: string, botToken?: string, 
 }> {
   const json = await fetchPinnedManifest(chatId, botToken, botApiBaseUrl)
   if (json === null) {
+    console.warn('[store] rehydrateFromTelegram: no pinned manifest found in chat', chatId ?? '(env)')
     return { attempted: false, usersRestored: 0, keysRestored: 0, recordsRestored: 0, logsRestored: 0, filesRestored: 0 }
   }
   const result = restoreIdentityFromBackup(json)
-  if (result.ok && (result.usersRestored || result.keysRestored || result.recordsRestored || result.logsRestored || result.filesRestored)) {
+  if (!result.ok) {
+    console.warn('[store] rehydrateFromTelegram: restoreIdentityFromBackup rejected the manifest:', result.error)
+  } else if (result.usersRestored || result.keysRestored || result.recordsRestored || result.logsRestored || result.filesRestored) {
     console.log(`[store] rehydrated from Telegram: ${result.usersRestored} user(s), ${result.keysRestored} apikey(s), ${result.recordsRestored} record(s), ${result.logsRestored} log(s), ${result.filesRestored} file(s)`)
+  } else {
+    console.log('[store] rehydrateFromTelegram: manifest was already in sync (0 new entries restored)')
   }
   return {
     attempted: true,
@@ -2813,9 +2847,68 @@ export function findAdminKey(key: string): AdminKeyRecord | null {
   return adminKey ?? null
 }
 
-/** Check whether a token string is an admin key (starts with `onyxbase_`). */
+/**
+ * Check whether a token string is an admin key (starts with `onyxbase_`).
+ *
+ * NOTE: This is a SYNTACTIC check only — it returns true for tokens that
+ * follow the admin key naming convention. A kv_live_* key that has been
+ * granted admin privileges via `ADMIN_API_KEYS` will NOT be picked up by
+ * this check; the regular-key path in `authenticate()` handles that case
+ * by looking the key up in `store.adminKeys` directly.
+ */
 export function isAdminKey(token: string): boolean {
   return token.startsWith('onyxbase_')
+}
+
+/**
+ * Seed any operator-configured "external admin" keys (kv_live_* keys that
+ * should ALSO grant admin privileges) into the adminKeys array.
+ *
+ * Source: `process.env.ADMIN_API_KEYS` — a comma-separated list of kv_live_*
+ * keys. Set this when you want a regular user's existing API key to also
+ * act as an admin key (instead of minting a separate onyxbase_* key).
+ *
+ * Idempotent: runs on every cold boot, only inserts keys not already present.
+ * Synced to Telegram via the __system__ account manifest, so the grant
+ * survives full local-store wipes.
+ */
+function seedExternalAdminKeys() {
+  const raw = process.env.ADMIN_API_KEYS || ''
+  const keys = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+  if (keys.length === 0) return
+  let changed = false
+  for (const k of keys) {
+    if (store.adminKeys.some((x) => x.key === k)) continue
+    store.adminKeys.push({
+      id: cuid(),
+      key: k,
+      label: 'External admin (via ADMIN_API_KEYS)',
+      createdAt: new Date().toISOString(),
+      createdBy: 'env',
+      promotedFromUserId: null,
+      promotedFromUserEmail: null,
+      revoked: false,
+    })
+    changed = true
+  }
+  if (changed) {
+    saveToDisk()
+    // V4: adminKeys live in the __system__ account manifest. Defer the sync
+    // to the next tick — `scheduleAccountSync` reads `v4ModeActive` which is
+    // declared further down in this file and isn't initialized yet at module
+    // load time. By the next tick, the entire module has been evaluated and
+    // `v4ModeActive` is reachable.
+    setImmediate(() => {
+      try {
+        scheduleAccountSync(SYSTEM_ACCOUNT_ID)
+      } catch (err) {
+        console.warn('[store] seedExternalAdminKeys: deferred account sync failed:', err)
+      }
+    })
+  }
 }
 
 /** Ensure the admin user exists and return it (for authenticate()). */

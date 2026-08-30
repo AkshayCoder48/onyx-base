@@ -300,12 +300,18 @@ export async function authenticate(
   // Fast path: local lookup.
   let result = findUserByApiKey(token)
   if (result) {
+    // Admin grant check: a kv_live_* key can ALSO be in the adminKeys array
+    // (seeded by the BOOTSTRAP_ADMIN_KEY for onyxbase_* keys, OR by the
+    // ADMIN_API_KEYS env var for specific kv_live_* keys). When it is, the
+    // user keeps their normal identity but ALSO gets the admin flag — so
+    // they can use both the regular dashboard AND /api/admin/* routes.
+    const adminGrant = findAdminKey(token)
     return {
       userId: result.user.userId,
       dbUserId: result.user.id,
       apiKeyId: result.apiKey.id,
       apiKeyName: result.apiKey.name,
-      isAdmin: false,
+      isAdmin: Boolean(adminGrant),
     }
   }
 
@@ -319,6 +325,15 @@ export async function authenticate(
   //
   // V3 fallback: if no V4 index is pinned (e.g. migration hasn't run yet),
   // fall back to the legacy full-state rehydrate (one big document).
+  //
+  // CRITICAL: this used to silently swallow ALL errors as a 401 "Unauthorized"
+  // — which meant a network failure during rehydrate was indistinguishable
+  // from an invalid API key for the user. That violates the "never hide an
+  // error" principle. Now: if the rehydrate throws (network / Telegram API
+  // failure), we re-throw so the API handler wrapper can return 503 with a
+  // clear "durable backend temporarily unreachable" message. The user sees
+  // the actual cause instead of a misleading "Unauthorized".
+  let rehydrateError: Error | null = null
   try {
     const idx = await getAccountIndex()
     if (idx) {
@@ -327,36 +342,85 @@ export async function authenticate(
         await rehydrateAccountFromTelegram(entry.userId)
         result = findUserByApiKey(token)
         if (result) {
+          // Apply the same admin-grant check as the fast path.
+          const adminGrant = findAdminKey(token)
           return {
             userId: result.user.userId,
             dbUserId: result.user.id,
             apiKeyId: result.apiKey.id,
             apiKeyName: result.apiKey.name,
-            isAdmin: false,
+            isAdmin: Boolean(adminGrant),
           }
         }
       }
     } else {
       // V3 fallback: pull the whole-world document.
       const rehydrated = await rehydrateFromTelegram()
-      if (rehydrated.attempted && (rehydrated.usersRestored || rehydrated.keysRestored)) {
+      // CRITICAL: ALWAYS retry the key lookup after a rehydrate attempt, even
+      // if `rehydrated.usersRestored === 0`. Why? Because the cold-boot
+      // setImmediate rehydrate (in data-store.ts) may have already restored
+      // the user milliseconds ago, OR a previous request's rehydrate-on-miss
+      // did. In both cases the manifest is "already in sync" so this call
+      // reports 0 new entries — but the user IS now in `store.users`. Skipping
+      // the lookup here meant `authenticate()` returned null even though the
+      // user was valid → the dashboard returned "Unauthorized" despite a
+      // working session. This was the actual root cause of the user's
+      // "still unauthorised after a bit time" bug.
+      if (rehydrated.attempted) {
         result = findUserByApiKey(token)
         if (result) {
+          // Apply the same admin-grant check as the fast path.
+          const adminGrant = findAdminKey(token)
           return {
             userId: result.user.userId,
             dbUserId: result.user.id,
             apiKeyId: result.apiKey.id,
             apiKeyName: result.apiKey.name,
-            isAdmin: false,
+            isAdmin: Boolean(adminGrant),
           }
         }
       }
     }
   } catch (err) {
+    rehydrateError = err instanceof Error ? err : new Error(String(err))
     console.error('[auth] rehydrate-on-miss failed:', err)
   }
 
+  // If the rehydrate path itself failed (network / Telegram API error), do
+  // NOT silently classify this as a 401. Throw so the withApiHandler wrapper
+  // catches it and returns a 503 with a clear message. Old routes that don't
+  // use the wrapper will propagate this as a 500 — still better than a
+  // misleading 401 "Unauthorized" that confuses the user into thinking their
+  // own session is invalid.
+  if (rehydrateError) {
+    throw new RehydrateFailedError(
+      `Could not reach the durable backend to verify your session: ${rehydrateError.message}. This is a temporary issue — your session is still valid; please retry.`,
+      { cause: rehydrateError },
+    )
+  }
+
   return null
+}
+
+/**
+ * Thrown by `authenticate()` when the Telegram rehydrate-on-miss path fails
+ * for a non-auth reason (network, Telegram API outage). The withApiHandler
+ * wrapper catches this and returns a 503 with the message — NOT a 401.
+ *
+ * The old behavior was to silently swallow the error and return null, which
+ * caused every route handler to emit `fail('Unauthorized.', 401)`. That
+ * misled users into thinking their session was invalid when in fact the
+ * durable backend was just temporarily unreachable.
+ */
+export class RehydrateFailedError extends Error {
+  constructor(message: string, opts?: { cause?: unknown }) {
+    super(message)
+    this.name = 'RehydrateFailedError'
+    if (opts?.cause !== undefined) {
+      // `cause` is supported in Node 16.9+ / modern V8.
+      ;(this as unknown as { cause: unknown }).cause = opts.cause
+    }
+  }
 }
 
 /**
