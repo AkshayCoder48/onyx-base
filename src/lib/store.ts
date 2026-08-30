@@ -16,6 +16,7 @@ export type ViewKey =
   | 'sql'
   | 'tables'
   | 'docs'
+  | 'email-otp'
   | 'settings'
 
 export interface SessionUser {

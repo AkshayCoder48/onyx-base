@@ -19,6 +19,7 @@ import {
   Github,
   Code2,
   Table2,
+  MailCheck,
 } from 'lucide-react'
 import { useOnyxBase, type ViewKey } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -52,6 +53,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
       { key: 'sql', label: 'SQL Editor', icon: Code2 },
       { key: 'tables', label: 'Tables', icon: Table2 },
       { key: 'docs', label: 'Docs', icon: BookOpen },
+      { key: 'email-otp', label: 'Email OTP', icon: MailCheck },
       { key: 'logs', label: 'Logs', icon: ScrollText },
       { key: 'analytics', label: 'Analytics', icon: BarChart3 },
     ],
