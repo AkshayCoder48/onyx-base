@@ -2896,18 +2896,28 @@ function seedExternalAdminKeys() {
   }
   if (changed) {
     saveToDisk()
-    // V4: adminKeys live in the __system__ account manifest. Defer the sync
-    // to the next tick — `scheduleAccountSync` reads `v4ModeActive` which is
-    // declared further down in this file and isn't initialized yet at module
-    // load time. By the next tick, the entire module has been evaluated and
-    // `v4ModeActive` is reachable.
-    setImmediate(() => {
-      try {
-        scheduleAccountSync(SYSTEM_ACCOUNT_ID)
-      } catch (err) {
-        console.warn('[store] seedExternalAdminKeys: deferred account sync failed:', err)
-      }
-    })
+    // CRITICAL: do NOT trigger scheduleAccountSync here.
+    //
+    // Earlier this called `setImmediate(() => scheduleAccountSync(SYSTEM_ACCOUNT_ID))`
+    // to mirror the adminKeys to Telegram. That deferred sync ran BEFORE the
+    // cold-boot rehydrateFromTelegram setImmediate (queued later in module
+    // init), so on a serverless cold boot with an empty store, the sync built
+    // a manifest containing ONLY the admin user + admin keys (no regular
+    // users / API keys yet) and uploaded+pinned it to Telegram — clobbering
+    // the real pinned manifest with all the user data. The subsequent
+    // rehydrate then fetched the (now admin-only) manifest and restored 0
+    // entries because everything in it was already in the local store from
+    // the seed step. Net effect: regular users became unrecoverable on
+    // serverless cold boots ("Unauthorized" on every request with their
+    // kv_live_* key), even though the data was in Telegram moments before.
+    //
+    // The admin keys are persisted to the local JSON cache via saveToDisk()
+    // (sufficient for the dev server, which has a persistent filesystem).
+    // On Vercel, the admin keys are re-seeded from `ADMIN_API_KEYS` env var
+    // on every cold boot — they don't NEED to be eagerly synced to Telegram.
+    // They will be synced the next time a user-triggered write (e.g. creating
+    // a table / record / API key via the dashboard) calls scheduleAccountSync,
+    // by which point the local store already has the full state — non-destructive.
   }
 }
 
