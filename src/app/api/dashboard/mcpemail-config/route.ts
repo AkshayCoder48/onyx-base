@@ -35,10 +35,11 @@ export async function GET(req: NextRequest) {
  * Body: { "apiKey": "mcpe_...", "label"?, "fromName"?, "subjectTemplate"?, "bodyTemplate"?, "testConnection"?: boolean }
  *
  * Saves the user's MCPEmail API key. Accepts any key whose prefix is
- * `mcpe_` (e.g. `mcpe_live_…`, `mcpe_4c7b1e9a…`). When `testConnection: true`
- * (the default for new configs), the key is validated by calling the
- * MCPEmails `initialize` endpoint before being persisted — this catches
- * typos and revoked keys at save time.
+ * `mcpe_` (the canonical format is `mcpe_<64-hex-chars>`, e.g.
+ * `mcpe_4c7b1e9a0d5f38a2b6e04d17c9f2a58b3d6e0f1a2b4c6d8e0f2a4b6c8d0e1f3a`).
+ * When `testConnection: true` (the default for new configs), the key is
+ * validated by calling the MCPEmails `initialize` endpoint before being
+ * persisted — this catches typos and revoked keys at save time.
  *
  * The raw key is NEVER returned after saving. The response carries only
  * the masked view + the connection test result.
@@ -52,7 +53,7 @@ export async function PUT(req: NextRequest) {
   if (!apiKey) return fail('MCPEmail API key is required.', 400)
   if (!isValidMcpeKey(apiKey)) {
     return fail(
-      'MCPEmail API key must start with "mcpe_" (e.g. mcpe_live_… or mcpe_4c7b1e9a…) and be at least 25 characters.',
+      'MCPEmail API key must start with "mcpe_" and be at least 25 characters (e.g. mcpe_4c7b1e9a0d5f…).',
       400,
       { code: 'bad_key' },
     )

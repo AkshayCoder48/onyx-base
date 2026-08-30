@@ -171,7 +171,7 @@ function ConfigCard({
       return
     }
     if (!trimmed.startsWith('mcpe_') || trimmed.length < 25) {
-      toast.error('Key must start with "mcpe_" (e.g. mcpe_live_… or mcpe_4c7b1e9a…) and be at least 25 chars')
+      toast.error('Key must start with "mcpe_" and be at least 25 chars (e.g. mcpe_4c7b1e9a0d5f…)')
       return
     }
     setSaving(true)
@@ -271,7 +271,7 @@ function ConfigCard({
               type={showKey ? 'text' : 'password'}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder={config?.hasConfig ? '•••••••• (saved — paste a new key to replace)' : 'mcpe_live_AbCdEfGhIjKlMnOpQrStUvWxYz123456 or mcpe_4c7b1e9aAbCd…'}
+              placeholder={config?.hasConfig ? '•••••••• (saved — paste a new key to replace)' : 'mcpe_4c7b1e9a0d5f38a2b6e04d17c9f2a58b3d6e0f1a2b4c6d8e0f2a4b6c8d0e1f3a'}
               className="font-mono text-sm h-9 pr-16"
               autoComplete="off"
               spellCheck={false}

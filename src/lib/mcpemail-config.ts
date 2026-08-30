@@ -11,9 +11,9 @@
  *
  * Security model: the value stored on disk (cloudkv.json) and in the
  * Telegram mirror contains the raw `mcpe_*` key. The dashboard GET
- * endpoint returns a MASKED version (e.g. `mcpe_live_AbCd…` or
- * `mcpe_4c7b1e9aAbCd…`) so the key is never re-exposed to the browser after
- * saving — same posture as the Telegram bot token in `telegram-config`.
+ * endpoint returns a MASKED version (e.g. `mcpe_4c7b1e9a…6b74`) so the
+ * key is never re-exposed to the browser after saving — same posture as
+ * the Telegram bot token in `telegram-config`.
  *
  * The send/verify endpoints read the raw key server-side directly from
  * the record — they never go through this mask.
@@ -25,7 +25,7 @@ const COLLECTION = '__mcpemail__'
 const KEY = 'config'
 
 export interface McpeConfigValue {
-  /** Raw MCPEmails API key, e.g. `mcpe_live_AbCdEf...` or `mcpe_4c7b1e9aAbCd...`. */
+  /** Raw MCPEmails API key, e.g. `mcpe_4c7b1e9a0d5f38a2b6e04d17c9f2a58b3d6e0f1a2b4c6d8e0f2a4b6c8d0e1f3a`. */
   apiKey: string
   /** Optional human label for the dashboard. */
   label: string | null
@@ -40,7 +40,7 @@ export interface McpeConfigValue {
 
 export interface McpeConfigPublicView {
   hasConfig: boolean
-  /** Masked key, e.g. `mcpe_live_AbCd…` or `mcpe_4c7b1e9aAbCd…`. Never the raw key. */
+  /** Masked key, e.g. `mcpe_4c7b1e9a…6b74`. Never the raw key. */
   apiKeyMasked: string
   label: string | null
   fromName: string | null
@@ -56,50 +56,49 @@ const DEFAULT_BODY =
 /**
  * Validate an MCPEmails API key.
  *
- * MCPEmails has issued multiple key families over time:
- *   - `mcpe_live_*` — the original live keys (e.g. `mcpe_live_AbCdEf…`)
- *   - `mcpe_4c7b1e9a*`  — the newer key format (e.g. `mcpe_4c7b1e9aAbCd…`)
- *   - Future variants may follow.
+ * MCPEmails API keys have a single format:
+ *   `mcpe_<64-hex-chars>`
+ * e.g. `mcpe_4c7b1e9a0d5f38a2b6e04d17c9f2a58b3d6e0f1a2b4c6d8e0f2a4b6c8d0e1f3a`
  *
- * We accept ANY key whose literal prefix is `mcpe_` and which has at least
- * 20 characters of payload after the prefix (the shortest key MCPEmails
- * issues today is ~32 chars total). The actual key validity is enforced
- * server-side by mcpemails.com when we call `initialize` — so the prefix
- * check here is only a UX guard against obviously-malformed input (paste
- * failures, partial strings, someone pasting a `kv_live_*` Onyx Base key
- * by mistake).
+ * The literal prefix is `mcpe_`; the remaining 64 characters are random
+ * hex. There are NO sub-families (no `mcpe_live_…` vs `mcpe_4c7b1e9a…`
+ * distinction) — anything that looks like that is just a chunk of the
+ * random hex payload.
+ *
+ * This validator is intentionally permissive: it accepts ANY key whose
+ * prefix is `mcpe_` and which is at least 25 total chars of `[A-Za-z0-9_-]`.
+ * The actual key validity is enforced server-side by mcpemails.com when
+ * we call `initialize` on save — so the prefix check here is only a UX
+ * guard against obviously-malformed input (paste failures, partial
+ * strings, someone pasting a `kv_live_*` Onyx Base key by mistake).
  */
 export function isValidMcpeKey(key: string): boolean {
   if (!key) return false
   if (!key.startsWith('mcpe_')) return false
-  // At least 20 chars of payload after `mcpe_` (so >= 25 total).
+  // At least 20 chars of payload after `mcpe_` (so >= 25 total). Real keys
+  // are 69 chars (5 prefix + 64 hex); 25 is a forgiving lower bound.
   if (key.length < 25) return false
   // Reject whitespace, control chars, and the obviously-wrong characters.
   return /^[A-Za-z0-9_\-]+$/.test(key)
 }
 
 /**
- * Mask an MCPEmails key for safe display. Keeps the prefix + first 4 + last 4
- * characters of the payload, replaces the middle with an ellipsis.
+ * Mask an MCPEmails key for safe display. Renders as:
+ *   `<first 5 chars>` + `<first 8 of payload>` + `…` + `<last 4 of payload>`
  *
- *   mcpe_live_AbCdEfGhIjKlMnOpQrStUvWxYz123456
+ *   mcpe_4c7b1e9a0d5f38a2b6e04d17c9f2a58b3d6e0f1a2b4c6d8e0f2a4b6c8d0e1f3a
  *                  ↓
- *   mcpe_live_AbCd…3456
+ *   mcpe_4c7b1e9a…6b74
  *
- *   mcpe_4c7b1e9aAbCdEfGhIjKlMnOpQrStUvWxYz123456
- *                  ↓
- *   mcpe_4c7b1e9aAbCd…3456
+ * If the payload is too short to mask meaningfully (<=12 chars), the raw
+ * key is returned as-is.
  */
 export function maskMcpeKey(key: string): string {
   if (!key) return ''
-  // Find the prefix boundary (everything up to and including the first `_`
-  // after `mcpe`). For `mcpe_live_<payload>` that's `mcpe_live_`. For
-  // `mcpe_4c7b1e9a<payload>` (no second `_`) we just slice the first 9 chars.
-  const secondUnderscore = key.indexOf('_', 5) // start search after `mcpe_`
-  const prefix = secondUnderscore === -1 ? key.slice(0, 9) : key.slice(0, secondUnderscore + 1)
-  const payload = key.slice(prefix.length)
-  if (payload.length <= 8) return key // too short to mask meaningfully
-  return `${prefix}${payload.slice(0, 4)}…${payload.slice(-4)}`
+  const prefix = key.slice(0, 5) // `mcpe_`
+  const payload = key.slice(5)
+  if (payload.length <= 12) return key
+  return `${prefix}${payload.slice(0, 8)}…${payload.slice(-4)}`
 }
 
 /** Get the raw MCPEmail config for a user (server-side only). */
@@ -163,7 +162,7 @@ export function setMcpeConfig(
   if (!trimmedKey) throw new Error('MCPEmail API key is required.')
   if (!isValidMcpeKey(trimmedKey)) {
     throw new Error(
-      'MCPEmail API key must start with "mcpe_" (e.g. mcpe_live_… or mcpe_4c7b1e9a…) and be at least 25 characters.',
+      'MCPEmail API key must start with "mcpe_" and be at least 25 characters (e.g. mcpe_4c7b1e9a0d5f…).',
     )
   }
   const value: McpeConfigValue = {
