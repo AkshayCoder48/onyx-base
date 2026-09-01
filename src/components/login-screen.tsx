@@ -266,9 +266,12 @@ export function LoginScreen() {
   return (
     <div className="min-h-screen flex flex-col">
       <main className="flex-1 grid lg:grid-cols-2">
-        {/* Left — hero / marketing */}
-        <section className="relative hidden lg:flex flex-col justify-between p-10 bg-grid overflow-hidden border-r border-border/60">
-          <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-transparent pointer-events-none" />
+        {/* Left — hero / marketing (glass panel over the sunrise aurora) */}
+        <section className="relative hidden lg:flex flex-col justify-between p-10 overflow-hidden">
+          <div className="absolute inset-0 glass rounded-none" />
+          <div className="absolute inset-0 bg-gradient-to-br from-[#f2521b]/8 via-transparent to-[#ef8f2a]/10 pointer-events-none" />
+          <div className="absolute -top-24 -left-24 size-96 rounded-full bg-[#ffd9a8]/50 blur-3xl pointer-events-none" />
+          <div className="absolute -bottom-32 -right-16 size-96 rounded-full bg-[#ff9d7a]/35 blur-3xl pointer-events-none" />
           <div className="relative flex items-center gap-2.5">
             <Logo />
             <span className="font-mono text-sm tracking-tight text-foreground/80">Onyx Base</span>
@@ -331,6 +334,7 @@ export function LoginScreen() {
                 </motion.div>
               ) : (
                 <motion.div key="form" className="space-y-7" {...motionVariants}>
+                  <div className="glass rounded-3xl p-6 sm:p-7 space-y-6">
                   <div className="space-y-1.5">
                     <h2 className="text-xl font-semibold tracking-tight">Get started</h2>
                     <p className="text-sm text-muted-foreground">
@@ -458,7 +462,7 @@ export function LoginScreen() {
                     {/* ── Sign in ── */}
                     <TabsContent value="signin" className="mt-5">
                       {/* Mode toggle: API key  |  Email + password */}
-                      <div className="grid grid-cols-2 gap-1 p-1 mb-4 rounded-lg border border-border/60 bg-card/40 text-xs">
+                  <div className="grid grid-cols-2 gap-1 p-1 mb-4 rounded-2xl border border-white/60 bg-white/45 text-xs">
                         <button
                           type="button"
                           onClick={() => setSignInMode('key')}
@@ -645,7 +649,7 @@ export function LoginScreen() {
                     </TabsContent>
                   </Tabs>
 
-                  <div className="rounded-lg border border-border/60 bg-card/40 p-4 space-y-2">
+                  <div className="rounded-2xl border border-white/60 bg-white/45 backdrop-blur-sm p-4 space-y-2">
                     <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
                       <Terminal className="size-3.5" /> Prefer the terminal? Sign up there:
                     </div>
@@ -659,6 +663,7 @@ export function LoginScreen() {
                       Or create the account here and connect the terminal with{' '}
                       <code className="font-mono text-primary">onyx login --server &lt;url&gt; --key &lt;api-key&gt;</code>.
                     </p>
+                  </div>
                   </div>
                 </motion.div>
               )}
@@ -722,7 +727,7 @@ function SuccessPanel({
       </div>
 
       {/* Identity card */}
-      <div className="rounded-lg border border-border/60 bg-card/40 p-4 space-y-3">
+      <div className="rounded-2xl border border-white/60 bg-white/45 backdrop-blur-sm p-4 space-y-3">
         <Row label="User ID" value={result.userId} mono accent="cyan" />
         {result.email && <Row label="Email" value={result.email} mono={false} />}
       </div>

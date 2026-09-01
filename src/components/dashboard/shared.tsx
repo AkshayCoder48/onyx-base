@@ -4,12 +4,12 @@ import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
 const TYPE_STYLES: Record<string, string> = {
-  string: 'border-primary/30 bg-primary/10 text-primary',
-  number: 'border-sky-300 bg-sky-100 text-sky-800',
-  boolean: 'border-amber-300 bg-amber-100 text-amber-800',
-  object: 'border-violet-300 bg-violet-100 text-violet-800',
-  array: 'border-fuchsia-300 bg-fuchsia-100 text-fuchsia-800',
-  null: 'border-zinc-300 bg-zinc-100 text-zinc-700',
+  string: 'border-[#f2521b]/25 bg-[#f2521b]/12 text-[#d8410f]',
+  number: 'border-[#c9a227]/30 bg-[#c9a227]/14 text-[#8a6d0f]',
+  boolean: 'border-emerald-500/25 bg-emerald-500/12 text-emerald-700',
+  object: 'border-[#ef8f2a]/30 bg-[#ef8f2a]/14 text-[#b96a12]',
+  array: 'border-[#fb7185]/25 bg-[#fb7185]/14 text-[#c2415c]',
+  null: 'border-[#b1a08c]/40 bg-[#b1a08c]/16 text-[#8a7768]',
 }
 
 export function TypeBadge({ type, className }: { type: string; className?: string }) {
@@ -18,7 +18,7 @@ export function TypeBadge({ type, className }: { type: string; className?: strin
       variant="outline"
       className={cn(
         'font-mono text-[10px] uppercase tracking-wide px-1.5 py-0',
-        TYPE_STYLES[type] ?? 'border-zinc-400/30 bg-zinc-400/10 text-zinc-300',
+        TYPE_STYLES[type] ?? 'border-[#8a7768]/30 bg-[#8a7768]/12 text-[#5c5049]',
         className,
       )}
     >
@@ -34,13 +34,13 @@ export function ValuePreview({ value, type, max = 48 }: { value: unknown; type: 
     return <span className="font-mono text-sm text-foreground/90">{truncate(s, max)}</span>
   }
   if (type === 'boolean') {
-    return <span className="font-mono text-sm text-amber-800">{String(value)}</span>
+    return <span className="font-mono text-sm text-emerald-700">{String(value)}</span>
   }
   if (type === 'number') {
-    return <span className="font-mono text-sm text-sky-700">{String(value)}</span>
+    return <span className="font-mono text-sm text-[#8a6d0f]">{String(value)}</span>
   }
   const json = JSON.stringify(value)
-  return <span className="font-mono text-sm text-violet-700/90">{truncate(json, max)}</span>
+  return <span className="font-mono text-sm text-[#b96a12]">{truncate(json, max)}</span>
 }
 
 function truncate(s: string, max: number) {

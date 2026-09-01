@@ -92,3 +92,5 @@ storage-*.png
 .wrangler/
 
 .dev.vars
+.next-dev.pid
+db/recovered-manifest.json

@@ -1,7 +1,6 @@
 import { NextRequest } from 'next/server'
 import { withPublicApiHandler, type ApiHandlerCtx } from '@/lib/with-api-handler'
-import { isTelegramConfigured } from '@/lib/telegram'
-import { probeTelegram } from '@/lib/telegram'
+import { isTelegramConfigured, pingTelegram } from '@/lib/telegram'
 
 export const runtime = 'nodejs'
 
@@ -70,13 +69,13 @@ export const GET = withPublicApiHandler('health.check', async (req: NextRequest,
     telegramDetail = 'env defaults incomplete (bot token or chat ID missing)'
   } else {
     try {
-      const probe = await probeTelegram(envChat, envBot, process.env.TELEGRAM_BOT_API_URL)
+      const probe = await pingTelegram(envChat, envBot, process.env.TELEGRAM_BOT_API_URL)
       if (probe.ok) {
         telegramStatus = 'healthy'
         telegramDetail = `chat reachable (type: ${probe.chatType ?? 'unknown'})`
       } else {
-        telegramStatus = probe.telegramError.category === 'network' ? 'degraded' : 'unhealthy'
-        telegramDetail = probe.telegramError.description
+        telegramStatus = 'degraded'
+        telegramDetail = probe.error ?? 'probe failed'
       }
     } catch (err) {
       telegramStatus = 'unhealthy'

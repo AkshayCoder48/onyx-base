@@ -19,7 +19,10 @@ import {
   Github,
   Code2,
   Table2,
+  Activity,
   MailCheck,
+  Sun,
+  HelpCircle,
 } from 'lucide-react'
 import { useOnyxBase, type ViewKey } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -48,21 +51,74 @@ const NAV: { group: string; items: NavItem[] }[] = [
     group: 'Develop',
     items: [
       { key: 'api-keys', label: 'API Keys', icon: KeyRound },
+      { key: 'email-otp', label: 'Email OTP', icon: MailCheck },
       { key: 'share', label: 'Public Share', icon: Share2 },
       { key: 'playground', label: 'API Playground', icon: TerminalSquare },
       { key: 'sql', label: 'SQL Editor', icon: Code2 },
       { key: 'tables', label: 'Tables', icon: Table2 },
       { key: 'docs', label: 'Docs', icon: BookOpen },
-      { key: 'email-otp', label: 'Email OTP', icon: MailCheck },
       { key: 'logs', label: 'Logs', icon: ScrollText },
       { key: 'analytics', label: 'Analytics', icon: BarChart3 },
     ],
   },
   {
     group: 'Account',
-    items: [{ key: 'settings', label: 'Settings', icon: Settings }],
+    items: [
+      { key: 'diagnostics', label: 'Diagnostics', icon: Activity, hint: 'System health, queue, errors' },
+      { key: 'settings', label: 'Settings', icon: Settings },
+    ],
   },
 ]
+
+/** Sunrise logo mark — coral→amber gradient square with a white sun. */
+function LogoMark({ size = 'size-10' }: { size?: string }) {
+  return (
+    <div
+      className={cn(
+        size,
+        'rounded-2xl bg-gradient-to-br from-[#f2521b] via-[#ef8f2a] to-[#d8410f]',
+        'flex items-center justify-center shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_8px_20px_-8px_rgba(242,82,27,0.6)]',
+      )}
+      aria-label="Onyx Base"
+    >
+      {/* Inline SVG sun — no icon font, always renders. */}
+      <svg viewBox="0 0 24 24" fill="none" className="size-1/2 text-white" aria-hidden="true">
+        <circle cx="12" cy="12" r="4.4" fill="currentColor" />
+        <g stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <line x1="12" y1="2.2" x2="12" y2="4.6" />
+          <line x1="12" y1="19.4" x2="12" y2="21.8" />
+          <line x1="2.2" y1="12" x2="4.6" y2="12" />
+          <line x1="19.4" y1="12" x2="21.8" y2="12" />
+          <line x1="5.06" y1="5.06" x2="6.76" y2="6.76" />
+          <line x1="17.24" y1="17.24" x2="18.94" y2="18.94" />
+          <line x1="5.06" y1="18.94" x2="6.76" y2="17.24" />
+          <line x1="17.24" y1="6.76" x2="18.94" y2="5.06" />
+        </g>
+      </svg>
+    </div>
+  )
+}
+
+/** A single icon-rail nav button — 48px hit area, tooltip on hover, active = coral gradient. */
+function RailItem({ item, active, onClick }: { item: NavItem; active: boolean; onClick: () => void }) {
+  const Icon = item.icon
+  return (
+    <button
+      onClick={onClick}
+      title={item.label}
+      aria-label={item.label}
+      aria-current={active ? 'page' : undefined}
+      className={cn(
+        'group relative size-12 rounded-2xl grid place-items-center transition-all duration-150 shrink-0',
+        active
+          ? 'bg-gradient-to-br from-[#f2521b] to-[#d8410f] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.3),0_8px_18px_-8px_rgba(242,82,27,0.65)]'
+          : 'text-[#8a7768] hover:text-[#1c1512] hover:bg-white/60 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]',
+      )}
+    >
+      <Icon className="size-[22px]" strokeWidth={active ? 2.2 : 2} />
+    </button>
+  )
+}
 
 export function Sidebar() {
   const activeView = useOnyxBase((s) => s.activeView)
@@ -76,22 +132,20 @@ export function Sidebar() {
     toast.success('Signed out')
   }
 
-  const content = (
+  /* ── Mobile drawer content: labels + icons (roomier list) ── */
+  const mobileContent = (
     <div className="flex h-full flex-col">
-      {/* Brand */}
-      <div className="flex items-center gap-2.5 px-4 h-14 border-b border-border/60">
-        <img src="/logo.png" alt="Onyx Base" className="size-7 rounded-md object-cover" />
-        <span className="font-mono text-sm tracking-tight">Onyx Base</span>
-        <span className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded border border-primary/30 bg-primary/10 text-primary uppercase">
+      <div className="flex items-center gap-2.5 px-4 h-14 border-b border-white/50">
+        <LogoMark size="size-8" />
+        <span className="font-display text-sm font-semibold tracking-tight">Onyx Base</span>
+        <span className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded-full border border-primary/30 bg-primary/10 text-primary uppercase">
           free
         </span>
       </div>
-
-      {/* Nav */}
       <nav className="flex-1 overflow-y-auto scroll-slim px-2.5 py-4 space-y-5 overscroll-contain">
         {NAV.map((section) => (
           <div key={section.group} className="space-y-1">
-            <div className="px-2.5 mb-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/60">
+            <div className="px-2.5 mb-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/70">
               {section.group}
             </div>
             {section.items.map((item) => {
@@ -104,16 +158,13 @@ export function Sidebar() {
                     setMobileOpen(false)
                   }}
                   className={cn(
-                    // py-2.5 + min-h-[40px] so the touch target clears the
-                    // 44px Apple/Google minimum on phones (icon + padding).
-                    // lg:py-2 restores the tighter desktop density.
-                    'w-full group flex items-center gap-2.5 rounded-md px-2.5 py-2.5 lg:py-2 min-h-[40px] lg:min-h-0 text-sm transition-colors',
+                    'w-full group flex items-center gap-2.5 rounded-2xl px-2.5 py-2.5 min-h-[40px] text-sm font-medium transition-all',
                     active
-                      ? 'bg-primary/10 text-primary border border-primary/20'
-                      : 'text-muted-foreground hover:text-foreground hover:bg-muted/50 border border-transparent',
+                      ? 'bg-gradient-to-r from-[#f2521b] to-[#d8410f] text-white shadow-[0_8px_18px_-8px_rgba(242,82,27,0.6)]'
+                      : 'text-[#5c5049] hover:text-[#1c1512] hover:bg-white/60',
                   )}
                 >
-                  <item.icon className={cn('size-4 shrink-0', active ? 'text-primary' : 'text-muted-foreground group-hover:text-foreground')} />
+                  <item.icon className={cn('size-4 shrink-0', active ? 'text-white' : 'text-[#8a7768]')} />
                   <span className="flex-1 text-left truncate">{item.label}</span>
                 </button>
               )
@@ -121,11 +172,9 @@ export function Sidebar() {
           </div>
         ))}
       </nav>
-
-      {/* User card */}
-      <div className="border-t border-border/60 p-3 space-y-2">
-        <div className="flex items-center gap-2.5 px-1.5 py-1.5 rounded-md bg-muted/40">
-          <div className="size-7 rounded-md bg-gradient-to-br from-primary/30 to-primary/20 border border-primary/30 flex items-center justify-center text-[11px] font-mono text-primary">
+      <div className="border-t border-white/50 p-3 space-y-2">
+        <div className="flex items-center gap-2.5 px-1.5 py-1.5 rounded-2xl bg-white/50">
+          <div className="size-7 rounded-xl bg-gradient-to-br from-[#f2521b] to-[#ef8f2a] border border-white/60 flex items-center justify-center text-[11px] font-mono font-semibold text-white">
             {user?.userId?.slice(4, 6).toUpperCase() ?? 'KV'}
           </div>
           <div className="min-w-0 flex-1">
@@ -138,7 +187,7 @@ export function Sidebar() {
           variant="ghost"
           size="sm"
           onClick={logout}
-          className="w-full justify-start text-muted-foreground hover:text-foreground h-9"
+          className="w-full justify-start text-muted-foreground hover:text-foreground h-9 rounded-xl"
         >
           <LogOut className="size-3.5" /> Sign out
         </Button>
@@ -148,60 +197,106 @@ export function Sidebar() {
 
   return (
     <>
-      {/* Mobile top bar — semi-opaque bg so backdrop-blur has less to render. */}
-      <div className="lg:hidden sticky top-0 z-40 flex items-center gap-2 h-12 px-3 border-b border-border/60 bg-background/90 backdrop-blur-sm">
+      {/* Mobile top bar — glass */}
+      <div className="lg:hidden sticky top-0 z-40 flex items-center gap-2 h-12 px-3 border-b border-white/50 bg-white/60 backdrop-blur-md">
         <button
           onClick={() => setMobileOpen(true)}
-          className="size-9 grid place-items-center rounded-md hover:bg-muted active:bg-muted/70"
+          className="size-9 grid place-items-center rounded-xl hover:bg-white/70 active:bg-white/60"
           aria-label="Open menu"
         >
           <Menu className="size-4" />
         </button>
         <div className="flex items-center gap-2">
-          <img src="/logo.png" alt="Onyx Base" className="size-6 rounded-md object-cover" />
-          <span className="font-mono text-sm">Onyx Base</span>
+          <LogoMark size="size-6" />
+          <span className="font-display text-sm font-semibold">Onyx Base</span>
         </div>
+        <div className="ml-auto"><RealtimeIndicator /></div>
       </div>
 
-      {/* Mobile drawer — pure CSS transform (no framer-motion) for 60fps.
-          We always render the drawer+backdrop and toggle visibility via
-          translate/opacity so the slide animation runs on the compositor
-          thread instead of triggering layout. */}
+      {/* Mobile drawer — compositor-friendly slide. Glass panel over dimmed aurora. */}
       <div
         className="lg:hidden fixed inset-0 z-50"
-        // Pointer-events none when closed so the layer never blocks clicks.
         style={{ pointerEvents: mobileOpen ? 'auto' : 'none' }}
         aria-hidden={!mobileOpen}
       >
-        {/* Backdrop — fade in/out. */}
         <div
           onClick={() => setMobileOpen(false)}
           className={cn(
-            'absolute inset-0 bg-black/60 transition-opacity duration-200 ease-out',
+            'absolute inset-0 bg-[#3a2010]/50 backdrop-blur-sm transition-opacity duration-200 ease-out',
             mobileOpen ? 'opacity-100' : 'opacity-0',
           )}
         />
-        {/* Panel — slide in from the left on the compositor thread. */}
         <div
           className={cn(
-            'relative w-72 max-w-[80%] h-full bg-sidebar border-r border-border/60 shadow-xl transition-transform duration-200 ease-out',
+            'relative w-72 max-w-[80%] h-full bg-white/80 backdrop-blur-2xl border-r border-white/60 shadow-xl transition-transform duration-200 ease-out',
             mobileOpen ? 'translate-x-0' : '-translate-x-full',
           )}
         >
           <button
             onClick={() => setMobileOpen(false)}
-            className="absolute right-2 top-3 size-9 grid place-items-center rounded-md hover:bg-muted"
+            className="absolute right-2 top-3 size-9 grid place-items-center rounded-xl hover:bg-white/70"
             aria-label="Close menu"
           >
             <X className="size-4" />
           </button>
-          {content}
+          {mobileContent}
         </div>
       </div>
 
-      {/* Desktop sidebar */}
-      <aside className="hidden lg:flex w-60 shrink-0 border-r border-border/60 bg-sidebar/50">
-        {content}
+      {/* ── Desktop icon rail — slim floating glass rail ── */}
+      <aside className="hidden lg:flex w-[76px] shrink-0 py-3 pl-3">
+        <div className="glass rounded-3xl w-full flex flex-col items-center py-4 gap-3 overflow-hidden">
+          {/* Logo mark */}
+          <div className="px-1">
+            <LogoMark />
+          </div>
+
+          {/* Nav icons — scrollable middle, grouped with hairline dividers */}
+          <nav className="flex-1 overflow-y-auto scroll-slim w-full flex flex-col items-center gap-1.5 px-3 overscroll-contain">
+            {NAV.map((section, i) => (
+              <div key={section.group} className="w-full flex flex-col items-center gap-1.5">
+                {i > 0 && <div className="w-8 h-px bg-white/60 my-1.5" />}
+                {section.items.map((item) => (
+                  <RailItem
+                    key={item.key}
+                    item={item}
+                    active={activeView === item.key}
+                    onClick={() => setView(item.key)}
+                  />
+                ))}
+              </div>
+            ))}
+          </nav>
+
+          {/* Pinned bottom: help + avatar */}
+          <div className="w-full flex flex-col items-center gap-2 pt-1">
+            <button
+              onClick={() => setView('docs')}
+              title="Help & docs"
+              aria-label="Help & docs"
+              className="size-12 rounded-2xl grid place-items-center text-[#8a7768] hover:text-[#1c1512] hover:bg-white/60 transition-all"
+            >
+              <HelpCircle className="size-[22px]" strokeWidth={2} />
+            </button>
+            <div
+              title={user?.userId ?? 'Account'}
+              className="size-10 rounded-full bg-gradient-to-br from-[#f2521b] via-[#ef8f2a] to-[#d8410f] border-2 border-white/70 flex items-center justify-center text-xs font-mono font-bold text-white shadow-[0_6px_16px_-6px_rgba(242,82,27,0.6)] cursor-pointer"
+              onClick={() => setView('settings')}
+              role="button"
+              aria-label="Account & settings"
+            >
+              {user?.userId?.slice(4, 6).toUpperCase() ?? 'KV'}
+            </div>
+            <button
+              onClick={logout}
+              title="Sign out"
+              aria-label="Sign out"
+              className="size-9 rounded-xl grid place-items-center text-[#8a7768]/70 hover:text-destructive hover:bg-destructive/10 transition-all"
+            >
+              <LogOut className="size-4" />
+            </button>
+          </div>
+        </div>
       </aside>
     </>
   )
@@ -209,10 +304,10 @@ export function Sidebar() {
 
 export function FooterBar() {
   return (
-    <footer className="mt-auto border-t border-border/60 bg-sidebar/30">
-      <div className="px-4 sm:px-6 h-11 flex items-center justify-between text-[11px] text-muted-foreground/70">
+    <footer className="mt-auto">
+      <div className="mx-3 mb-3 glass-soft rounded-2xl px-4 h-11 flex items-center justify-between text-[11px] text-muted-foreground">
         <div className="flex items-center gap-3">
-          <span className="font-mono">Onyx Base</span>
+          <span className="font-display font-semibold text-foreground/70">Onyx Base</span>
           <span className="hidden sm:inline">·</span>
           <span className="hidden sm:inline">Telegram-backed key-value store</span>
         </div>

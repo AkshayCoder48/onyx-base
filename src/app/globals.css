@@ -4,22 +4,35 @@
 @custom-variant dark (&:is(.dark *));
 
 /*
-  Onyx Base — Claude-inspired palette
+  Onyx Base — SUNRISE GLASS design system
   ──────────────────────────────────────────────────────────────
-  Color            HEX       RGB             Usage
-  Primary (clay)   #d4744f   212, 116, 79    brand accent / buttons (light)
-  White            #ffffff   255, 255, 255   cards / surfaces (pure)
-  Cream            #f4f3ee   244, 243, 238   page background
-  Muted stone      #b1ada1   177, 173, 161   borders / secondary text
+  Light, warm, high-contrast glassmorphism. Frosted-WHITE glass
+  cards float over a warm sunrise aurora (peach/coral/amber/rose).
+
+  Token         HEX / RGBA          Usage
+  Aurora base   #fff2e6 → #ffd9c4   page background (diagonal)
+  Peach glow    #ffd9a8             radial top-left
+  Coral glow    #ff9d7a             radial top-right
+  Amber glow    #ef8f2a (soft)      radial bottom-right
+  Rose glow     #ff8fa0             radial bottom-left
+  Ink           #1c1512             headings / numbers (near-black)
+  Ink-2         #5c5049             secondary text
+  Ink-3         #8a7768             muted labels
+  Accent coral  #f2521b             THE accent (deeper: #d8410f)
+  Amber         #ef8f2a             supporting hue
+  Rose          #fb7185             negatives / decorative only
+  Emerald       #059669             positive status
+  Glass card    white 0.74 → 0.56   blur(22px) saturate(150%)
   ──────────────────────────────────────────────────────────────
-  Light theme only (Claude-style warm, paper-like surface).
+  No indigo. No violet. No blue gradients. The warmth is the identity.
 */
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-jetbrains-mono);
+  --font-display: var(--font-space-grotesk);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -55,167 +68,225 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
-/* ── Claude light palette ── */
+/* ── Sunrise glass palette ── */
 :root {
-  --radius: 0.625rem;
+  --radius: 1rem;
 
-  /* Surfaces */
-  --background: #f4f3ee;        /* cream — page background */
-  --foreground: #2b2825;        /* near-black warm ink */
-  --card: #ffffff;              /* pure white cards */
-  --card-foreground: #2b2825;
+  /* Surfaces — glass over the aurora */
+  --background: #fff2e6;        /* pale peach base */
+  --foreground: #1c1512;        /* near-black warm ink */
+  --card: #ffffff;              /* pure white — used at /40…/70 alpha + blur for glass */
+  --card-foreground: #1c1512;
   --popover: #ffffff;
-  --popover-foreground: #2b2825;
+  --popover-foreground: #1c1512;
 
-  /* Brand / primary — light warm clay (lighter than the original dark terracotta) */
-  --primary: #d4744f;
+  /* Brand — saturated coral (THE accent) */
+  --primary: #f2521b;
   --primary-foreground: #ffffff;
 
-  /* Secondary — muted stone */
-  --secondary: #e8e5dc;
-  --secondary-foreground: #2b2825;
+  /* Secondary — frosted white chip */
+  --secondary: rgba(255, 255, 255, 0.66);
+  --secondary-foreground: #1c1512;
 
-  /* Muted */
-  --muted: #ece9e1;
-  --muted-foreground: #6b6557;   /* darker than #b1ada1 for readable body text */
-  --muted-stone: #b1ada1;        /* the exact spec colour, for borders/dividers */
+  /* Muted — warm stone */
+  --muted: rgba(255, 255, 255, 0.5);
+  --muted-foreground: #8a7768;   /* muted labels */
+  --ink-2: #5c5049;              /* secondary text */
 
-  /* Accent — soft clay tint */
-  --accent: #f7e8df;
-  --accent-foreground: #8a3f23;
+  /* Accent — coral tint wash */
+  --accent: rgba(242, 82, 27, 0.1);
+  --accent-foreground: #d8410f;
 
   /* Destructive */
-  --destructive: #c0392b;
+  --destructive: #e5484d;
 
-  /* Borders / inputs */
-  --border: #d9d4c7;             /* slightly darker than cream for visible borders */
-  --input: #d9d4c7;
-  --ring: #d4744f;
+  /* Borders / inputs — soft white glass hairlines */
+  --border: rgba(255, 255, 255, 0.78);
+  --input: rgba(255, 255, 255, 0.66);
+  --ring: #f2521b;
 
-  /* Charts — warm, cohesive with the light clay primary */
-  --chart-1: #d4744f;
-  --chart-2: #e09a7a;
-  --chart-3: #b1ada1;
-  --chart-4: #8a7e6a;
-  --chart-5: #6b6557;
+  /* Charts — coral first, then amber, rose, tan, stone */
+  --chart-1: #f2521b;
+  --chart-2: #ef8f2a;
+  --chart-3: #fb7185;
+  --chart-4: #c9a227;
+  --chart-5: #8a7768;
 
-  /* Sidebar */
-  --sidebar: #efede5;
-  --sidebar-foreground: #2b2825;
-  --sidebar-primary: #d4744f;
+  /* Sidebar (icon rail) — glass */
+  --sidebar: rgba(255, 255, 255, 0.62);
+  --sidebar-foreground: #1c1512;
+  --sidebar-primary: #f2521b;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: #f7e8df;
-  --sidebar-accent-foreground: #8a3f23;
-  --sidebar-border: #d9d4c7;
-  --sidebar-ring: #d4744f;
+  --sidebar-accent: rgba(242, 82, 27, 0.12);
+  --sidebar-accent-foreground: #d8410f;
+  --sidebar-border: rgba(255, 255, 255, 0.78);
+  --sidebar-ring: #f2521b;
 }
 
-/* Keep a dark variant for anyone who opts in via .dark, but the app defaults to light. */
+/* Dark opt-in — warm charcoal glass, still NO blue. */
 .dark {
-  --background: #1f1c19;
-  --foreground: #f4f3ee;
-  --card: #2a2622;
-  --card-foreground: #f4f3ee;
-  --popover: #2a2622;
-  --popover-foreground: #f4f3ee;
-  --primary: #d4744f;
-  --primary-foreground: #1f1c19;
-  --secondary: #36312b;
-  --secondary-foreground: #f4f3ee;
-  --muted: #36312b;
-  --muted-foreground: #b1ada1;
-  --muted-stone: #b1ada1;
-  --accent: #43342a;
-  --accent-foreground: #f0d9c8;
-  --destructive: #e0584a;
-  --border: rgba(244, 243, 238, 0.12);
-  --input: rgba(244, 243, 238, 0.16);
-  --ring: #d4744f;
-  --chart-1: #d4744f;
-  --chart-2: #e09a7a;
-  --chart-3: #b1ada1;
-  --chart-4: #8a7e6a;
-  --chart-5: #6b6557;
-  --sidebar: #1f1c19;
-  --sidebar-foreground: #f4f3ee;
-  --sidebar-primary: #d4744f;
-  --sidebar-primary-foreground: #1f1c19;
-  --sidebar-accent: #36312b;
-  --sidebar-accent-foreground: #f0d9c8;
-  --sidebar-border: rgba(244, 243, 238, 0.12);
-  --sidebar-ring: #d4744f;
+  --background: #221a15;
+  --foreground: #f7ece2;
+  --card: #2d241d;
+  --card-foreground: #f7ece2;
+  --popover: #2d241d;
+  --popover-foreground: #f7ece2;
+  --primary: #ff6b35;
+  --primary-foreground: #1c1512;
+  --secondary: rgba(255, 255, 255, 0.08);
+  --secondary-foreground: #f7ece2;
+  --muted: rgba(255, 255, 255, 0.06);
+  --muted-foreground: #b09a88;
+  --ink-2: #cdb9a8;
+  --accent: rgba(255, 107, 53, 0.14);
+  --accent-foreground: #ffab85;
+  --destructive: #e5484d;
+  --border: rgba(255, 255, 255, 0.1);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: #ff6b35;
+  --chart-1: #ff6b35;
+  --chart-2: #ef8f2a;
+  --chart-3: #fb7185;
+  --chart-4: #c9a227;
+  --chart-5: #8a7768;
+  --sidebar: rgba(45, 36, 29, 0.7);
+  --sidebar-foreground: #f7ece2;
+  --sidebar-primary: #ff6b35;
+  --sidebar-primary-foreground: #1c1512;
+  --sidebar-accent: rgba(255, 107, 53, 0.16);
+  --sidebar-accent-foreground: #ffab85;
+  --sidebar-border: rgba(255, 255, 255, 0.1);
+  --sidebar-ring: #ff6b35;
 }
 
-@layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
-  body {
-    @apply bg-background text-foreground;
-    background-image:
-      radial-gradient(60rem 60rem at 110% -10%, color-mix(in srgb, #d4744f 8%, transparent), transparent 60%),
-      radial-gradient(50rem 50rem at -10% 0%, color-mix(in srgb, #b1ada1 10%, transparent), transparent 55%);
-    background-attachment: fixed;
-  }
-}
-
-/* Subtle grid texture used in hero/login surfaces */
-.bg-grid {
+/* ─────────────────────────────────────────────────────────────
+   Warm sunrise aurora background — THE signature backdrop.
+   Fixed full-viewport, layered radial gradients (peach / coral /
+   amber / rose) over a diagonal pale-peach base, plus a soft
+   blurred bloom. NEVER substitute an indigo/violet/blue gradient.
+   ───────────────────────────────────────────────────────────── */
+body {
+  background-color: #fff2e6;
   background-image:
-    linear-gradient(to right, rgba(43, 40, 37, 0.05) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(43, 40, 37, 0.05) 1px, transparent 1px);
-  background-size: 32px 32px;
+    /* soft blurred bloom — faint coral + amber */
+    radial-gradient(38rem 30rem at 82% 108%, rgba(239, 143, 42, 0.22), transparent 70%),
+    radial-gradient(34rem 26rem at 6% 96%, rgba(255, 143, 160, 0.25), transparent 70%),
+    /* corner glows */
+    radial-gradient(52rem 44rem at -6% -10%, rgba(255, 217, 168, 0.9), transparent 64%),
+    radial-gradient(48rem 42rem at 106% -14%, rgba(255, 157, 122, 0.75), transparent 62%),
+    radial-gradient(46rem 40rem at 108% 112%, rgba(255, 190, 128, 0.5), transparent 64%),
+    radial-gradient(42rem 38rem at -10% 108%, rgba(255, 143, 160, 0.42), transparent 62%),
+    /* diagonal pale-peach base */
+    linear-gradient(135deg, #fff2e6 0%, #ffe4d1 52%, #ffd9c4 100%);
+  background-attachment: fixed;
+  background-repeat: no-repeat;
 }
 
-/* Custom scrollbars for long lists */
+.dark body {
+  background-color: #221a15;
+  background-image:
+    radial-gradient(38rem 30rem at 82% 108%, rgba(239, 143, 42, 0.1), transparent 70%),
+    radial-gradient(34rem 26rem at 6% 96%, rgba(251, 113, 133, 0.08), transparent 70%),
+    radial-gradient(52rem 44rem at -6% -10%, rgba(120, 60, 20, 0.5), transparent 64%),
+    radial-gradient(48rem 42rem at 106% -14%, rgba(160, 70, 30, 0.4), transparent 62%),
+    linear-gradient(135deg, #221a15 0%, #241a14 52%, #1e1510 100%);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Frosted-white glass utilities (layered so Tailwind hover states
+   still override correctly)
+   ───────────────────────────────────────────────────────────── */
+@layer utilities {
+  /* Full glass pane — cards, panels, sheets. */
+  .glass {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(255, 255, 255, 0.56));
+    -webkit-backdrop-filter: blur(22px) saturate(150%);
+    backdrop-filter: blur(22px) saturate(150%);
+    border: 1px solid rgba(255, 255, 255, 0.78);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.6),
+      0 10px 30px -12px rgba(120, 60, 20, 0.28);
+  }
+
+  /* Soft glass — small controls: chips, pills, inputs, buttons. */
+  .glass-soft {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.44));
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    backdrop-filter: blur(12px) saturate(140%);
+    border: 1px solid rgba(255, 255, 255, 0.66);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 4px 14px -8px rgba(120, 60, 20, 0.22);
+  }
+
+  /* Coral gradient helpers */
+  .text-coral-gradient {
+    background: linear-gradient(135deg, #f2521b, #d8410f);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  .bg-coral-gradient {
+    background: linear-gradient(135deg, #f2521b 0%, #d8410f 100%);
+  }
+
+  .bg-sunrise-gradient {
+    background: linear-gradient(135deg, #f2521b 0%, #ef8f2a 100%);
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Subtle float-in for glass cards */
+  .rise-in {
+    animation: rise-in 0.35s ease-out both;
+  }
+}
+
+/* Display typography + mono numerals */
+h1, h2, h3, .page-title {
+  font-family: var(--font-space-grotesk), var(--font-inter), sans-serif;
+  letter-spacing: -0.01em;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Scrollbars — slim, warm
+   ───────────────────────────────────────────────────────────── */
 .scroll-slim {
-  /* iOS momentum scrolling — without this, mobile lists stutter. */
-  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(138, 119, 104, 0.35) transparent;
 }
 .scroll-slim::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 .scroll-slim::-webkit-scrollbar-track {
   background: transparent;
 }
 .scroll-slim::-webkit-scrollbar-thumb {
-  background: rgba(177, 173, 161, 0.5);
-  border-radius: 9999px;
+  background: rgba(138, 119, 104, 0.3);
+  border-radius: 99px;
 }
 .scroll-slim::-webkit-scrollbar-thumb:hover {
-  background: rgba(212, 116, 79, 0.6);
+  background: rgba(138, 119, 104, 0.5);
 }
 
-/* Skip painting off-screen list items / cards. Pair with
-   `contain-intrinsic-size: <height>` inline so the scrollbar
-   doesn't jump when the card scrolls into view. */
-.cv-auto {
-  content-visibility: auto;
-  contain-intrinsic-size: 96px;
-}
-
-/* Pulsing dot for "live" indicators */
+/* ─────────────────────────────────────────────────────────────
+   Realtime coral pulse dot
+   ───────────────────────────────────────────────────────────── */
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.4; transform: scale(0.85); }
+  50% { opacity: 0.55; transform: scale(0.82); }
 }
 .pulse-dot {
   animation: pulse-dot 1.8s ease-in-out infinite;
 }
 
-/* Sonner toaster — warm paper surface that matches the Claude palette */
-.toaster {
-  --normal-bg: #ffffff !important;
-  --normal-text: #2b2825 !important;
-  --normal-border: #d9d4c7 !important;
-  --success-bg: #ffffff !important;
-  --success-text: #2b2825 !important;
-  --success-border: #d4744f !important;
-  --error-bg: #ffffff !important;
-  --error-text: #2b2825 !important;
-  --error-border: #c0392b !important;
-  --warning-bg: #ffffff !important;
-  --warning-text: #2b2825 !important;
-  --warning-border: #d98a6a !important;
+/* Subtle float-in for glass cards */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rise-in {
+  animation: rise-in 0.35s ease-out both;
 }
