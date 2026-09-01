@@ -293,12 +293,23 @@ export function AdminDashboard() {
       {/* ─── Header bar ─────────────────────────────────────────────── */}
       {/* Not sticky — the parent is h-dvh + overflow-hidden, so the header
           is just a normal flex item at the top. main scrolls below it. */}
-      <header className="shrink-0 z-40 border-b border-border/60 bg-background/95 backdrop-blur">
+      <header className="shrink-0 z-40 px-3 sm:px-4 pt-3">
+        <div className="glass rounded-3xl">
         <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-8">
           <div className="flex items-center gap-3 h-14">
-            <img src="/logo.png" alt="Onyx Base" className="size-7 rounded-md object-cover" />
-            <span className="font-mono text-sm tracking-tight hidden sm:inline">Onyx Base</span>
-            <Badge className="bg-red-500/15 text-red-600 border-red-500/30 hover:bg-red-500/15 uppercase font-mono text-[10px] tracking-wider">
+            <div className="size-8 rounded-2xl bg-gradient-to-br from-[#f2521b] via-[#ef8f2a] to-[#d8410f] grid place-items-center shadow-[inset_0_1px_0_rgba(255,255,255,0.35),0_6px_14px_-6px_rgba(242,82,27,0.6)]">
+              <svg viewBox="0 0 24 24" fill="none" className="size-4 text-white" aria-hidden="true">
+                <circle cx="12" cy="12" r="4.4" fill="currentColor" />
+                <g stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <line x1="12" y1="2.2" x2="12" y2="4.6" /><line x1="12" y1="19.4" x2="12" y2="21.8" />
+                  <line x1="2.2" y1="12" x2="4.6" y2="12" /><line x1="19.4" y1="12" x2="21.8" y2="12" />
+                  <line x1="5.06" y1="5.06" x2="6.76" y2="6.76" /><line x1="17.24" y1="17.24" x2="18.94" y2="18.94" />
+                  <line x1="5.06" y1="18.94" x2="6.76" y2="17.24" /><line x1="17.24" y1="6.76" x2="18.94" y2="5.06" />
+                </g>
+              </svg>
+            </div>
+            <span className="font-display font-semibold text-sm tracking-tight hidden sm:inline">Onyx Base</span>
+            <Badge className="bg-primary/12 text-primary border-primary/25 hover:bg-primary/12 uppercase font-mono text-[10px] tracking-wider">
               <Shield className="size-3 mr-1" /> Admin
             </Badge>
 
@@ -312,8 +323,8 @@ export function AdminDashboard() {
             </div>
 
             <div className="ml-auto flex items-center gap-2">
-              <div className="hidden lg:flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted/60 text-[11px] text-muted-foreground font-mono">
-                <span className="size-1.5 rounded-full bg-red-500 animate-pulse" />
+              <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/50 border border-white/60 text-[11px] text-muted-foreground font-mono">
+                <span className="size-1.5 rounded-full bg-primary pulse-dot" />
                 admin session · {user?.userId}
               </div>
               <Button
@@ -349,7 +360,7 @@ export function AdminDashboard() {
         </div>
 
         {/* Tab nav */}
-        <div className="border-t border-border/40 bg-sidebar/30">
+        <div className="border-t border-white/50 bg-white/25 backdrop-blur-sm rounded-b-3xl">
           <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-8">
             <nav className="flex items-center gap-1 h-11 overflow-x-auto">
               <TabButton
@@ -391,10 +402,11 @@ export function AdminDashboard() {
             </nav>
           </div>
         </div>
+        </div>
       </header>
 
       {/* ─── Main content ──────────────────────────────────────────── */}
-      <main className="flex-1 min-h-0 overflow-y-auto">
+      <main className="flex-1 min-h-0 overflow-y-auto scroll-slim">
         <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-8 py-6 lg:py-8">
           {activeTab === 'users' && selectedUserId && (
             <UserDetail userId={selectedUserId} onBack={() => setSelectedUserId(null)} />
@@ -408,15 +420,15 @@ export function AdminDashboard() {
         </div>
       </main>
 
-      <footer className="mt-auto border-t border-border/60 bg-sidebar/30">
-        <div className="mx-auto max-w-[1400px] px-4 sm:px-6 lg:px-8 h-11 flex items-center justify-between text-[11px] text-muted-foreground/70">
+      <footer className="mt-auto px-3 sm:px-4 pb-3">
+        <div className="glass-soft rounded-2xl mx-auto max-w-[1400px] px-4 h-11 flex items-center justify-between text-[11px] text-muted-foreground">
           <div className="flex items-center gap-3">
-            <span className="font-mono">Onyx Base · Admin</span>
+            <span className="font-display font-semibold text-foreground/70">Onyx Base · Admin</span>
             <span className="hidden sm:inline">·</span>
             <span className="hidden sm:inline">Operator-only dashboard</span>
           </div>
           <div className="flex items-center gap-2">
-            <span className="size-1.5 rounded-full bg-red-500 animate-pulse" />
+            <span className="size-1.5 rounded-full bg-primary pulse-dot" />
             <span>admin mode</span>
           </div>
         </div>
@@ -440,10 +452,10 @@ function StatPill({
 }) {
   return (
     <div
-      className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted/60 border border-border/40 text-[11px]"
+      className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/50 border border-white/60 text-[11px]"
       title={label}
     >
-      <Icon className="size-3 text-muted-foreground" />
+      <Icon className="size-3 text-primary" />
       <span className="text-muted-foreground">{label}</span>
       <span className="font-mono font-semibold tabular-nums text-foreground">
         {value ?? '—'}
@@ -467,10 +479,10 @@ function TabButton({
     <button
       onClick={onClick}
       className={cn(
-        'flex items-center gap-1.5 px-3 h-9 rounded-md text-sm transition-colors whitespace-nowrap border-b-2 -mb-px',
+        'flex items-center gap-1.5 px-3 h-9 rounded-xl text-sm font-medium transition-all whitespace-nowrap',
         active
-          ? 'text-primary border-primary'
-          : 'text-muted-foreground hover:text-foreground border-transparent',
+          ? 'bg-gradient-to-b from-[#f2521b] to-[#d8410f] text-white shadow-[0_6px_16px_-6px_rgba(242,82,27,0.5)]'
+          : 'text-muted-foreground hover:text-foreground hover:bg-white/60',
       )}
     >
       <Icon className="size-3.5" />
