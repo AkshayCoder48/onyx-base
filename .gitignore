@@ -94,3 +94,9 @@ storage-*.png
 .dev.vars
 .next-dev.pid
 db/recovered-manifest.json
+
+# Secret-scan hardening (PRD §25)
+*.key
+secrets.*
+credentials.*
+db/*.db

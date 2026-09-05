@@ -9,6 +9,7 @@ export type ViewKey =
   | 'collections'
   | 'storage'
   | 'api-keys'
+  | 'email-automation'
   | 'share'
   | 'logs'
   | 'analytics'
@@ -16,8 +17,8 @@ export type ViewKey =
   | 'sql'
   | 'tables'
   | 'docs'
-  | 'email-otp'
   | 'settings'
+  | 'diagnostics'
 
 export interface SessionUser {
   userId: string
@@ -74,6 +75,24 @@ export const useOnyxBase = create<OnyxBaseState>()(
     }),
     {
       name: 'cloudkv-session',
+      version: 2,
+      // Migrate persisted sessions from the retired 'email-otp' view to the
+      // new Email Automation tab (v1 → v2). Anything unrecognized falls back
+      // to 'overview' so a stale tab can never blank the dashboard.
+      migrate: (persisted, version) => {
+        const state = (persisted ?? {}) as Record<string, unknown>
+        if (version < 2 && state.activeView === 'email-otp') {
+          state.activeView = 'email-automation'
+        }
+        if (state.activeView !== undefined && ![
+          'overview', 'database', 'collections', 'storage', 'api-keys',
+          'email-automation', 'share', 'logs', 'analytics', 'playground',
+          'sql', 'tables', 'docs', 'settings', 'diagnostics',
+        ].includes(state.activeView as string)) {
+          state.activeView = 'overview'
+        }
+        return state as unknown as OnyxBaseState
+      },
       partialize: (s) => ({
         apiKey: s.apiKey,
         user: s.user,

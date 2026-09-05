@@ -105,9 +105,22 @@ const SECRET_PATTERNS: Array<{ re: RegExp; replacement: string }> = [
   { re: /\b\d{8,}:[A-Za-z0-9_-]{20,}\b/g, replacement: '[REDACTED_BOT_TOKEN]' },
   // Onyx Base API keys
   { re: /\b(?:kv_live_[A-Za-z0-9]{16,}|onyxbase_[A-Za-z0-9]{8,}|st_[A-Za-z0-9]{16,})\b/g, replacement: '[REDACTED_API_KEY]' },
+  // MCPEmail user keys (mcpe_<64-hex> or any mcpe_ payload ≥20 chars)
+  { re: /\bmcpe_[A-Za-z0-9_-]{20,}\b/g, replacement: '[REDACTED_MCPE_KEY]' },
   // Bearer headers
   { re: /Bearer\s+[A-Za-z0-9._-]+/gi, replacement: 'Bearer [REDACTED]' },
+  // key=value style secret leaks in dumps / query strings
+  { re: /\b(?:api_key|mcpemail_key|mcpe_key|token|secret|password)=([^\s&"']+)/gi, replacement: '$1=[REDACTED]' },
 ]
+
+/** Public: scrub known secret shapes out of an arbitrary string (error
+ *  messages, upstream response fragments) before they reach a response or
+ *  a log line. Defense in depth for the zero-credential-leakage rule. */
+export function scrubSecrets(text: string): string {
+  let v = text
+  for (const p of SECRET_PATTERNS) v = v.replace(p.re, p.replacement)
+  return v
+}
 
 function redact(value: unknown): unknown {
   if (typeof value === 'string') {

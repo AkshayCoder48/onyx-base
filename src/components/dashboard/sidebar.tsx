@@ -20,7 +20,7 @@ import {
   Code2,
   Table2,
   Activity,
-  MailCheck,
+  Send,
   Sun,
   HelpCircle,
 } from 'lucide-react'
@@ -51,7 +51,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     group: 'Develop',
     items: [
       { key: 'api-keys', label: 'API Keys', icon: KeyRound },
-      { key: 'email-otp', label: 'Email OTP', icon: MailCheck },
+      { key: 'email-automation', label: 'Email Automation', icon: Send },
       { key: 'share', label: 'Public Share', icon: Share2 },
       { key: 'playground', label: 'API Playground', icon: TerminalSquare },
       { key: 'sql', label: 'SQL Editor', icon: Code2 },

@@ -451,6 +451,47 @@ From the inside out: the **key** → **scope** (one key only) → **mode**
 <br/>
 
 <!-- ───────────────────────── AUTH & RECOVERY ───────────────────────── -->
+<!-- ───────────────────────── EMAIL AUTOMATION ───────────────────────── -->
+## Email Automation API — privacy-first (MCPEmail + Telegram bridge)
+
+A generic email automation engine (OTP codes, welcome mails, notifications,
+reports — anything), built around **credential ownership**:
+
+> **Privacy disclaimer.** For private or sensitive email automation, use your
+> own Telegram credentials and your own MCPEmail API key — never credentials
+> belonging to another person. Your `mcpe_*` key is a user-owned credential
+> used only to execute requests on your behalf; it is never exposed, logged,
+> or reused for other users.
+
+Two completely different credentials, never confused:
+
+- **Platform API key** (`kv_live_*`) — authenticates *you → this API*. Never forwarded upstream.
+- **MCPEmail key** (`mcpe_*`) — resolved *by name* from your private store and used only for the *API → MCPEmail* hop.
+
+```bash
+# 1. Connect YOUR MCPEmail key under a name (live handshake on save;
+#    mirrored to YOUR private pinned Telegram manifest):
+curl -X POST /api/credentials/connect \
+  -H "Authorization: Bearer kv_live_…" \
+  -d '{"name":"personal_email","apiKey":"mcpe_…","rateLimitPerMin":30}'
+
+# 2. Automate — reference the credential BY NAME; $VAR_NAME$ substitution:
+curl -X POST /api/email/send \
+  -H "Authorization: Bearer kv_live_…" \
+  -d '{"credential":"personal_email","to":"user@example.com",
+       "subject":"Welcome $NAME$","body":"Hello $NAME$, code: $OTP$.",
+       "variables":{"NAME":"Akshay","OTP":"483921"}}'
+```
+
+Key rules: unknown `$VARIABLE$` → `400 missing_variable` (send aborted, never
+half-rendered) · unknown credential name → `404 credential_not_found` (**fail
+closed** — no project-wide fallback key exists anywhere) · every send returns
+a `request_id` traceable via `GET /api/email/status/:requestId` (metadata
+only) · secrets are redacted from every log line · cross-user credential
+access is blocked (tenant-scoped). Old `/api/email-otp/*` endpoints return
+`410` with a migration guide. Full docs: **`/docs#email`** (anonymous).
+
+<br/>
 ## Authentication & recovery
 
 Your API key (`kv_live_…`) is the only credential needed for all data
@@ -746,6 +787,18 @@ Authorization: Bearer kv_live_…
 | `GET` | `/v1/stats` | Account statistics (records, files, activity, …) |
 | `GET` | `/v1/logs` | Recent audit log entries (`?limit=50&action=…`) |
 | `GET` | `/v1/health` | Service + Telegram storage status |
+| `POST` | `/api/email/send` | Send an automated email via a NAMED MCPEmail credential (`$VAR_NAME$` variables, `request_id` in every response) |
+| `POST` | `/api/email/template/send` | Send using a stored (or inline) template — one structure, many variables |
+| `GET` | `/api/email/status/:requestId` | Email request status by ID (metadata only, tenant-scoped, 7-day retention) |
+| `GET` | `/api/email/requests` | Recent email automation requests (metadata only) |
+| `GET` · `POST` | `/api/email/templates` | List / save named email templates (variables auto-detected) |
+| `GET` · `DELETE` | `/api/email/templates/:name` | Fetch / delete one template |
+| `POST` | `/api/credentials/connect` | Connect (or update) a NAMED MCPEmail credential — YOUR `mcpe_*` key, live handshake, masked response |
+| `GET` | `/api/credentials` | List credentials (masked views only — raw keys never returned) |
+| `GET` · `DELETE` | `/api/credentials/:name` | View (masked) / disconnect a credential (sends then fail closed) |
+| `POST` | `/api/telegram/connect` | Connect your private Telegram configuration channel (validated live) |
+| `GET` · `PUT` · `DELETE` | `/api/telegram/config` | Telegram bridge status (masked) / update / reset |
+| `POST` | `/api/email-otp/send` · `/api/email-otp/verify` | **DEPRECATED (410)** — retired OTP system; returns a machine-readable migration guide |
 | `GET` | `/llms.txt` | **LLM-friendly single-page spec** — combines every Docs tab into one markdown document (the [llmstxt.org](https://llmstxt.org) convention). No auth. Cached for 1 hour. The dashboard's "Copy for LLMs" button fetches this same text. |
 | `GET` | `/v1/collections` | List collections (with record counts) |
 | `POST` | `/v1/collections` | Create a collection (body: `{"name":"cache"}`) |

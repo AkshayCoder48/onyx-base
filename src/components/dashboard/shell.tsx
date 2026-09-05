@@ -7,7 +7,7 @@ import { DatabaseView } from './database'
 import { CollectionsView } from './collections'
 import { CloudStorageView } from './storage'
 import { ApiKeysView } from './api-keys'
-import { EmailOtpView } from './email-otp'
+import { EmailAutomationView } from './email-automation'
 import { ShareView } from './share'
 import { LogsView } from './logs'
 import { AnalyticsView } from './analytics'
@@ -28,7 +28,7 @@ const VIEW_TITLES: Record<ViewKey, string> = {
   collections: 'Collections',
   storage: 'Cloud Storage',
   'api-keys': 'API Keys',
-  'email-otp': 'Email OTP',
+  'email-automation': 'Email Automation',
   share: 'Public Share',
   logs: 'Logs',
   analytics: 'Analytics',
@@ -147,7 +147,7 @@ export function DashboardShell() {
                 {view === 'collections' && <CollectionsView />}
                 {view === 'storage' && <CloudStorageView />}
                 {view === 'api-keys' && <ApiKeysView />}
-                {view === 'email-otp' && <EmailOtpView />}
+                {view === 'email-automation' && <EmailAutomationView />}
                 {view === 'share' && <ShareView />}
                 {view === 'logs' && <LogsView />}
                 {view === 'analytics' && <AnalyticsView />}

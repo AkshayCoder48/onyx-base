@@ -18,10 +18,11 @@ const CASES = [
   ['collections',   'GET',  '/api/dashboard/collections'],
   ['storage',       'GET',  '/api/files'],
   ['api-keys',      'GET',  '/api/dashboard/api-keys'],
-  ['email-otp',     'GET',  '/api/dashboard/mcpemail-config'],
-  // 400 `no_config` is the correct response when no MCPEmail key is saved —
-  // it proves the route is alive and validating, not broken.
-  ['email-otp',     'POST', '/api/email-otp/send', { email: 'smoke-test@example.invalid' }, 400],
+  ['email-automation', 'GET',  '/api/credentials'],
+  ['email-automation', 'GET',  '/api/telegram/config'],
+  // 404 `credential_not_found` is the correct response for an unknown
+  // credential name — it proves the fail-closed rule (no project fallback).
+  ['email-automation', 'POST', '/api/email/send', { credential: 'no_such_credential', to: 'smoke-test@example.invalid', subject: 'hi', body: 'hi' }, 404],
   ['share',         'GET',  '/api/dashboard/share-tokens'],
   ['logs',          'GET',  '/api/dashboard/logs'],
   ['analytics',     'GET',  '/api/dashboard/analytics'],

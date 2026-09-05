@@ -4,14 +4,15 @@ import { getBaseUrl } from "@/lib/public-url";
 export const metadata: Metadata = {
   title: "Onyx Base — API Documentation",
   description:
-    "Public REST & GraphQL API reference for Onyx Base: key-value storage, file uploads up to 2 GB via chunked upload, share tokens, and the automated email / Email OTP service (MCPEmail). No login required to read.",
-  keywords: ["Onyx Base", "API docs", "REST API", "email OTP", "MCPEmail", "file upload API", "key-value API"],
+    "Public REST & GraphQL API reference for Onyx Base: key-value storage, file uploads up to 2 GB via chunked upload, share tokens, and the privacy-first Email Automation API (named MCPEmail credentials, $VAR_NAME$ templates, Telegram credential bridge). No login required to read.",
+  keywords: ["Onyx Base", "API docs", "REST API", "email automation", "MCPEmail", "email API", "file upload API", "key-value API"],
 };
 
 /* ─────────────────────────────────────────────────────────────────────────────
    Public API documentation — viewable anonymously (no key required).
    Covers: quick start, auth, KV core, files (incl. the chunked-upload
-   protocol), Email OTP / automated email, share tokens, and advanced APIs.
+   protocol), the Email Automation API (named credentials + $VAR_NAME$ templates),
+   share tokens, and advanced APIs.
    ──────────────────────────────────────────────────────────────────────────── */
 
 type Method = "GET" | "POST" | "PUT" | "DELETE";
@@ -238,48 +239,80 @@ const FILE_ENDPOINTS: Endpoint[] = [
 
 const EMAIL_ENDPOINTS: Endpoint[] = [
   {
-    method: "PUT",
-    path: "/api/dashboard/mcpemail-config",
-    title: "Configure the automated email service",
+    method: "POST",
+    path: "/api/credentials/connect",
+    title: "Connect a NAMED MCPEmail credential (one-time setup)",
     auth: true,
     description:
-      "One-time setup: paste your MCPEmail API key (format mcpe_<64-hex>, e.g. mcpe_4c7b1e9a0d5f…) and optional templates. The key is validated with a live mcpemails.com handshake, then stored with your account and mirrored to Telegram — it survives cold boots.",
-    body: "{ apiKey, label?, fromName?, subjectTemplate?, bodyTemplate?, testConnection? }",
-    example: `curl -X PUT ${BASE}/api/dashboard/mcpemail-config \\
+      "Store YOUR mcpe_ key under a name you choose (personal_email, work_email…). testConnection (default true) validates it with a live mcpemails.com handshake before saving. The credential lives in YOUR account and is mirrored to YOUR private pinned Telegram manifest — the platform never pools user keys, and the response returns only the MASKED key (mcpe_4c7b1e9a…1f3a). Set rateLimitPerMin for a custom MCPEmail send-rate cap per credential.",
+    body: "{ name, apiKey, label?, fromName?, rateLimitPerMin?, testConnection? }",
+    example: `curl -X POST ${BASE}/api/credentials/connect \\
   -H "Authorization: Bearer kv_live_…" \\
   -H "Content-Type: application/json" \\
-  -d '{"apiKey":"mcpe_4c7b1e9a0d5f…","fromName":"Onyx Base","subjectTemplate":"Your code"}'`,
+  -d '{"name":"personal_email","apiKey":"mcpe_4c7b1e9a0d5f…","label":"Personal inbox","rateLimitPerMin":30}'`,
+  },
+  {
+    method: "POST",
+    path: "/api/email/send",
+    title: "Send an automated email (generic engine)",
+    auth: true,
+    description:
+      "The core automation endpoint. Reference the credential BY NAME — the platform resolves it from your private store and forwards the send to MCPEmail with YOUR key (the platform kv_live_* key is never forwarded upstream). $VAR_NAME$ placeholders in subject/body/htmlBody are substituted from variables; a missing variable aborts the send with 400 missing_variable (never half-rendered). No credential → 404 credential_not_found — the system FAILS CLOSED, there is no project-wide fallback key. Every response carries a request_id.",
+    body: "{ credential, to, subject, body?, htmlBody?, variables?, fromName? }",
+    example: `curl -X POST ${BASE}/api/email/send \\
+  -H "Authorization: Bearer kv_live_…" \\
+  -H "Content-Type: application/json" \\
+  -d '{"credential":"personal_email",
+       "to":"user@example.com",
+       "subject":"Welcome $NAME$",
+       "body":"Hello $NAME$,\\n\\nYour verification code is $OTP$.",
+       "variables":{"NAME":"Akshay","OTP":"483921"}}'`,
+  },
+  {
+    method: "POST",
+    path: "/api/email/template/send",
+    title: "Send with a stored template — one structure, many variables",
+    auth: true,
+    description:
+      "Save an email structure once (name + subject + body [+ htmlBody]), then vary the variables per request. The template is never modified on send. template may also be an inline { subject, body, htmlBody? } object for one-off structures.",
+    body: "{ credential, template: name | {subject, body, htmlBody?}, to, variables?, fromName? }",
+    example: `curl -X POST ${BASE}/api/email/template/send \\
+  -H "Authorization: Bearer kv_live_…" \\
+  -H "Content-Type: application/json" \\
+  -d '{"credential":"personal_email","template":"welcome",
+       "to":"user@example.com","variables":{"NAME":"Akshay","OTP":"483921"}}'`,
+  },
+  {
+    method: "GET",
+    path: "/api/email/status/{requestId}",
+    title: "Check a request by ID (metadata only)",
+    auth: true,
+    description:
+      "Debug by request_id: returns ts, endpoint, credential name, status (sent|failed), latency_ms, upstream_status and error_code. Never email content, recipients or credentials. 7-day retention, tenant-scoped. GET /api/email/requests lists recent sends.",
+  },
+  {
+    method: "GET",
+    path: "/api/credentials",
+    title: "List / manage credentials (masked)",
+    auth: true,
+    description:
+      "Lists every credential as a masked view with its label, sender name, custom rate limit and last-used time. DELETE /api/credentials/{name} disconnects one — sends then fail closed. GET /api/credentials/{name} fetches a single view. Raw keys are never returned by any endpoint.",
+  },
+  {
+    method: "POST",
+    path: "/api/telegram/connect",
+    title: "Connect your private Telegram configuration channel",
+    auth: true,
+    description:
+      "Point the credential bridge at YOUR OWN bot + chat ({ chatId, label?, botToken? }) — the pair is validated live against Telegram before saving. Your named credentials are mirrored to this private pinned manifest (durable across cold boots). GET /api/telegram/config shows the masked status; DELETE reverts to server defaults. For private work, use your own credentials — never another person's.",
   },
   {
     method: "POST",
     path: "/api/email-otp/send",
-    title: "Send a verification code to any email",
+    title: "DEPRECATED — returns 410 with a migration guide",
     auth: false,
     description:
-      "The automated email endpoint: sends a 6-digit code with a 10-minute expiry. Rate-limited per address (30 s between sends, 10/hour). Works from public apps — no key needed, but the account owner must have configured the email service first.",
-    body: "{ email, purpose? }",
-    example: `curl -X POST ${BASE}/api/email-otp/send \\
-  -H "Content-Type: application/json" \\
-  -d '{"email":"user@example.com","purpose":"login"}'`,
-  },
-  {
-    method: "POST",
-    path: "/api/email-otp/verify",
-    title: "Verify a code",
-    auth: false,
-    description:
-      "Checks the 6-digit code against the latest non-expired, non-consumed code for that email. Single-use: a successful verification consumes the code. 410 = expired/used, 404 = nothing was ever sent.",
-    body: "{ email, code }",
-    example: `curl -X POST ${BASE}/api/email-otp/verify \\
-  -H "Content-Type: application/json" \\
-  -d '{"email":"user@example.com","code":"482913"}'`,
-  },
-  {
-    method: "GET",
-    path: "/api/dashboard/mcpemail-config",
-    title: "Read the email config (masked)",
-    auth: true,
-    description: "Shows whether the email service is configured, the masked key (mcpe_4c7b1e9a…1f3a), and your templates. DELETE removes the config.",
+      "The retired Email OTP endpoints (/api/email-otp/send and /api/email-otp/verify) now return 410 Gone with a machine-readable migration body — nothing is processed and no credential is used. Migrate by generating the code in YOUR app and delivering it via POST /api/email/send with the $OTP$ variable.",
   },
 ];
 
@@ -360,7 +393,7 @@ const TOC = [
   { id: "auth", label: "Authentication" },
   { id: "kv", label: "Key-value API" },
   { id: "files", label: "Files & chunked upload" },
-  { id: "email", label: "Email OTP service" },
+  { id: "email", label: "Email Automation" },
   { id: "share", label: "Share tokens" },
   { id: "advanced", label: "Advanced" },
   { id: "limits", label: "Limits" },
@@ -598,38 +631,68 @@ Authorization: Bearer kv_live_aa6d…3d11
             ))}
           </Section>
 
-          {/* ── Email OTP ── */}
+          {/* ── Email Automation ── */}
           <Section
             id="email"
-            eyebrow="05 · automated email"
-            title="Email OTP service (MCPEmail)"
-            intro="A built-in automated email sender for verification codes, login flows, and any 6-digit OTP use case — powered by your MCPEmail API key. Configure once from the dashboard (Email OTP tab) or via PUT /api/dashboard/mcpemail-config; after that, the send/verify pair is PUBLIC — your frontend apps can call it directly without exposing any key. Codes expire in 10 minutes, are single-use, and the whole config survives cold boots via the Telegram mirror."
+            eyebrow="05 · email automation"
+            title="Email Automation API — privacy-first (MCPEmail + Telegram bridge)"
+            intro="A generic email automation engine — OTP codes, welcome mails, notifications, reports, transactional messages — built around credential ownership: YOU bring the MCPEmail key, YOU pick the Telegram channel it is mirrored to, and your platform API key (kv_live_*) only authenticates the call to this API. The API resolves your credential by NAME and forwards the send to MCPEmail with YOUR key. It never falls back to a project-wide credential — missing credentials fail closed."
           >
             <div className="glass rounded-3xl p-5 space-y-4">
-              <h3 className="text-[15px] font-semibold">Typical signup/login flow</h3>
-              <pre className="rounded-xl bg-[#2a1c14]/92 text-[#ffd9a8] font-mono text-[11.5px] leading-relaxed p-3.5 overflow-x-auto">{`// 1. One-time setup (dashboard → Email OTP tab, or):
-PUT /api/dashboard/mcpemail-config
-{ "apiKey": "mcpe_4c7b1e9a0d5f…",       // mcpe_<64-hex> — validated live
-  "fromName": "Acme",
-  "subjectTemplate": "Your Acme code",
-  "bodyTemplate": "Code: {{code}} (10 min)" }
+              <div className="rounded-xl border border-amber-400/40 bg-amber-500/5 p-3.5 flex items-start gap-2.5">
+                <span className="text-base leading-none mt-0.5">🛡</span>
+                <p className="text-[12px] leading-relaxed text-amber-700 dark:text-amber-400">
+                  <strong>Privacy disclaimer.</strong> For private or sensitive email automation, use your own Telegram
+                  credentials and your own MCPEmail API key — never credentials belonging to another person. Your
+                  mcpe_* key is a user-owned credential used only to execute requests on your behalf; it is never
+                  exposed, logged, or reused for other users. The platform API key (kv_live_*) only authorizes access
+                  to this automation service; the MCPEmail key is what authenticates with MCPEmail. Never confuse the two.
+                </p>
+              </div>
+              <h3 className="text-[15px] font-semibold">Two credentials, two jobs</h3>
+              <pre className="rounded-xl bg-[#2a1c14]/92 text-[#ffd9a8] font-mono text-[11.5px] leading-relaxed p-3.5 overflow-x-auto">{`YOUR APP ── Bearer kv_live_… (platform key) ──▶ ONYX EMAIL API
+                                                    │ authenticate caller
+                                                    │ resolve credential "personal_email"
+                                                    ▼
+                                       YOUR mcpe_* key (from your store)
+                                                    │
+                                                    ▼
+                                              MCPEmail → 📧 email
 
-// 2. Your public login page — no secret on the client:
-POST /api/email-otp/send     { "email": "user@example.com" }   → 200
-POST /api/email-otp/verify   { "email": "user@example.com", "code": "482913" } → 200`}</pre>
+# 1. Connect YOUR key once (mirrored to YOUR Telegram manifest):
+POST /api/credentials/connect
+{ "name": "personal_email", "apiKey": "mcpe_4c7b1e9a0d5f…",
+  "rateLimitPerMin": 30 }                    // custom rate limit (optional)
+
+# 2. Automate — reference the credential BY NAME:
+POST /api/email/send
+{ "credential": "personal_email",
+  "to": "user@example.com",
+  "subject": "Welcome $NAME$",
+  "body": "Hello $NAME$, your code is $OTP$.",
+  "variables": { "NAME": "Akshay", "OTP": "483921" } }`}</pre>
               <div className="grid sm:grid-cols-3 gap-3 text-[12.5px]">
                 <div className="glass-soft rounded-2xl p-3.5 space-y-1">
-                  <div className="font-mono text-[10px] uppercase tracking-wider text-primary">key format</div>
-                  <code className="font-mono text-xs">mcpe_&lt;64 hex&gt;</code>
-                  <p className="text-muted-foreground text-[11.5px] leading-relaxed">e.g. mcpe_4c7b1e9a0d5f…6b74. Format-checked locally, validated live against mcpemails.com.</p>
+                  <div className="font-mono text-[10px] uppercase tracking-wider text-primary">$VAR_NAME$ engine</div>
+                  <p className="text-muted-foreground text-[11.5px] leading-relaxed">{"$NAME$ · $OTP$ · $RESET_URL$ — same template, different values per request. Unknown variables abort the send (missing_variable), never blank-replaced. Template never rebuilt."}</p>
                 </div>
                 <div className="glass-soft rounded-2xl p-3.5 space-y-1">
-                  <div className="font-mono text-[10px] uppercase tracking-wider text-primary">limits</div>
-                  <p className="text-muted-foreground text-[11.5px] leading-relaxed">10-minute code TTL · single-use · 30 s between sends · 10 sends/hour per address.</p>
+                  <div className="font-mono text-[10px] uppercase tracking-wider text-primary">fail closed</div>
+                  <p className="text-muted-foreground text-[11.5px] leading-relaxed">No project-wide MCPEmail key exists. Unknown credential name → 404 credential_not_found. Cross-user access is blocked — credentials are tenant-scoped.</p>
                 </div>
                 <div className="glass-soft rounded-2xl p-3.5 space-y-1">
-                  <div className="font-mono text-[10px] uppercase tracking-wider text-primary">templates</div>
-                  <p className="text-muted-foreground text-[11.5px] leading-relaxed">Subject + body accept the {"{{code}}"} placeholder; fromName brands the sender.</p>
+                  <div className="font-mono text-[10px] uppercase tracking-wider text-primary">observability</div>
+                  <p className="text-muted-foreground text-[11.5px] leading-relaxed">Every send returns a request_id; GET /api/email/status/{"{requestId}"} shows metadata only (latency, status, credential name) — never content, recipients or keys.</p>
+                </div>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-3 text-[12.5px]">
+                <div className="glass-soft rounded-2xl p-3.5 space-y-1">
+                  <div className="font-mono text-[10px] uppercase tracking-wider text-primary">rate limits</div>
+                  <p className="text-muted-foreground text-[11.5px] leading-relaxed">Per platform key (your kv_live_* rateLimitPerMin) · per client IP (30/min) · per-credential custom cap (rateLimitPerMin, up to 120/min hard ceiling). Secrets are never logged for rate limiting.</p>
+                </div>
+                <div className="glass-soft rounded-2xl p-3.5 space-y-1">
+                  <div className="font-mono text-[10px] uppercase tracking-wider text-primary">error codes</div>
+                  <p className="text-muted-foreground text-[11.5px] leading-relaxed">invalid_api_key · credential_not_found · missing_variable {"{ variable, field }"} · template_not_found · rate_limited · upstream_authentication_failed · upstream_timeout · deprecated (410 on old OTP routes).</p>
                 </div>
               </div>
             </div>
@@ -685,7 +748,7 @@ POST /api/email-otp/verify   { "email": "user@example.com", "code": "482913" } �
                     ["File size — cloud Bot API", "50 MB", "Per-file. Unlimited number of files."],
                     ["File size — local Bot API", "2 GB", "Self-host telegram-bot-api for the big ceiling; chunked upload required."],
                     ["Chunked upload chunk", "256 KB – 32 MB each", "Default 4 MB — safely under serverless body limits; staged as Telegram documents."],
-                    ["Email OTP code", "10 min TTL, single-use", "30 s between sends, 10/hour per address."],
+                    ["Email automation", "Per-key, per-IP (30/min), per-credential custom cap", "Custom rateLimitPerMin per credential (≤120/min hard ceiling); missing $VAR_NAME$ aborts the send; request status kept 7 days (metadata only)."],
                     ["Serverless request body", "~4.5 MB (Vercel)", "Platform-imposed — the reason the chunked protocol exists."],
                     ["Multi-instance consistency", "Eventual, on instance recycle", "Writes land instantly on the handling instance + the Telegram mirror; other warm instances serve the prior snapshot until they recycle and rehydrate."],
                   ].map((row) => (

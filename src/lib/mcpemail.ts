@@ -10,7 +10,7 @@
  * This module is a thin server-side wrapper that:
  *   1. Performs the `initialize` handshake so we know the key is valid.
  *   2. Calls `inbox_list` for the dashboard "Test connection" button.
- *   3. Calls `email_compose` with action `send` to deliver OTP emails.
+ *   3. Calls `email_compose` with action `send` to deliver automation emails.
  *
  * The client is intentionally minimal — only the methods Onyx Base needs.
  * It does NOT implement the full MCP tool catalogue.
@@ -192,36 +192,43 @@ export async function listInboxes(apiKey: string): Promise<McpeInbox[]> {
 }
 
 /**
- * Send an OTP email via the MCPEmails `email_compose` tool (action: 'send').
+ * Send an email via the MCPEmails `email_compose` tool (action: 'send').
  *
  * - `fromName` is optional — MCPEmails uses the inbox's display name by default.
- * - `to` is the recipient's email address.
- * - `subject` and `body` make up the email contents.
+ * - `to` is one recipient address or an array of addresses.
+ * - `subject` and `body` make up the email contents; `htmlBody` is optional.
  *
  * Returns `{ ok: true, messageId }` on success. Throws McpeError on failure.
  *
  * NOTE: when the API key has exactly ONE inbox, MCPEmails auto-resolves the
  * sender — no inbox_id is needed. Multi-inbox keys would require the user to
- * specify which inbox; for the OTP use-case we expect users to have a single
- * dedicated inbox. If they have multiple, the call will succeed and use the
- * first one (MCPEmails' default behavior).
+ * specify which inbox; MCPEmails' default (first inbox) applies.
+ *
+ * PRIVACY: the `apiKey` argument is the USER'S OWN mcpe_* credential resolved
+ * by the Email Automation orchestrator. The platform API key (kv_live_*) is
+ * NEVER passed into this module.
  */
 export async function sendEmailViaMcpe(
   apiKey: string,
   opts: {
-    to: string
+    to: string | string[]
     subject: string
     body: string
     htmlBody?: string
+    fromName?: string
   },
 ): Promise<McpeSendResult> {
+  const recipients = (Array.isArray(opts.to) ? opts.to : [opts.to])
+    .map((t) => (typeof t === 'string' ? t.trim() : ''))
+    .filter(Boolean)
   const args: Record<string, unknown> = {
     action: 'send',
-    to: [opts.to],
+    to: recipients,
     subject: opts.subject,
     body: opts.body,
   }
   if (opts.htmlBody) args.html_body = opts.htmlBody
+  if (opts.fromName) args.from_name = opts.fromName
 
   const result = await rpc<{
     messageId?: string

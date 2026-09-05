@@ -1,64 +1,45 @@
 import { NextRequest } from 'next/server'
-import { authenticate, ok, fail } from '@/lib/auth'
-import { verifyOtp } from '@/lib/otp-store'
 
 export const runtime = 'nodejs'
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-
 /**
- * POST /api/email-otp/verify
- * Body: { "email": "user@example.com", "code": "123456" }
+ * POST /api/email-otp/verify — DEPRECATED (Email Automation migration).
  *
- * Verifies a 6-digit OTP previously issued via /api/email-otp/send.
+ * OTP verification was an application-level concern of the retired OTP
+ * system. The Email Automation API is a generic delivery engine — generate
+ * AND verify codes in your application, and use /api/email/send to deliver
+ * them as the $OTP$ variable. Returns 410 Gone with a machine-readable
+ * migration body; no request is processed and no credential is used.
  *
- * Auth: the caller must present the SAME Onyx Base API key that issued the
- * OTP. OTPs are scoped to the caller's account — tenant A cannot verify
- * an OTP issued by tenant B even if they know the email + code. This is
- * the correct security posture for an OTP service: the API key is the
- * tenant boundary.
- *
- * On success: { ok: true, verified: true }
- * On failure: { ok: false, error: "...", reason: "..." }
- *
- * Failure reasons:
- *   - not_found: no OTP issued for this email, or already consumed
- *   - expired: OTP TTL (10 min) elapsed
- *   - max_attempts: 5 wrong attempts → OTP voided
- *   - wrong_code: hash mismatch (attempts remaining: N)
- *
- * The response NEVER says "valid but expired" or "valid but consumed" —
- * both reduce to "not_found" so attackers can't distinguish them. This
- * is the standard pattern for OTP verification endpoints.
+ * Docs: /docs#email · OpenAPI: /api/openapi.json
  */
-export async function POST(req: NextRequest) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized.', 401)
+const MIGRATION = {
+  deprecated: true,
+  sunset: '2026-09-05',
+  code: 'deprecated',
+  error:
+    'POST /api/email-otp/verify is deprecated. Verify codes in your application; deliver them with POST /api/email/send ($OTP$ variable). It was NOT processed. See the "migration" field.',
+  migration: {
+    newEndpoint: '/api/email/send',
+    setupEndpoint: '/api/credentials/connect',
+    docs: '/docs#email',
+    openapi: '/api/openapi.json',
+    otpHint:
+      'Keep the issued code + expiry in YOUR app store, then email it: { "credential": "personal_email", "to": "...", "body": "Your code is $OTP$.", "variables": { "OTP": "123456" } }',
+  },
+}
 
-  const body = await req.json().catch(() => ({}))
-  const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : ''
-  const code = typeof body.code === 'string' ? body.code.trim() : ''
+export async function POST(_req: NextRequest) {
+  return Response.json({ ok: false, ...MIGRATION }, {
+    status: 410,
+    headers: {
+      Allow: 'POST',
+      Link: '</docs#email>; rel="deprecation"',
+      Sunset: 'Sat, 05 Sep 2026 00:00:00 GMT',
+    },
+  })
+}
 
-  if (!email || !EMAIL_RE.test(email)) {
-    return fail('A valid email address is required.', 400, { code: 'bad_email' })
-  }
-  if (!/^\d{6}$/.test(code)) {
-    return fail('Code must be a 6-digit number.', 400, { code: 'bad_code' })
-  }
-
-  const result = verifyOtp(user.dbUserId, email, code)
-  if (!result.ok) {
-    // The reason is included for the developer's benefit — but the
-    // "wrong_code" reason always says "invalid" in the public message
-    // so attackers can't probe.
-    const message =
-      result.reason === 'expired'
-        ? 'The code has expired. Please request a new one.'
-        : result.reason === 'max_attempts'
-          ? 'Too many wrong attempts. The code has been voided — please request a new one.'
-          : 'Invalid or expired code.'
-    return fail(message, 400, { code: 'invalid_otp', reason: result.reason })
-  }
-
-  return ok({ verified: true })
+export async function GET() {
+  return Response.json({ ok: false, ...MIGRATION }, { status: 410 })
 }

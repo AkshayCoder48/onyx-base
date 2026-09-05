@@ -227,7 +227,7 @@ localStorage.removeItem('cloudkv-session')
 
 ---
 
-## 3 · Features (thirteen dashboard tabs)
+## 3 · Features (fifteen dashboard tabs)
 
 Thirteen dashboard tabs, each a real feature — not a placeholder. The icons
 match the sidebar exactly.
@@ -239,6 +239,7 @@ match the sidebar exactly.
 | **Collections** | Group keys into named collections (\`default\`, \`cache\`, \`metrics\`, …). Create, rename, and delete whole collections in one action — deleting a collection also wipes every record inside it and mirrors the deletion to Telegram. |
 | **Cloud Storage** | A drag-and-drop file manager backed by Telegram. Upload any extension up to the effective limit (50 MB cloud Bot API, or 2 GB with a self-hosted local Bot API server). Each file gets a permanent \`/f/<fileId>\` proxy URL plus a signed 55-minute download token. Toggle public/private per file; track download counts. |
 | **API Keys** | Mint, name, and revoke multiple \`kv_live_…\` API keys per account. Each key is shown exactly once at creation — copy it before closing the dialog. Keys are stored as salted hashes; the plaintext is never retrievable after creation. |
+| **Email Automation** | Privacy-first email automation API. Connect YOUR MCPEmail key as a NAMED credential (\`personal_email\`, \`work_email\`… — live handshake on save, mirrored to your private pinned Telegram manifest), then send via \`/api/email/send\` referencing the name. \`$VAR_NAME$\` variable engine (missing variables abort the send), stored templates, per-credential custom rate limits, request-ID status tracking, and a strict two-credential boundary: the platform \`kv_live_*\` key authenticates you to this API; your \`mcpe_*\` key authenticates the MCPEmail hop. No project-wide fallback — fail closed. |
 | **Public Share** | Create scoped, rate-limited, expiring, revocable share tokens that wrap exactly one \`(collection, key)\` pair. Choose mode, allowed ops, max value length, incr bounds, per-IP rate limit, and TTL. Each token comes with copy-paste-ready \`readUrl\` and \`writeUrl\`. |
 | **API Playground** | An interactive REST explorer: pick an endpoint, fill in the parameters, hit **Send**, and inspect the raw JSON response. Auto-injects your current API key as the Bearer header. |
 | **SQL Editor** | A real SQL console that runs against virtual tables (\`records\`, \`collections\`, \`api_keys\`, \`logs\`, \`users\`) pre-filtered to your account. Run \`SELECT\` / \`INSERT\` / \`UPDATE\` / \`DELETE\` / \`CREATE\` / \`DROP\` / \`ALTER\` statements, plus create your own \`usr_*\` tables for custom schemas. 1000-row cap per result, API keys masked in output, \`⌘+Enter\` to run. |
@@ -246,6 +247,7 @@ match the sidebar exactly.
 | **Docs** | This in-app reference. Copy buttons on every code block, multi-language examples, and a **Copy for LLMs** button at the top to grab the whole spec for an AI assistant (it fetches this very \`/llms.txt\` file). |
 | **Logs** | An append-only audit trail of every API event on your account: \`set\`, \`delete\`, \`login\`, \`apikey.create\`, \`share.create\`, file upload, \`export\`, and more. Each entry includes the action, the key/collection touched, the source (\`dashboard\` / \`cli\` / \`api\` / \`share\`), and a timestamp. Filter by action type, paginate through history. Every log entry is also mirrored into your Telegram chat as a structured message. |
 | **Analytics** | Aggregate charts over your account activity: requests per day, top actions, top keys, share-token usage, file-download counts. All data is derived from the same logs table the Logs tab shows — just rolled up. |
+| **Diagnostics** | System health, storage queue depth, and error triage — liveness of the Telegram durable layer at a glance. |
 | **Settings** | Account + storage configuration. View your \`userId\`, plan, and API-key counts. Configure your own Telegram bot (Bot Token + Chat ID) to route new KV mirrors and file uploads to your private chat instead of the shared server-side bot. Optionally set a local Bot API server URL to unlock 2 GB file uploads/downloads. Ping the bot to verify the config. |
 
 ---
@@ -470,6 +472,29 @@ Require \`Authorization: Bearer onyxbase_…\`.
 | \`DELETE\` | \`/api/admin/branches/:name\` | Drop a branch (delete the snapshot, keep the live DB). |
 | \`GET · POST\` | \`/api/admin/network\` | Get / mutate the runtime IP allowlist (IPv4 CIDR matching; empty = open). |
 
+---
+
+### 4.10 · Email Automation API (privacy-first)
+
+Every call carries the **platform** key. The **MCPEmail** hop is authenticated
+with YOUR own named credential — resolved from your account, never echoed,
+never a project-wide key.
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| \`POST\` | \`/api/credentials/connect\` | Connect YOUR \`mcpe_*\` key under a name (live handshake, masked response, optional per-credential \`rateLimitPerMin\`). Mirrored to your private Telegram manifest. |
+| \`GET\` | \`/api/credentials\` | List credentials (masked views only). \`DELETE /api/credentials/:name\` disconnects. |
+| \`POST\` | \`/api/email/send\` | Send an email: \`{ credential, to, subject, body?, htmlBody?, variables?, fromName? }\`. \`$VAR_NAME$\` substitution — a missing variable aborts the send (\`missing_variable\`). Unknown credential → \`404 credential_not_found\` (fail closed). Returns \`request_id\`. |
+| \`POST\` | \`/api/email/template/send\` | Send via a stored template name or inline \`{ subject, body, htmlBody? }\`. Template never rebuilt. |
+| \`GET\` | \`/api/email/status/:requestId\` | Request status (ts, credential name, sent/failed, latency, upstream status) — metadata only. \`GET /api/email/requests\` lists recent. |
+| \`GET\` · \`POST\` | \`/api/email/templates\` | List / save named templates; \`GET\`·\`DELETE /api/email/templates/:name\` for one. |
+| \`POST\` | \`/api/telegram/connect\` | Connect your private Telegram config channel (\`{ chatId, label?, botToken? }\`, validated live). \`GET\`·\`PUT\`·\`DELETE /api/telegram/config\` for status/update/reset. |
+| \`POST\` | \`/api/email-otp/send\` · \`verify\` | **DEPRECATED (410)** — returns a machine-readable migration guide; nothing is processed. |
+
+Rate limits: per platform key · per IP (30/min) · per-credential custom cap
+(≤120/min hard ceiling). Secrets (\`mcpe_*\`, \`kv_live_*\`, bot tokens,
+Bearer headers) are redacted from all logs. \`/docs#email\` renders the full
+guide anonymously.
 ---
 
 ## 5 · Quick start in any language

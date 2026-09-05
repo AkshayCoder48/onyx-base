@@ -374,7 +374,7 @@ export function DocsView() {
     <div className="space-y-6">
       <PageHeader
         title="Docs"
-        description="Everything you need to use Onyx Base — keys & tokens, every dashboard feature, the REST API, the CLI, realtime, and Telegram-backed durability. Open the Single page tab to see all of it combined into one LLM-friendly doc."
+        description="Everything you need to use Onyx Base — keys & tokens, every dashboard feature, the REST API, the privacy-first Email Automation API, the CLI, realtime, and Telegram-backed durability. Open the Single page tab to see all of it combined into one LLM-friendly doc."
         actions={
           <>
             <Button
