@@ -3,7 +3,7 @@
  * Usage: node scripts/test-all-tabs.js
  */
 const BASE = process.env.BASE_URL || 'http://localhost:3000'
-const KEY = process.env.ONYX_KEY || 'kv_live_XXXXXXXXXXXXXXXXXXX'
+const KEY = process.env.ONYX_KEY || ''
 
 const H = { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' }
 

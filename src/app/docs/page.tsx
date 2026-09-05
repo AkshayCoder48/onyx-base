@@ -279,7 +279,7 @@ const EMAIL_ENDPOINTS: Endpoint[] = [
     path: "/api/dashboard/mcpemail-config",
     title: "Read the email config (masked)",
     auth: true,
-    description: "Shows whether the email service is configured, the masked key (mcpe_4c7b1e9a…6b74), and your templates. DELETE removes the config.",
+    description: "Shows whether the email service is configured, the masked key (mcpe_4c7b1e9a…1f3a), and your templates. DELETE removes the config.",
   },
 ];
 

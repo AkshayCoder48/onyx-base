@@ -4,7 +4,7 @@
  * Usage: node scripts/test-chunked-upload.js [sizeMB]
  */
 const BASE = process.env.BASE_URL || 'http://localhost:3000'
-const KEY = process.env.ONYX_KEY || 'kv_live_XXXXXXXXXXXXXXXXXXX'
+const KEY = process.env.ONYX_KEY || ''
 const SIZE_MB = Number(process.argv[2] || 12)
 
 const H = { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/json' }

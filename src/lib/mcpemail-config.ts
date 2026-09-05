@@ -11,7 +11,7 @@
  *
  * Security model: the value stored on disk (cloudkv.json) and in the
  * Telegram mirror contains the raw `mcpe_*` key. The dashboard GET
- * endpoint returns a MASKED version (e.g. `mcpe_4c7b1e9a…6b74`) so the
+ * endpoint returns a MASKED version (e.g. `mcpe_4c7b1e9a…1f3a`) so the
  * key is never re-exposed to the browser after saving — same posture as
  * the Telegram bot token in `telegram-config`.
  *
@@ -40,7 +40,7 @@ export interface McpeConfigValue {
 
 export interface McpeConfigPublicView {
   hasConfig: boolean
-  /** Masked key, e.g. `mcpe_4c7b1e9a…6b74`. Never the raw key. */
+  /** Masked key, e.g. `mcpe_4c7b1e9a…1f3a`. Never the raw key. */
   apiKeyMasked: string
   label: string | null
   fromName: string | null
@@ -61,7 +61,7 @@ const DEFAULT_BODY =
  * e.g. `mcpe_4c7b1e9a0d5f38a2b6e04d17c9f2a58b3d6e0f1a2b4c6d8e0f2a4b6c8d0e1f3a`
  *
  * The literal prefix is `mcpe_`; the remaining 64 characters are random
- * hex. There are NO sub-families (no `mcpe_live_…` vs `mcpe_4c7b1e9a…`
+ * hex. There are NO sub-families (no `mcpe_live_…` vs `mcpe_4c7…`
  * distinction) — anything that looks like that is just a chunk of the
  * random hex payload.
  *
@@ -88,7 +88,7 @@ export function isValidMcpeKey(key: string): boolean {
  *
  *   mcpe_4c7b1e9a0d5f38a2b6e04d17c9f2a58b3d6e0f1a2b4c6d8e0f2a4b6c8d0e1f3a
  *                  ↓
- *   mcpe_4c7b1e9a…6b74
+ *   mcpe_4c7b1e9a…1f3a
  *
  * If the payload is too short to mask meaningfully (<=12 chars), the raw
  * key is returned as-is.

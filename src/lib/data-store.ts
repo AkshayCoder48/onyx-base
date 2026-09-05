@@ -932,19 +932,32 @@ export function syncIdentityToTelegram(chatId?: string, botToken?: string, botAp
  * EVERYTHING from it.
  */
 let syncTimer: ReturnType<typeof setTimeout> | null = null
-let fullStateSyncInFlight: Promise<number | null> | null = null
+let fullStateSyncInFlight: Promise<unknown> | null = null
+let fullStateSyncDirty = false
 
-/** Run the full-state sync immediately (deduped with any in-flight run). */
-function runFullStateSyncNow(chatId?: string, botToken?: string, botApiBaseUrl?: string): Promise<number | null> {
-  if (fullStateSyncInFlight) return fullStateSyncInFlight
-  const p = syncIdentityToTelegram(chatId, botToken, botApiBaseUrl)
-    .catch((err) => {
-      console.error('[store] scheduled full-state sync failed:', err)
-      return null
-    })
-    .finally(() => {
-      fullStateSyncInFlight = null
-    })
+/**
+ * Run the full-state sync immediately. If a push is already in flight, the
+ * caller's state change is recorded via the dirty flag and the in-flight loop
+ * re-pushes the LATEST state after the current upload settles — a flush
+ * requested mid-flight can never be silently swallowed by the dedupe.
+ */
+function runFullStateSyncNow(chatId?: string, botToken?: string, botApiBaseUrl?: string): Promise<unknown> {
+  if (fullStateSyncInFlight) {
+    fullStateSyncDirty = true
+    return fullStateSyncInFlight
+  }
+  const p = (async () => {
+    do {
+      fullStateSyncDirty = false
+      try {
+        await syncIdentityToTelegram(chatId, botToken, botApiBaseUrl)
+      } catch (err) {
+        console.error('[store] scheduled full-state sync failed:', err)
+      }
+    } while (fullStateSyncDirty)
+  })().finally(() => {
+    fullStateSyncInFlight = null
+  })
   fullStateSyncInFlight = p
   return p
 }
@@ -1809,18 +1822,49 @@ export async function migrateV3ToV4(): Promise<{
  */
 const accountSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const accountSyncInFlight = new Map<string, Promise<unknown>>()
+const accountSyncDirty = new Set<string>()
 
-/** Run one account's V4 sync immediately (deduped with any in-flight run). */
+/**
+ * One-shot V4 probe. `v4ModeActive` starts false on every cold boot / hot
+ * reload; WITHOUT this guard the FIRST mutation of an instance would blindly
+ * fall back to the legacy V3 full-state push and PIN the V3 document over the
+ * V4 account index (flipping the durable format). Probing the index once
+ * before deciding eliminates that race.
+ */
+let v4ProbeOnce: Promise<void> | null = null
+function ensureV4Probed(): Promise<void> {
+  if (!v4ProbeOnce) {
+    v4ProbeOnce = getAccountIndex()
+      .then(() => undefined)
+      .catch(() => undefined)
+  }
+  return v4ProbeOnce
+}
+
+/**
+ * Run one account's V4 sync immediately. If a push is already in flight, the
+ * caller's state change is recorded via the dirty set and the in-flight loop
+ * re-pushes the LATEST state after the current upload settles — a flush
+ * requested mid-flight can never be silently swallowed by the dedupe.
+ */
 function runAccountSyncNow(userId: string): Promise<unknown> {
   const existing = accountSyncInFlight.get(userId)
-  if (existing) return existing
-  const p = syncAccountManifestToTelegram(userId)
-    .catch((err) => {
-      console.error(`[store] scheduled account sync failed for ${userId}:`, err)
-    })
-    .finally(() => {
-      accountSyncInFlight.delete(userId)
-    })
+  if (existing) {
+    accountSyncDirty.add(userId)
+    return existing
+  }
+  const p = (async () => {
+    do {
+      accountSyncDirty.delete(userId)
+      try {
+        await syncAccountManifestToTelegram(userId)
+      } catch (err) {
+        console.error(`[store] scheduled account sync failed for ${userId}:`, err)
+      }
+    } while (accountSyncDirty.has(userId))
+  })().finally(() => {
+    accountSyncInFlight.delete(userId)
+  })
   accountSyncInFlight.set(userId, p)
   return p
 }
@@ -1836,11 +1880,16 @@ export async function flushAccountSync(userId: string): Promise<void> {
 }
 
 export function scheduleAccountSync(userId: string): void {
-  // If we're not yet in V4 mode and haven't attempted migration, fall back to
-  // the legacy global sync. The cold-boot migration (in instrumentation /
-  // module load) will switch us to V4 shortly.
+  // If we're not yet in V4 mode, probe the pinned account index ONCE before
+  // deciding — never blindly fall back to the V3 push (see ensureV4Probed).
   if (!v4ModeActive) {
-    scheduleFullStateSync()
+    void ensureV4Probed().then(() => {
+      if (v4ModeActive) {
+        scheduleAccountSync(userId)
+        return
+      }
+      scheduleFullStateSync()
+    })
     return
   }
   const existing = accountSyncTimers.get(userId)

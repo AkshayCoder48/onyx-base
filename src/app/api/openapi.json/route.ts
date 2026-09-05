@@ -411,7 +411,7 @@ const SPEC = {
       },
     },
     '/api/dashboard/mcpemail-config': {
-      get: { summary: 'Read the MCPEmail automation config (masked key)', responses: { '200': { description: 'OK', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, config: { type: 'object', properties: { hasConfig: { type: 'boolean' }, apiKeyMasked: { type: 'string', example: 'mcpe_4c7b1e9a…6b74' }, label: { type: 'string', nullable: true }, fromName: { type: 'string', nullable: true }, subjectTemplate: { type: 'string', nullable: true }, bodyTemplate: { type: 'string', nullable: true } } } } } } } }, '401': { description: 'Bearer key required' } } },
+      get: { summary: 'Read the MCPEmail automation config (masked key)', responses: { '200': { description: 'OK', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, config: { type: 'object', properties: { hasConfig: { type: 'boolean' }, apiKeyMasked: { type: 'string', example: 'mcpe_4c7b1e9a…1f3a' }, label: { type: 'string', nullable: true }, fromName: { type: 'string', nullable: true }, subjectTemplate: { type: 'string', nullable: true }, bodyTemplate: { type: 'string', nullable: true } } } } } } } }, '401': { description: 'Bearer key required' } } },
       put: {
         summary: 'Save the MCPEmail API key + email templates (validates via live handshake)',
         description:
