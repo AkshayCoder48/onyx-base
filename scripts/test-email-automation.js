@@ -222,8 +222,8 @@ async function main() {
     check('admin (different tenant) sees NO test credential', list.status === 200 && !(list.json?.credentials ?? []).some((c) => c.name === CRED || c.name === CRED_RL))
     const probe = await call('GET', `/api/credentials/${CRED}`, undefined, AH)
     check("admin cannot read the user's credential → 404", probe.status === 404)
-    const st = await call('GET', `/api/email/status/${globalThis.__requestId}`, undefined, AH)
-    check("admin cannot read the user's request status → 404", st.status === 404)
+    const st = await call('GET', `/api/email/status/${globalThis.__requestId ?? 'req_none'}`, undefined, AH)
+    check("admin cannot read the user's request status → 404", st.status === 404, `got ${st.status}`)
   } else {
     console.log('  (skipped — set ONYX_ADMIN_KEY to run the cross-user isolation checks)')
   }

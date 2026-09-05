@@ -25,6 +25,7 @@
 
 import type { AuthenticatedUser } from '@/lib/auth'
 import { ok, fail } from '@/lib/auth'
+import { rehydrateAccountFromTelegram } from '@/lib/data-store'
 import { getRawCredential, touchCredentialLastUsed } from '@/lib/email-credentials'
 import { renderTemplate, sanitizeVariables, extractVariables } from '@/lib/email-variables'
 import { recordEmailRequest } from '@/lib/email-request-log'
@@ -137,7 +138,20 @@ export async function orchestrateEmailSend(
       code: 'credential_required',
     })
   }
-  const cred = getRawCredential(user.dbUserId, credName)
+  let cred = getRawCredential(user.dbUserId, credName)
+  if (!cred) {
+    // Cross-instance consistency: the credential may exist in the durable
+    // Telegram manifest but not yet on THIS warm serverless instance (the
+    // platform's documented eventual-consistency model). One-shot
+    // rehydrate-on-miss — the exact pattern authenticate() uses for API keys —
+    // then re-check. If it still doesn't exist, we FAIL CLOSED below.
+    try {
+      const rh = await rehydrateAccountFromTelegram(user.userId)
+      if (rh.attempted) cred = getRawCredential(user.dbUserId, credName)
+    } catch {
+      /* network/rehydrate failure — keep null → fail closed */
+    }
+  }
   if (!cred) {
     return fail(
       `Credential "${scrubSecrets(credName)}" was not found for this account. Connect it first via POST /api/credentials/connect, then reference it by name. There is no project-wide fallback credential.`,

@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import { authenticate, authorize, authorizeFailResponse, fail } from '@/lib/auth'
+import { rehydrateAccountFromTelegram } from '@/lib/data-store'
 import { orchestrateEmailSend } from '@/lib/email-automation'
 import { getRawTemplate } from '@/lib/email-templates'
 import { consumeIpRateLimit, clientIpFrom } from '@/lib/email-rate-limit'
@@ -68,7 +69,18 @@ export async function POST(req: NextRequest) {
 
   const tpl = body.template
   if (typeof tpl === 'string' && tpl.trim()) {
-    const stored = getRawTemplate(user.dbUserId, tpl.trim())
+    let stored = getRawTemplate(user.dbUserId, tpl.trim())
+    if (!stored) {
+      // Cross-instance eventual consistency: the template may exist in the
+      // durable Telegram manifest but not on THIS warm instance. One-shot
+      // rehydrate-on-miss (same pattern as authenticate()), then re-check.
+      try {
+        const rh = await rehydrateAccountFromTelegram(user.userId)
+        if (rh.attempted) stored = getRawTemplate(user.dbUserId, tpl.trim())
+      } catch {
+        /* keep null → 404 below */
+      }
+    }
     if (!stored) {
       return fail(
         `Template "${scrubSecrets(tpl).slice(0, 64)}" was not found for this account. Save it first via POST /api/email/templates.`,
