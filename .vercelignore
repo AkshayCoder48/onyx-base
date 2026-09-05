@@ -1,25 +1,30 @@
 # Defense-in-depth: Vercel CLI already respects .gitignore, but make it
 # explicit so no secret-bearing file ever gets uploaded in a build artifact.
+#
+# ⚠️ ANCHORING MATTERS: patterns without a leading "/" match at ANY depth.
+# `upload/` (unanchored) previously swallowed src/app/api/files/upload/* —
+# the chunked-upload routes were never deployed (404 in production).
+# Root-only patterns MUST start with "/".
 .env
 .env.*
 !.env.example
-db/cloudkv.json
-db/custom.db
-db/*.json
-db/*.db
-dev.log
-dev.out.log
-.next/
-.next-dev.pid
-tool-results/
-download/
-upload/
-skills/
-worklog.md
-agent-ctx/
-plan.md
+/db/cloudkv.json
+/db/custom.db
+/db/*.json
+/db/*.db
+/dev.log
+/dev.out.log
+/.next/
+/.next-dev.pid
+/tool-results/
+/download/
+/upload/
+/skills/
+/worklog.md
+/agent-ctx/
+/plan.md
 *.log
 *.png.bak
 .claude
 .z-ai-config
-.zscripts/
+/.zscripts/
