@@ -31,6 +31,7 @@ import {
 } from 'lucide-react'
 import { useApi, type FileView } from '@/lib/api'
 import { useOnyxBase } from '@/lib/store'
+import { uploadFileResilient } from '@/lib/upload-client'
 import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -134,6 +135,8 @@ export function CloudStorageView() {
   const [isPublic, setIsPublic] = useState(true)
   const [dragOver, setDragOver] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<FileView | null>(null)
+  // Live chunked-upload progress (bytes of the file confirmed by the server).
+  const [uploadProgress, setUploadProgress] = useState<{ sent: number; total: number; phase: string } | null>(null)
   // Which file is currently fetching a Telegram URL for the quick-copy button.
   const [copyingId, setCopyingId] = useState<string | null>(null)
   // Which file's Telegram URL was just copied (shows a green check for 1.5s).
@@ -153,19 +156,15 @@ export function CloudStorageView() {
 
   const uploadMutation = useMutation({
     mutationFn: async (opts: { file: File; label: string; isPublic: boolean }) => {
-      // Bypass the JSON api() helper — this is a multipart upload.
-      const form = new FormData()
-      form.append('file', opts.file)
-      if (opts.label.trim()) form.append('label', opts.label.trim())
-      form.append('public', opts.isPublic ? 'true' : 'false')
-      const res = await fetch('/api/files', {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: form,
+      // Resilient uploader: single-shot for small files, chunked + resumable
+      // + retrying for large ones (fixes the >10 MB upload crashes / 502s).
+      setUploadProgress({ sent: 0, total: opts.file.size, phase: 'init' })
+      return uploadFileResilient(apiKey, opts.file, {
+        label: opts.label,
+        isPublic: opts.isPublic,
+      }, (p) => {
+        setUploadProgress({ sent: p.sentBytes, total: p.totalBytes, phase: p.phase })
       })
-      const json = await res.json()
-      if (!res.ok) throw new Error(json?.error || `Upload failed (${res.status})`)
-      return json as { file: FileView }
     },
     onSuccess: () => {
       toast.success('File uploaded — tap "Get link" to mint a download URL')
@@ -316,6 +315,7 @@ export function CloudStorageView() {
     setLabel('')
     setIsPublic(true)
     setUploadOpen(false)
+    setUploadProgress(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -578,6 +578,39 @@ export function CloudStorageView() {
                   <div>
                     Files over 50 MB require a self-hosted <a className="underline" href="https://github.com/tdlib/telegram-bot-api" target="_blank" rel="noreferrer">local Telegram Bot API server</a> for upload, and over 20 MB for download via <code className="font-mono">getFile</code>. The 2 GB ceiling is enforced app-side either way.
                   </div>
+                </div>
+              )}
+
+              {/* Live chunked-upload progress — bytes confirmed by the server. */}
+              {uploadMutation.isPending && uploadProgress && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground font-mono">
+                    <span>
+                      {uploadProgress.phase === 'init' && 'Preparing chunked upload…'}
+                      {uploadProgress.phase === 'chunks' && 'Uploading chunks…'}
+                      {uploadProgress.phase === 'complete' && 'Finalizing on Telegram…'}
+                      {uploadProgress.phase === 'single' && 'Uploading…'}
+                    </span>
+                    <span>
+                      {formatBytes(uploadProgress.sent)} / {formatBytes(uploadProgress.total)} ·{' '}
+                      {uploadProgress.total > 0
+                        ? Math.min(100, Math.round((uploadProgress.sent / uploadProgress.total) * 100))
+                        : 0}
+                      %
+                    </span>
+                  </div>
+                  <div className="h-1.5 rounded-full bg-muted/60 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-primary to-[#ef8f2a] transition-all duration-200"
+                      style={{
+                        width: `${uploadProgress.total > 0 ? Math.min(100, (uploadProgress.sent / uploadProgress.total) * 100) : 0}%`,
+                      }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-muted-foreground/80">
+                    Large files are sent in 4 MB chunks with automatic retries — the upload resumes
+                    itself if the connection drops.
+                  </p>
                 </div>
               )}
             </div>

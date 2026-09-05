@@ -349,6 +349,124 @@ const SPEC = {
     '/api/admin/branches/{name}': {
       delete: { summary: 'Remove a DB branch snapshot (admin)', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } } },
     },
+
+    // ─── Email OTP / automated email service (MCPEmail) ──────────────────
+    '/api/email-otp/send': {
+      post: {
+        summary: 'Send a 6-digit verification code to any email address',
+        description:
+          'Automated email service backed by your MCPEmail API key (mcpe_<64-hex>). Configure the key once via PUT /api/dashboard/mcpemail-config (dashboard → Email OTP tab). Rate-limited per target email (30s between sends, 10/hour). The code expires after 10 minutes and is stored durably with your account.',
+        security: [],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  email: { type: 'string', format: 'email', example: 'user@example.com' },
+                  purpose: { type: 'string', example: 'login', description: 'Optional label persisted with the request.' },
+                },
+                required: ['email'],
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Code sent', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, expiresInSec: { type: 'integer', example: 600 }, retryAfterSec: { type: 'integer', example: 30 } } } } } },
+          '400': { description: 'Missing/invalid email or no MCPEmail key configured (see PUT /api/dashboard/mcpemail-config)' },
+          '429': { description: 'Rate limited — retry after retryAfterSec' },
+          '502': { description: 'MCPEmail upstream error (invalid key, quota, provider outage)' },
+        },
+      },
+    },
+    '/api/email-otp/verify': {
+      post: {
+        summary: 'Verify a 6-digit code for an email address',
+        description:
+          'Checks the code against the latest non-expired, non-consumed code sent to that email. On success the code is consumed (single-use). Body may alternatively carry a requestId returned by /send for extra precision.',
+        security: [],
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  email: { type: 'string', format: 'email', example: 'user@example.com' },
+                  code: { type: 'string', example: '482913', description: 'The 6-digit code from the email.' },
+                  requestId: { type: 'string', description: 'Optional id returned by /send.' },
+                },
+                required: ['email', 'code'],
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: 'Verified', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean', example: true }, verified: { type: 'boolean', example: true } } } } } },
+          '400': { description: 'Wrong or malformed code' },
+          '410': { description: 'Code expired (10 min TTL) or already used' },
+          '404': { description: 'No code was ever sent to this email' },
+        },
+      },
+    },
+    '/api/dashboard/mcpemail-config': {
+      get: { summary: 'Read the MCPEmail automation config (masked key)', responses: { '200': { description: 'OK', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, config: { type: 'object', properties: { hasConfig: { type: 'boolean' }, apiKeyMasked: { type: 'string', example: 'mcpe_4c7b1e9a…6b74' }, label: { type: 'string', nullable: true }, fromName: { type: 'string', nullable: true }, subjectTemplate: { type: 'string', nullable: true }, bodyTemplate: { type: 'string', nullable: true } } } } } } } }, '401': { description: 'Bearer key required' } } },
+      put: {
+        summary: 'Save the MCPEmail API key + email templates (validates via live handshake)',
+        description:
+          'Body: { apiKey: "mcpe_<64-hex>", label?, fromName?, subjectTemplate?, bodyTemplate?, testConnection? }. The key is validated locally (prefix mcpe_, 25+ chars) and against the live mcpemails.com MCP endpoint (initialize handshake). The key is stored with your account and mirrored to Telegram — it survives cold boots.',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { apiKey: { type: 'string', example: 'mcpe_4c7b1e9a0d5f…' }, label: { type: 'string' }, fromName: { type: 'string', example: 'Onyx Base' }, subjectTemplate: { type: 'string', example: 'Your verification code' }, bodyTemplate: { type: 'string', example: 'Your code is {{code}} — expires in 10 minutes.' }, testConnection: { type: 'boolean', example: true } }, required: ['apiKey'] } } } },
+        responses: {
+          '200': { description: 'Saved (connection tested if requested)', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, connection: { type: 'object', properties: { ok: { type: 'boolean' }, serverName: { type: 'string', example: 'mcpemails' }, protocolVersion: { type: 'string', example: '2025-06-18' } } } } } } } },
+          '400': { description: 'bad_key — must start with mcpe_ and be at least 25 characters' },
+          '502': { description: 'Handshake with mcpemails.com failed (invalid key or provider outage)' },
+        },
+      },
+      delete: { summary: 'Remove the MCPEmail config', responses: { '200': { description: 'Removed' }, '401': { description: 'Bearer key required' } } },
+    },
+
+    // ─── Chunked file upload (any file size) ─────────────────────────────
+    '/api/files/upload/init': {
+      post: {
+        summary: 'Begin a chunked upload session (files of ANY size)',
+        description:
+          'Resumable, disk-backed upload protocol. Small files (≤ 8 MB) can use the single-shot POST /api/files instead; larger files should be split client-side into 4 MB chunks and sent here — each request stays under every platform body limit (Vercel ~4.5 MB, Next.js proxy cap). Sessions expire after 2 hours.',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { fileName: { type: 'string' }, mimeType: { type: 'string', example: 'application/octet-stream' }, size: { type: 'integer', format: 'int64', example: 31457280 }, label: { type: 'string' }, isPublic: { type: 'boolean', example: true }, chunkSize: { type: 'integer', example: 4194304 } }, required: ['fileName', 'size'] } } } },
+        responses: { '200': { description: 'Session created — returns uploadId + negotiated chunkSize/chunkCount', content: { 'application/json': { schema: { type: 'object', properties: { uploadId: { type: 'string', format: 'uuid' }, chunkSize: { type: 'integer', example: 4194304 }, chunkCount: { type: 'integer', example: 8 }, resumeUrl: { type: 'string' } } } } } }, '400': { description: 'Invalid size/fileName (max 2 GB)' } },
+      },
+    },
+    '/api/files/upload/chunk': {
+      post: {
+        summary: 'Upload one chunk (raw binary body)',
+        description:
+          'POST the RAW chunk bytes as the request body (Content-Type: application/octet-stream) with ?uploadId=&index=. Each chunk must match the negotiated size exactly (the last may be shorter). Idempotent — retrying an index safely overwrites its part. 404 SESSION_NOT_FOUND means the session expired (2h TTL) or hit a different server instance: re-init.',
+        parameters: [
+          { name: 'uploadId', in: 'query', required: true, schema: { type: 'string', format: 'uuid' } },
+          { name: 'index', in: 'query', required: true, schema: { type: 'integer' } },
+        ],
+        requestBody: { required: true, content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } } },
+        responses: { '200': { description: 'Chunk stored', content: { 'application/json': { schema: { type: 'object', properties: { received: { type: 'integer' }, total: { type: 'integer' }, complete: { type: 'boolean' } } } } } }, '400': { description: 'Wrong chunk size / index out of range' }, '404': { description: 'SESSION_NOT_FOUND — re-init the upload' } },
+      },
+    },
+    '/api/files/upload/status': {
+      get: {
+        summary: 'Resume support — list received/missing chunks',
+        parameters: [{ name: 'uploadId', in: 'query', required: true, schema: { type: 'string', format: 'uuid' } }],
+        responses: { '200': { description: 'Session state', content: { 'application/json': { schema: { type: 'object', properties: { receivedChunks: { type: 'array', items: { type: 'integer' } }, missingChunks: { type: 'array', items: { type: 'integer' } }, complete: { type: 'boolean' }, expiresAtMs: { type: 'integer' } } } } } }, '404': { description: 'Session not found' } },
+      },
+    },
+    '/api/files/upload/complete': {
+      post: {
+        summary: 'Assemble + ship to Telegram + register the file',
+        description: 'Verifies the assembled byte count matches the declared size, uploads to the storage backend (Telegram), registers the file record, cleans the temp session, and returns the same shape as POST /api/files.',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { uploadId: { type: 'string', format: 'uuid' } }, required: ['uploadId'] } } } },
+        responses: { '200': { description: 'File stored', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, file: { $ref: '#/components/schemas/File' } } } } } }, '409': { description: 'Incomplete — missing chunks listed in the error' }, '404': { description: 'Session not found' } },
+      },
+    },
+    '/api/files/upload/abort': {
+      post: { summary: 'Discard an in-progress upload session', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { uploadId: { type: 'string', format: 'uuid' } }, required: ['uploadId'] } } } }, responses: { '200': { description: 'Aborted (idempotent)' } } },
+    },
   },
 }
 

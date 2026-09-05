@@ -304,6 +304,12 @@ export function LoginScreen() {
 
           <div className="relative font-mono text-xs text-muted-foreground/70">
             <span className="text-primary">$</span> sign up → copy key → use anywhere.
+            <a
+              href="/docs"
+              className="ml-3 not-italic font-sans text-[11px] font-medium text-primary hover:text-[#d8410f] underline underline-offset-2 decoration-primary/40 transition-colors"
+            >
+              Read the public API docs →
+            </a>
           </div>
         </section>
 
@@ -313,6 +319,9 @@ export function LoginScreen() {
             <div className="lg:hidden flex items-center gap-2.5 mb-7">
               <Logo />
               <span className="font-mono text-sm">Onyx Base</span>
+              <a href="/docs" className="ml-auto text-xs font-medium text-primary hover:text-[#d8410f] transition-colors">
+                API docs
+              </a>
             </div>
 
             <AnimatePresence mode="wait">

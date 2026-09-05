@@ -47,6 +47,19 @@ httpServer.on('request', (req: IncomingMessage, res: ServerResponse) => {
   if (req.method === 'POST' && req.url !== undefined && req.url.startsWith('/notify')) {
     return handleNotify(req, res)
   }
+  // Liveness probe used by the Next.js /api/health route (and uptime
+  // monitors). Without this, socket.io would swallow GET /health with a
+  // 400 "Transport unknown" and the dashboard would show realtime as
+  // "degraded" even though the service is perfectly fine.
+  if (req.method === 'GET' && req.url !== undefined && req.url.split('?')[0] === '/health') {
+    return sendJson(res, 200, {
+      ok: true,
+      service: 'onyxbase-realtime',
+      port: PORT,
+      clients: io.engine.clientsCount,
+      uptimeSec: Math.floor(process.uptime()),
+    })
+  }
   // Delegate everything else to socket.io (polling / upgrade traffic).
   for (const listener of ioListeners) {
     listener.call(httpServer, req, res)

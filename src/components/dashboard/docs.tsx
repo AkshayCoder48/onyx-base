@@ -37,6 +37,7 @@ import {
   Rocket,
   FileText,
   Loader2,
+  ExternalLink,
 } from 'lucide-react'
 import { PageHeader } from './shell'
 import { useOnyxBase } from '@/lib/store'
@@ -375,11 +376,22 @@ export function DocsView() {
         title="Docs"
         description="Everything you need to use Onyx Base — keys & tokens, every dashboard feature, the REST API, the CLI, realtime, and Telegram-backed durability. Open the Single page tab to see all of it combined into one LLM-friendly doc."
         actions={
-          <Button variant="outline" size="sm" onClick={copyForLlms} className="gap-1.5">
-            {llmCopied
-              ? <><Check className="size-3.5 text-emerald-600" /> Copied for LLMs</>
-              : <><Sparkles className="size-3.5 text-primary" /> Copy for LLMs</>}
-          </Button>
+          <>
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={() => window.open('/docs', '_blank', 'noopener')}
+              title="Public documentation — shareable, no login needed"
+            >
+              <ExternalLink className="size-3.5 text-primary" /> Public docs
+            </Button>
+            <Button variant="outline" size="sm" onClick={copyForLlms} className="gap-1.5">
+              {llmCopied
+                ? <><Check className="size-3.5 text-emerald-600" /> Copied for LLMs</>
+                : <><Sparkles className="size-3.5 text-primary" /> Copy for LLMs</>}
+            </Button>
+          </>
         }
       />
 

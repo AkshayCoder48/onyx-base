@@ -106,9 +106,52 @@ function ensureSchema(prisma: PrismaClient): Promise<void> {
   return p
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Lazy model proxies.
+//
+// WHY: routes like /api/v1/views do `db.view.findMany(...)`. The lazy Proxy
+// below used to return `undefined` for any non-raw-query property, which made
+// `db.view.findMany` throw `Cannot read properties of undefined` → HTTP 500
+// on every views / matviews / functions request. We now return a per-model
+// sub-proxy that (a) instantiates the real PrismaClient on first use,
+// (b) ensures the SQLite schema exists, then (c) forwards the method call.
+//
+// The sub-proxies are cached so `db.view === db.view` (identity is stable and
+// each model's methods are only re-bound once).
+// ─────────────────────────────────────────────────────────────────────────────
+const modelProxies = new Map<string, unknown>()
+
+function getModelProxy(prop: string): unknown {
+  const cached = modelProxies.get(prop)
+  if (cached) return cached
+
+  const sub = new Proxy({} as Record<string, unknown>, {
+    get(_t, method) {
+      if (typeof method !== 'string') return undefined
+      // Async, lazily-resolving method wrapper (findMany, create, …).
+      return async (...args: unknown[]) => {
+        const prisma = await getPrisma()
+        await ensureSchema(prisma)
+        const model = Reflect.get(prisma, prop) as Record<string, unknown> | undefined
+        if (!model || typeof model !== 'object') {
+          throw new Error(`Prisma model "${prop}" does not exist on the generated client`)
+        }
+        const fn = Reflect.get(model, method)
+        if (typeof fn !== 'function') {
+          throw new Error(`Prisma model "${prop}.${method}" is not a function`)
+        }
+        return (fn as (...a: unknown[]) => unknown).apply(model, args)
+      }
+    },
+  })
+
+  modelProxies.set(prop, sub)
+  return sub
+}
+
 // Wrap the raw-query methods so the schema is ensured before the first query
-// AND PrismaClient is lazily instantiated. Non-query property access is not
-// supported on the lazy proxy — callers should only use the raw query methods.
+// AND PrismaClient is lazily instantiated. Non-query property access resolves
+// to a lazy model sub-proxy (see getModelProxy).
 const RAW_QUERY_METHODS = new Set([
   '$queryRaw',
   '$queryRawUnsafe',
@@ -119,15 +162,14 @@ const RAW_QUERY_METHODS = new Set([
 
 /**
  * Lazy Prisma client. PrismaClient is instantiated + the SQLite schema is
- * ensured on the FIRST raw query, not at module load. This is critical for
- * Cloudflare (read-only filesystem) and serverless cold-start performance.
+ * ensured on the FIRST raw query OR model-method call, not at module load.
+ * This is critical for Cloudflare (read-only filesystem) and serverless
+ * cold-start performance.
  */
 export const db = new Proxy({} as PrismaClient, {
   get(_target, prop, receiver) {
-    if (
-      typeof prop === 'string' &&
-      RAW_QUERY_METHODS.has(prop)
-    ) {
+    if (typeof prop !== 'string') return undefined
+    if (RAW_QUERY_METHODS.has(prop)) {
       return async (...args: unknown[]) => {
         const prisma = await getPrisma()
         await ensureSchema(prisma)
@@ -138,8 +180,8 @@ export const db = new Proxy({} as PrismaClient, {
         throw new Error(`Prisma method "${prop}" is not a function`)
       }
     }
-    // Non-query property access (e.g. prisma.user) is not supported on the
-    // lazy proxy. Return undefined — callers using raw queries won't hit this.
-    return undefined
+    // Non-function symbols (e.g. Symbol.toPrimitive / util.inspect.custom)
+    // should not create model proxies.
+    return getModelProxy(prop)
   },
 })
