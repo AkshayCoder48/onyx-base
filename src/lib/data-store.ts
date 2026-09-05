@@ -932,14 +932,85 @@ export function syncIdentityToTelegram(chatId?: string, botToken?: string, botAp
  * EVERYTHING from it.
  */
 let syncTimer: ReturnType<typeof setTimeout> | null = null
+let fullStateSyncInFlight: Promise<number | null> | null = null
+
+/** Run the full-state sync immediately (deduped with any in-flight run). */
+function runFullStateSyncNow(chatId?: string, botToken?: string, botApiBaseUrl?: string): Promise<number | null> {
+  if (fullStateSyncInFlight) return fullStateSyncInFlight
+  const p = syncIdentityToTelegram(chatId, botToken, botApiBaseUrl)
+    .catch((err) => {
+      console.error('[store] scheduled full-state sync failed:', err)
+      return null
+    })
+    .finally(() => {
+      fullStateSyncInFlight = null
+    })
+  fullStateSyncInFlight = p
+  return p
+}
+
+/**
+ * Durability guard for serverless: Vercel freezes the function right after
+ * the response — a 1s debounce timer scheduled during a FAST mutating
+ * request may NEVER fire, silently losing the write from the durable
+ * Telegram manifest (it would only exist in that instance's ephemeral
+ * memory). `after()` (next/server) is the platform-blessed primitive that
+ * extends the function's lifetime past the response; we register a callback
+ * that flushes any pending sync before the freeze.
+ *
+ * Outside a request context (scripts, dev shell) this is a no-op — the
+ * long-lived process always runs its timers anyway.
+ */
+function keepAliveUntilSyncFlushed(flush: () => Promise<unknown>): void {
+  try {
+    void import('next/server')
+      .then((mod) => {
+        try {
+          const after = (mod as { after?: (cb: () => Promise<unknown>) => void }).after
+          if (typeof after !== 'function') return
+          after(async () => {
+            try {
+              await flush()
+            } catch {
+              /* already logged inside the flush impl */
+            }
+          })
+        } catch {
+          /* after() throws outside a request scope (scripts/tests) — the
+             plain debounce timer is the fallback there. */
+        }
+      })
+      .catch(() => {
+        /* 'next/server' unavailable (bun script context) — timer fallback. */
+      })
+  } catch {
+    /* dynamic import unavailable (edge/test env) — timer path still works */
+  }
+}
+
+/** Await any pending (debounced or in-flight) full-state sync. */
+export async function flushFullStateSync(): Promise<void> {
+  if (syncTimer) {
+    clearTimeout(syncTimer)
+    syncTimer = null
+  }
+  await runFullStateSyncNow()
+}
+
 export function scheduleFullStateSync(chatId?: string, botToken?: string, botApiBaseUrl?: string): void {
   if (syncTimer) clearTimeout(syncTimer)
   syncTimer = setTimeout(() => {
     syncTimer = null
-    void syncIdentityToTelegram(chatId, botToken, botApiBaseUrl).catch((err) =>
-      console.error('[store] scheduled full-state sync failed:', err),
-    )
+    void runFullStateSyncNow(chatId, botToken, botApiBaseUrl)
   }, 1000)
+  // Serverless freeze guard — flush before this function gets frozen.
+  keepAliveUntilSyncFlushed(async () => {
+    if (syncTimer) {
+      clearTimeout(syncTimer)
+      syncTimer = null
+    }
+    await runFullStateSyncNow(chatId, botToken, botApiBaseUrl)
+  })
 }
 
 // ─── Per-user manifest (custom-chat recovery) ────────────────────────────────
@@ -1737,6 +1808,33 @@ export async function migrateV3ToV4(): Promise<{
  * full-state sync if not yet in V4 mode (e.g. migration hasn't run).
  */
 const accountSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const accountSyncInFlight = new Map<string, Promise<unknown>>()
+
+/** Run one account's V4 sync immediately (deduped with any in-flight run). */
+function runAccountSyncNow(userId: string): Promise<unknown> {
+  const existing = accountSyncInFlight.get(userId)
+  if (existing) return existing
+  const p = syncAccountManifestToTelegram(userId)
+    .catch((err) => {
+      console.error(`[store] scheduled account sync failed for ${userId}:`, err)
+    })
+    .finally(() => {
+      accountSyncInFlight.delete(userId)
+    })
+  accountSyncInFlight.set(userId, p)
+  return p
+}
+
+/** Await any pending (debounced or in-flight) account sync. */
+export async function flushAccountSync(userId: string): Promise<void> {
+  const t = accountSyncTimers.get(userId)
+  if (t) {
+    clearTimeout(t)
+    accountSyncTimers.delete(userId)
+  }
+  await runAccountSyncNow(userId)
+}
+
 export function scheduleAccountSync(userId: string): void {
   // If we're not yet in V4 mode and haven't attempted migration, fall back to
   // the legacy global sync. The cold-boot migration (in instrumentation /
@@ -1749,11 +1847,11 @@ export function scheduleAccountSync(userId: string): void {
   if (existing) clearTimeout(existing)
   const timer = setTimeout(() => {
     accountSyncTimers.delete(userId)
-    void syncAccountManifestToTelegram(userId).catch((err) =>
-      console.error(`[store] scheduled account sync failed for ${userId}:`, err),
-    )
+    void runAccountSyncNow(userId)
   }, 1000)
   accountSyncTimers.set(userId, timer)
+  // Serverless freeze guard — flush before this function gets frozen.
+  keepAliveUntilSyncFlushed(() => flushAccountSync(userId))
 }
 
 /**
