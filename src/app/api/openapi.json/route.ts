@@ -429,43 +429,52 @@ const SPEC = {
     // ─── Chunked file upload (any file size) ─────────────────────────────
     '/api/files/upload/init': {
       post: {
-        summary: 'Begin a chunked upload session (files of ANY size)',
+        summary: 'Chunked upload — mint the plan (files of ANY size)',
         description:
-          'Resumable, disk-backed upload protocol. Small files (≤ 8 MB) can use the single-shot POST /api/files instead; larger files should be split client-side into 4 MB chunks and sent here — each request stays under every platform body limit (Vercel ~4.5 MB, Next.js proxy cap). Sessions expire after 2 hours.',
+          'STATELESS protocol v2: the server keeps no session — the client echoes the plan fields on every subsequent call, so ANY instance can serve ANY step (multi-instance serverless safe). Small files (≤ 8 MB) can use the single-shot POST /api/files instead; larger files are split client-side into 4 MB chunks so every request stays under every platform body limit (Vercel ~4.5 MB, Next.js proxy cap). Size is validated against the storage backend ceiling (50 MB cloud Bot API / 2 GB local Bot API) at init time.',
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { fileName: { type: 'string' }, mimeType: { type: 'string', example: 'application/octet-stream' }, size: { type: 'integer', format: 'int64', example: 31457280 }, label: { type: 'string' }, isPublic: { type: 'boolean', example: true }, chunkSize: { type: 'integer', example: 4194304 } }, required: ['fileName', 'size'] } } } },
-        responses: { '200': { description: 'Session created — returns uploadId + negotiated chunkSize/chunkCount', content: { 'application/json': { schema: { type: 'object', properties: { uploadId: { type: 'string', format: 'uuid' }, chunkSize: { type: 'integer', example: 4194304 }, chunkCount: { type: 'integer', example: 8 }, resumeUrl: { type: 'string' } } } } } }, '400': { description: 'Invalid size/fileName (max 2 GB)' } },
+        responses: { '200': { description: 'Plan minted — uploadId + chunkSize/chunkCount (store these client-side and echo them on every call)', content: { 'application/json': { schema: { type: 'object', properties: { uploadId: { type: 'string', format: 'uuid' }, chunkSize: { type: 'integer', example: 4194304 }, chunkCount: { type: 'integer', example: 8 }, storageMode: { type: 'string', enum: ['server', 'custom'] }, maxUploadBytes: { type: 'integer' } } } } } }, '400': { description: 'Invalid size/fileName (max 2 GB)' }, '413': { description: 'File exceeds the storage backend ceiling (50 MB cloud / 2 GB local Bot API)' } },
       },
     },
     '/api/files/upload/chunk': {
       post: {
-        summary: 'Upload one chunk (raw binary body)',
+        summary: 'Upload one chunk (raw binary body) — staged as a Telegram document',
         description:
-          'POST the RAW chunk bytes as the request body (Content-Type: application/octet-stream) with ?uploadId=&index=. Each chunk must match the negotiated size exactly (the last may be shorter). Idempotent — retrying an index safely overwrites its part. 404 SESSION_NOT_FOUND means the session expired (2h TTL) or hit a different server instance: re-init.',
+          'POST the RAW chunk bytes as the request body (Content-Type: application/octet-stream) with the plan echoed as query params. The server stages the chunk as a Telegram document (<uploadId>.part<NNNNNN>) in your resolved storage chat and returns { messageId, fileId } — the client collects one ref per chunk and hands the full set to /complete. A retried index stages a NEW document; keep the newest ref per index.',
         parameters: [
           { name: 'uploadId', in: 'query', required: true, schema: { type: 'string', format: 'uuid' } },
           { name: 'index', in: 'query', required: true, schema: { type: 'integer' } },
+          { name: 'chunkCount', in: 'query', required: true, schema: { type: 'integer' }, description: 'Echoed from init' },
+          { name: 'chunkSize', in: 'query', required: true, schema: { type: 'integer' }, description: 'Echoed from init' },
+          { name: 'size', in: 'query', required: true, schema: { type: 'integer', format: 'int64' }, description: 'Echoed from init' },
         ],
         requestBody: { required: true, content: { 'application/octet-stream': { schema: { type: 'string', format: 'binary' } } } },
-        responses: { '200': { description: 'Chunk stored', content: { 'application/json': { schema: { type: 'object', properties: { received: { type: 'integer' }, total: { type: 'integer' }, complete: { type: 'boolean' } } } } } }, '400': { description: 'Wrong chunk size / index out of range' }, '404': { description: 'SESSION_NOT_FOUND — re-init the upload' } },
+        responses: { '200': { description: 'Chunk staged on Telegram', content: { 'application/json': { schema: { type: 'object', properties: { messageId: { type: 'integer' }, fileId: { type: 'string' }, storageMode: { type: 'string', enum: ['server', 'custom'] }, botApiBaseUrl: { type: 'string', nullable: true }, bytes: { type: 'integer' } } } } } }, '400': { description: 'Wrong chunk size / index out of range' }, '502': { description: 'Telegram rejected the upload' }, '503': { description: 'Storage not configured' } },
       },
     },
     '/api/files/upload/status': {
-      get: {
-        summary: 'Resume support — list received/missing chunks',
-        parameters: [{ name: 'uploadId', in: 'query', required: true, schema: { type: 'string', format: 'uuid' } }],
-        responses: { '200': { description: 'Session state', content: { 'application/json': { schema: { type: 'object', properties: { receivedChunks: { type: 'array', items: { type: 'integer' } }, missingChunks: { type: 'array', items: { type: 'integer' } }, complete: { type: 'boolean' }, expiresAtMs: { type: 'integer' } } } } } }, '404': { description: 'Session not found' } },
+      post: {
+        summary: 'Verify the staged chunk set (getFile metadata only)',
+        description: 'POST the collected chunk refs; each is verified against Telegram via getFile (no bytes downloaded). Reports missing and size-mismatched indexes so the client knows exactly what to re-send.',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { uploadId: { type: 'string', format: 'uuid' }, chunkCount: { type: 'integer' }, chunkSize: { type: 'integer' }, size: { type: 'integer', format: 'int64' }, chunks: { type: 'array', items: { type: 'object', properties: { index: { type: 'integer' }, fileId: { type: 'string' }, storageMode: { type: 'string' } } } } }, required: ['chunkCount', 'chunkSize', 'size', 'chunks'] } } } },
+        responses: { '200': { description: 'Verification result', content: { 'application/json': { schema: { type: 'object', properties: { complete: { type: 'boolean' }, missing: { type: 'array', items: { type: 'integer' } }, mismatched: { type: 'array', items: { type: 'integer' } }, verified: { type: 'integer' } } } } } }, '405': { description: 'GET is not part of protocol v2 (no server-side session)' } },
       },
     },
     '/api/files/upload/complete': {
       post: {
         summary: 'Assemble + ship to Telegram + register the file',
-        description: 'Verifies the assembled byte count matches the declared size, uploads to the storage backend (Telegram), registers the file record, cleans the temp session, and returns the same shape as POST /api/files.',
-        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { uploadId: { type: 'string', format: 'uuid' } }, required: ['uploadId'] } } } },
-        responses: { '200': { description: 'File stored', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, file: { $ref: '#/components/schemas/File' } } } } } }, '409': { description: 'Incomplete — missing chunks listed in the error' }, '404': { description: 'Session not found' } },
+        description: 'Send the plan + ALL collected chunk refs. ANY instance downloads the staged chunks (each size-verified via getFile first), assembles, verifies the total byte count, uploads to the storage backend via the same path as single-shot, registers the file record, deletes the staged part-messages, and returns the same shape as POST /api/files.',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { uploadId: { type: 'string', format: 'uuid' }, fileName: { type: 'string' }, mimeType: { type: 'string' }, size: { type: 'integer', format: 'int64' }, chunkSize: { type: 'integer' }, chunkCount: { type: 'integer' }, label: { type: 'string', nullable: true }, isPublic: { type: 'boolean' }, chunks: { type: 'array', items: { type: 'object', properties: { index: { type: 'integer' }, messageId: { type: 'integer' }, fileId: { type: 'string' }, storageMode: { type: 'string' } } } } }, required: ['uploadId', 'fileName', 'size', 'chunkSize', 'chunkCount', 'chunks'] } } } },
+        responses: { '200': { description: 'File stored', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean' }, file: { $ref: '#/components/schemas/File' } } } } } }, '400': { description: 'Bad refs / corrupt assembly (sizes verified before download)' }, '413': { description: 'File exceeds the storage backend ceiling' } },
       },
     },
     '/api/files/upload/abort': {
-      post: { summary: 'Discard an in-progress upload session', requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { uploadId: { type: 'string', format: 'uuid' } }, required: ['uploadId'] } } } }, responses: { '200': { description: 'Aborted (idempotent)' } } },
+      post: {
+        summary: 'Discard an in-progress transfer (delete staged Telegram part-messages)',
+        description: 'Best-effort deletion of every staged part-message the client collected — call when giving up so the storage chat stays clean.',
+        requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { uploadId: { type: 'string', format: 'uuid' }, chunks: { type: 'array', items: { type: 'object', properties: { messageId: { type: 'integer' }, storageMode: { type: 'string' } } } } }, required: ['uploadId', 'chunks'] } } } },
+        responses: { '200': { description: '{ deleted, attempted } (best-effort, idempotent)' } },
+      },
     },
   },
 }

@@ -1,20 +1,23 @@
 /**
- * Onyx Base — client-side resilient uploader.
+ * Onyx Base — client-side resilient uploader (protocol v2).
  *
  * Automatically picks the transport:
  *   - ≤ SINGLE_SHOT_LIMIT (8 MB): legacy single-shot multipart POST /api/files
  *     (one request, lowest latency).
- *   - > SINGLE_SHOT_LIMIT: the chunked protocol
- *     (POST /api/files/upload/init → chunk ×N → complete), which:
- *       • passes Vercel's ~4.5 MB per-request body limit,
- *       • passes the Next.js proxy body cap,
- *       • keeps server memory O(chunk) instead of O(file),
- *       • retries individual chunks on flaky networks,
- *       • restarts the whole transfer (bounded retries) if the session
- *         expired or landed on a different server instance.
+ *   - > SINGLE_SHOT_LIMIT: the STATELESS chunked protocol:
+ *       init → chunk ×N → complete
+ *     Each chunk is staged as a Telegram document (4 MB per request — under
+ *     every platform's body limit), the client collects the { messageId,
+ *     fileId } refs, and `complete` hands the whole set back so ANY server
+ *     instance can download + assemble + register the file. No server-side
+ *     session exists, so instance routing doesn't matter.
  *
- * Reports progress as { sentBytes, totalBytes, phase } so the UI can render
- * a real progress bar instead of a spinner.
+ * Resilience:
+ *   - per-chunk network retries (bounded) with re-slice from the File object
+ *   - on give-up: `abort` is called with all collected refs so the storage
+ *     chat is cleaned of staged part-messages
+ *   - progress events { sentBytes, totalBytes, phase } drive a real progress
+ *     bar in the storage UI.
  */
 
 export interface UploadProgress {
@@ -41,8 +44,12 @@ const CHUNK_SIZE = 4 * 1024 * 1024
 /** Per-chunk network retries before giving up. */
 const CHUNK_RETRIES = 3
 
-/** Full-transfer restarts (e.g. session lost across instances). */
-const TRANSFER_RESTARTS = 2
+export interface UploadOptions {
+  label?: string | null
+  isPublic?: boolean
+  onProgress?: (p: UploadProgress) => void
+  signal?: AbortSignal
+}
 
 interface InitResponse {
   ok: boolean
@@ -54,6 +61,10 @@ interface InitResponse {
 
 interface ChunkResponse {
   ok: boolean
+  messageId?: number
+  fileId?: string
+  storageMode?: 'server' | 'custom'
+  botApiBaseUrl?: string | null
   error?: string
 }
 
@@ -63,139 +74,163 @@ interface CompleteResponse {
   error?: string
 }
 
-async function jsonFetch<T>(url: string, apiKey: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      ...(init?.body && !(init.body instanceof Blob) ? { 'Content-Type': 'application/json' } : {}),
-      ...(init?.headers ?? {}),
-    },
-  })
-  const body = (await res.json().catch(() => ({}))) as T & { error?: string }
-  if (!res.ok) {
-    const err = new Error(body?.error || `Request failed (${res.status} ${url})`)
-    ;(err as Error & { status?: number }).status = res.status
-    throw err
-  }
-  return body
+function authHeaders(apiKey: string): Record<string, string> {
+  return { Authorization: `Bearer ${apiKey}` }
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
-/** The chunked transfer, one attempt end-to-end. Throws on failure. */
-async function chunkedTransfer(
-  file: File,
-  apiKey: string,
-  opts: { label?: string; isPublic?: boolean },
-  onProgress: (p: UploadProgress) => void,
-): Promise<UploadedFile> {
-  // 1. Init
-  onProgress({ phase: 'init', sentBytes: 0, totalBytes: file.size })
-  const init = await jsonFetch<InitResponse>('/api/files/upload/init', apiKey, {
-    method: 'POST',
-    body: JSON.stringify({
-      fileName: file.name,
-      mimeType: file.type || 'application/octet-stream',
-      size: file.size,
-      label: opts.label?.trim() || undefined,
-      isPublic: opts.isPublic !== false,
-      chunkSize: CHUNK_SIZE,
-    }),
-  })
-  const uploadId = init.uploadId!
-  const chunkSize = init.chunkSize ?? CHUNK_SIZE
-  const chunkCount = init.chunkCount ?? Math.ceil(file.size / chunkSize)
-
-  // 2. Chunks — sequential keeps memory flat and gives smooth progress;
-  //    retry each chunk individually on transient errors.
-  let sentBytes = 0
-  for (let i = 0; i < chunkCount; i++) {
-    const start = i * chunkSize
-    const end = Math.min(start + chunkSize, file.size)
-    const blob = file.slice(start, end)
-
-    let attempt = 0
-    for (;;) {
-      try {
-        await jsonFetch<ChunkResponse>(
-          `/api/files/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${i}`,
-          apiKey,
-          { method: 'POST', body: blob }, // raw binary — no Content-Type header
-        )
-        sentBytes += blob.size
-        onProgress({ phase: 'chunks', sentBytes, totalBytes: file.size })
-        break
-      } catch (err) {
-        attempt++
-        const status = (err as Error & { status?: number }).status
-        // Session gone → let the outer loop restart the whole transfer.
-        if (status === 404) throw err
-        if (attempt >= CHUNK_RETRIES) throw err
-        await delay(400 * attempt) // linear-ish backoff
-      }
-    }
-  }
-
-  // 3. Complete — server assembles, ships to Telegram, registers the record.
-  onProgress({ phase: 'complete', sentBytes: file.size, totalBytes: file.size })
-  const done = await jsonFetch<CompleteResponse>('/api/files/upload/complete', apiKey, {
-    method: 'POST',
-    body: JSON.stringify({ uploadId }),
-  })
-  if (!done.file) throw new Error('Upload completed but no file record was returned.')
-  return done.file
-}
+/** Sleep helper for retry backoff. */
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 /**
- * Upload a file with the best transport for its size.
- *
- * Throws Error (with .status when known) after all retries — the caller shows
- * the message to the user.
+ * Upload a File with automatic transport selection and bounded retries.
+ * Throws Error with a human-readable message on final failure (after having
+ * cleaned up any staged chunks via abort).
  */
 export async function uploadFileResilient(
-  apiKey: string,
+  apiKey: string | null | undefined,
   file: File,
-  opts: { label?: string; isPublic?: boolean } = {},
-  onProgress: (p: UploadProgress) => void = () => {},
+  opts: UploadOptions = {},
 ): Promise<UploadedFile> {
-  // Fast path — single multipart request.
+  if (!apiKey) throw new Error('Sign in with your API key first.')
   if (file.size <= SINGLE_SHOT_LIMIT) {
-    onProgress({ phase: 'single', sentBytes: file.size, totalBytes: file.size })
-    const form = new FormData()
-    form.append('file', file)
-    if (opts.label?.trim()) form.append('label', opts.label.trim())
-    form.append('public', (opts.isPublic !== false).toString())
-    const res = await fetch('/api/files', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: form,
-    })
-    const json = (await res.json().catch(() => ({}))) as { ok?: boolean; file?: UploadedFile; error?: string }
-    if (!res.ok || !json.file) throw new Error(json.error || `Upload failed (${res.status})`)
-    return json.file
+    return singleShot(apiKey, file, opts)
   }
+  return chunked(apiKey, file, opts)
+}
 
-  // Resilient chunked path with bounded full restarts (covers session loss
-  // across serverless instances and hard network drops mid-transfer).
-  let restart = 0
-  for (;;) {
-    try {
-      return await chunkedTransfer(file, apiKey, opts, onProgress)
-    } catch (err) {
-      const status = (err as Error & { status?: number }).status
-      // Fail fast on permanent errors: validation (400) and size ceilings
-      // (413) will never succeed on retry.
-      if (status === 400 || status === 413) throw err
-      if (restart < TRANSFER_RESTARTS) {
-        restart++
-        onProgress({ phase: 'init', sentBytes: 0, totalBytes: file.size })
-        await delay(600 * restart)
-        continue
-      }
-      throw err
-    }
+// ─── Single-shot (≤ 8 MB) ─────────────────────────────────────────────────────
+
+async function singleShot(apiKey: string, file: File, opts: UploadOptions): Promise<UploadedFile> {
+  opts.onProgress?.({ phase: 'single', sentBytes: 0, totalBytes: file.size })
+  const form = new FormData()
+  form.append('file', file, file.name)
+  if (opts.label) form.append('label', opts.label)
+  if (opts.isPublic === false) form.append('isPublic', 'false')
+
+  const res = await fetch('/api/files', {
+    method: 'POST',
+    headers: authHeaders(apiKey),
+    body: form,
+    signal: opts.signal,
+  })
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; file?: UploadedFile; error?: string }
+  if (!res.ok || !data.ok || !data.file) {
+    throw new Error(data.error || `Upload failed (HTTP ${res.status}).`)
   }
+  opts.onProgress?.({ phase: 'complete', sentBytes: file.size, totalBytes: file.size })
+  return data.file
+}
+
+// ─── Chunked protocol v2 (> 8 MB) ────────────────────────────────────────────
+
+async function chunked(apiKey: string, file: File, opts: UploadOptions): Promise<UploadedFile> {
+  const total = file.size
+
+  // 1. init — mint the plan (stateless).
+  opts.onProgress?.({ phase: 'init', sentBytes: 0, totalBytes: total })
+  let init = await postJson<InitResponse>('/api/files/upload/init', apiKey, {
+    fileName: file.name,
+    mimeType: file.type || 'application/octet-stream',
+    size: total,
+    label: opts.label ?? null,
+    isPublic: opts.isPublic !== false,
+    chunkSize: CHUNK_SIZE,
+  })
+  if (!init.ok || !init.uploadId) {
+    throw new Error(init.error || 'Upload init failed.')
+  }
+  const uploadId = init.uploadId
+  const chunkSize = init.chunkSize ?? CHUNK_SIZE
+  const chunkCount = init.chunkCount ?? Math.ceil(total / chunkSize)
+
+  // Collected refs — newest per index wins (a retried chunk stages a NEW
+  // document; superseded refs are kept in `allRefs` so abort/complete can
+  // delete them too).
+  const latest = new Map<number, ChunkResponse & { index: number }>()
+  const allRefs: { index: number; messageId: number; fileId: string; storageMode?: 'server' | 'custom'; botApiBaseUrl?: string | null }[] = []
+  let sentBytes = 0
+
+  try {
+    // 2. chunks — stage each slice as a Telegram document.
+    for (let i = 0; i < chunkCount; i++) {
+      if (opts.signal?.aborted) throw new Error('Upload cancelled.')
+      const start = i * chunkSize
+      const end = Math.min(start + chunkSize, total)
+      const blob = file.slice(start, end)
+
+      let attempt = 0
+      for (;;) {
+        try {
+          const res = await fetch(
+            `/api/files/upload/chunk?uploadId=${encodeURIComponent(uploadId)}&index=${i}` +
+              `&chunkCount=${chunkCount}&chunkSize=${chunkSize}&size=${total}`,
+            {
+              method: 'POST',
+              headers: { ...authHeaders(apiKey), 'Content-Type': 'application/octet-stream' },
+              body: blob,
+              signal: opts.signal,
+            },
+          )
+          const data = (await res.json().catch(() => ({}))) as ChunkResponse
+          if (!res.ok || !data.ok || typeof data.messageId !== 'number' || !data.fileId) {
+            throw new Error(data.error || `Chunk ${i} failed (HTTP ${res.status}).`)
+          }
+          const ref = { ...data, index: i }
+          latest.set(i, ref)
+          allRefs.push({ index: i, messageId: data.messageId, fileId: data.fileId, storageMode: data.storageMode, botApiBaseUrl: data.botApiBaseUrl })
+          break
+        } catch (err) {
+          attempt++
+          if (attempt > CHUNK_RETRIES) throw err
+          await sleep(300 * attempt)
+        }
+      }
+
+      sentBytes = end
+      opts.onProgress?.({ phase: 'chunks', sentBytes, totalBytes: total })
+    }
+
+    // 3. complete — hand the full ref set back; server downloads + assembles.
+    opts.onProgress?.({ phase: 'complete', sentBytes, totalBytes: total })
+    const chunks = [...latest.values()]
+      .sort((a, b) => a.index - b.index)
+      .map((r) => ({ index: r.index, messageId: r.messageId, fileId: r.fileId, storageMode: r.storageMode, botApiBaseUrl: r.botApiBaseUrl }))
+
+    const done = await postJson<CompleteResponse>('/api/files/upload/complete', apiKey, {
+      uploadId,
+      fileName: file.name,
+      mimeType: file.type || 'application/octet-stream',
+      size: total,
+      chunkSize,
+      chunkCount,
+      label: opts.label ?? null,
+      isPublic: opts.isPublic !== false,
+      chunks,
+    })
+    if (!done.ok || !done.file) {
+      throw new Error(done.error || 'Upload completion failed.')
+    }
+    return done.file
+  } catch (err) {
+    // Give-up → clean the staged Telegram documents (best-effort).
+    await postJson('/api/files/upload/abort', apiKey, { uploadId, chunks: allRefs }).catch(() => {})
+    throw err
+  }
+}
+
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+async function postJson<T extends { ok?: boolean; error?: string }>(
+  url: string,
+  apiKey: string,
+  payload: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { ...authHeaders(apiKey), 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal,
+  })
+  return (await res.json().catch(() => ({ ok: false, error: `HTTP ${res.status}` }))) as T
 }

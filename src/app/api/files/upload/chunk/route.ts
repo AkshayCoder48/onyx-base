@@ -1,80 +1,110 @@
 import { NextRequest } from 'next/server'
 import { authenticate, ok, fail } from '@/lib/auth'
-import { getSession, writeChunk, receivedChunkIndexes, deleteSession } from '@/lib/chunked-upload'
+import { partFileName, stagingCaption, chunkExpectedSize, validUploadId } from '@/lib/chunked-upload'
+import { resolveStorageMode, getTelegramConfig } from '@/lib/data-store'
+import { sendDocumentFile } from '@/lib/telegram'
 
 export const runtime = 'nodejs'
 export const maxDuration = 120
 
 /**
- * POST /api/files/upload/chunk?uploadId=<id>&index=<n> — append one chunk.
+ * POST /api/files/upload/chunk — stage ONE chunk as a Telegram document.
  *
- * The request body is the RAW chunk bytes (application/octet-stream), sized
- * exactly to the negotiated chunkSize (last chunk may be shorter). Streaming
- * straight to disk keeps memory O(chunkSize) per request.
+ * Query:    uploadId, index, chunkCount, chunkSize, size   (echoed from init)
+ * Body:     RAW chunk bytes (application/octet-stream)
+ * Response: { index, messageId, fileId, storageMode, botApiBaseUrl }
  *
- * Auth: Bearer API key; the session must belong to the same user.
- * Idempotent: a retried chunk index simply overwrites its own part-file.
+ * STATELESS: the plan fields arrive with every request (the client got them
+ * from init), so ANY instance can serve ANY chunk — no session store, no
+ * instance affinity, multi-instance-safe by construction.
  *
- * 404 SESSION_NOT_FOUND means the session expired (TTL 2h) or, on
- * multi-instance deployments, the request hit an instance that never saw the
- * init — the client should re-init and restart the transfer.
+ * The bytes are forwarded to the user's resolved storage chat (custom bot or
+ * the server bot) as document `<uploadId>.part<NNNNNN>` with an ownership
+ * caption. The client collects the returned { messageId, fileId } refs and
+ * hands them all to `complete`.
+ *
+ * Retries: a re-sent index stages a NEW document; the client keeps the newest
+ * ref per index and cleanup (complete/abort) removes every collected ref.
  */
 export async function POST(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
   if (!user) return fail('Unauthorized.', 401)
 
-  const uploadId = req.nextUrl.searchParams.get('uploadId') ?? ''
-  const indexRaw = req.nextUrl.searchParams.get('index') ?? ''
-  const index = Number.parseInt(indexRaw, 10)
+  const q = req.nextUrl.searchParams
+  const uploadId = q.get('uploadId') ?? ''
+  const index = Number.parseInt(q.get('index') ?? '', 10)
+  const chunkCount = Number.parseInt(q.get('chunkCount') ?? '', 10)
+  const chunkSize = Number.parseInt(q.get('chunkSize') ?? '', 10)
+  const size = Number.parseInt(q.get('size') ?? '', 10)
 
-  const session = await getSession(uploadId)
-  if (!session) {
-    return fail('SESSION_NOT_FOUND — the upload session expired or was created on another instance. Re-init and retry.', 404)
+  if (!validUploadId(uploadId)) return fail('`uploadId` (UUID from init) is required.', 400)
+  if (!Number.isInteger(index) || index < 0) return fail('`index` (integer chunk number) is required.', 400)
+  if (!Number.isInteger(chunkCount) || chunkCount < 1 || chunkCount > 10_000) {
+    return fail('`chunkCount` (integer, echoed from init) is required.', 400)
   }
-  if (session.userId !== user.dbUserId) {
-    // Don't confirm existence to strangers.
-    return fail('SESSION_NOT_FOUND — the upload session expired or was created on another instance. Re-init and retry.', 404)
+  if (!Number.isInteger(chunkSize) || chunkSize < 256 * 1024 || chunkSize > 32 * 1024 * 1024) {
+    return fail('`chunkSize` (integer, echoed from init) is required.', 400)
   }
-  if (!Number.isInteger(index)) {
-    return fail('`index` query parameter (integer chunk number) is required.', 400)
+  if (!Number.isInteger(size) || size <= 0) return fail('`size` (integer, echoed from init) is required.', 400)
+  if (index >= chunkCount) {
+    return fail(`Chunk index ${index} is out of range (0..${chunkCount - 1}).`, 400)
   }
 
-  // Content-Length is trustworthy here ONLY as a size hint — we validate the
-  // exact expected byte count inside writeChunk.
-  const declaredSize = Number.parseInt(req.headers.get('content-length') ?? '', 10)
-
-  let result: { ok: true } | { ok: false; error: string }
-  if (req.body) {
-    result = await writeChunk(uploadId, index, req.body, Number.isFinite(declaredSize) ? declaredSize : Number.NaN)
+  // Ownership resolution — same routing rule as every other storage write.
+  const storageMode = resolveStorageMode(user.dbUserId)
+  let chatId: string
+  let botToken: string
+  let botApiBaseUrl: string
+  if (storageMode === 'custom') {
+    const custom = getTelegramConfig(user.dbUserId)!
+    chatId = custom.chatId.trim()
+    botToken = custom.botToken!.trim()
+    botApiBaseUrl = custom.botApiBaseUrl?.trim() || ''
   } else {
-    return fail('Empty chunk body.', 400)
+    chatId = process.env.TELEGRAM_CHAT_ID || ''
+    botToken = process.env.TELEGRAM_BOT_TOKEN || ''
+    botApiBaseUrl = process.env.TELEGRAM_BOT_API_URL || ''
+  }
+  if (!chatId || !botToken) {
+    return fail(
+      storageMode === 'custom'
+        ? 'Your custom Telegram configuration is incomplete — set BOTH a Chat ID and a Bot Token in Settings, or clear them to use server-side storage.'
+        : 'Telegram storage is not configured on the server. Set TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, or configure your own bot in Settings.',
+      503,
+    )
   }
 
-  if (!result.ok) {
-    if (result.error === 'SESSION_NOT_FOUND') {
-      return fail('SESSION_NOT_FOUND — the upload session expired or was created on another instance. Re-init and retry.', 404)
-    }
-    return fail(result.error, 400)
+  // Read the body as ONE chunk-sized buffer — memory stays O(chunkSize).
+  const body = await req.arrayBuffer().catch(() => null)
+  if (!body || body.byteLength === 0) return fail('Empty chunk body.', 400)
+  const expected = chunkExpectedSize(size, chunkSize, chunkCount, index)
+  if (body.byteLength !== expected) {
+    return fail(
+      `Chunk ${index} must be exactly ${expected} bytes (got ${body.byteLength}). Re-slice the file with the plan from init.`,
+      400,
+    )
   }
 
-  const received = await receivedChunkIndexes(uploadId)
+  const sent = await sendDocumentFile(
+    {
+      file: new Blob([body], { type: 'application/octet-stream' }),
+      fileName: partFileName(uploadId, index),
+      mimeType: 'application/octet-stream',
+      caption: stagingCaption(user.dbUserId, { size, chunkCount }),
+    },
+    chatId,
+    botToken,
+    botApiBaseUrl,
+  )
+  if (!sent.ok) return fail(sent.error, 502)
+
   return ok({
-    received: received.length,
-    total: session.chunkCount,
-    // Small completeness hint so simple clients can stop polling status.
-    complete: received.length === session.chunkCount,
+    index,
+    messageId: sent.document.messageId,
+    fileId: sent.document.fileId,
+    fileUniqueId: sent.document.fileUniqueId,
+    bytes: body.byteLength,
+    storageMode,
+    botApiBaseUrl: botApiBaseUrl || null,
   })
-}
-
-/** DELETE /api/files/upload/chunk?uploadId= — convenience alias for abort. */
-export async function DELETE(req: NextRequest) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized.', 401)
-  const uploadId = req.nextUrl.searchParams.get('uploadId') ?? ''
-  const session = await getSession(uploadId)
-  if (!session || session.userId !== user.dbUserId) {
-    return fail('Session not found.', 404)
-  }
-  await deleteSession(uploadId)
-  return ok({ aborted: true })
 }

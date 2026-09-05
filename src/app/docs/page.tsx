@@ -179,10 +179,10 @@ const FILE_ENDPOINTS: Endpoint[] = [
   {
     method: "POST",
     path: "/api/files/upload/init",
-    title: "Chunked upload — begin session (ANY file size, up to 2 GB)",
+    title: "Chunked upload — mint the plan (ANY file size, up to 2 GB)",
     auth: true,
     description:
-      "The reliable path for large files: the client splits the file into 4 MB chunks so every request stays under every platform body limit (Vercel ~4.5 MB, proxies, CDNs). Sessions live 2 hours and are resumable.",
+      "The reliable path for large files: the client splits the file into 4 MB chunks so every request stays under every platform body limit (Vercel ~4.5 MB, proxies, CDNs). STATELESS — the server keeps no session; the client echoes the plan fields on every subsequent call, so any instance can serve any step.",
     body: "{ fileName, mimeType, size, label?, isPublic?, chunkSize? }",
     example: `curl -X POST ${BASE}/api/files/upload/init \\
   -H "Authorization: Bearer kv_live_…" \\
@@ -191,22 +191,23 @@ const FILE_ENDPOINTS: Endpoint[] = [
   },
   {
     method: "POST",
-    path: "/api/files/upload/chunk?uploadId=…&index=N",
+    path: "/api/files/upload/chunk?uploadId=…&index=N&chunkCount&chunkSize&size",
     title: "Chunked upload — send one chunk (raw binary body)",
     auth: true,
     description:
-      "Send the RAW chunk bytes as the request body (application/octet-stream). Chunks must match the negotiated size exactly (the last one may be shorter). Idempotent — a retried index safely rewrites its part. 404 SESSION_NOT_FOUND → re-init.",
-    example: `curl -X POST "${BASE}/api/files/upload/chunk?uploadId=<uuid>&index=0" \\
+      "The RAW chunk bytes (application/octet-stream), sized exactly per the plan (the last may be shorter). The server stages the chunk as a Telegram document in your storage chat and returns { messageId, fileId } — the client collects one ref per chunk and hands the full set to complete. Retried indexes stage a new document; keep the newest ref.",
+    example: `curl -X POST "${BASE}/api/files/upload/chunk?uploadId=<uuid>&index=0&chunkCount=256&chunkSize=4194304&size=1073741824" \\
   -H "Authorization: Bearer kv_live_…" \\
   -H "Content-Type: application/octet-stream" \\
   --data-binary @chunk_0.bin`,
   },
   {
-    method: "GET",
-    path: "/api/files/upload/status?uploadId=…",
-    title: "Chunked upload — resume support",
+    method: "POST",
+    path: "/api/files/upload/status",
+    title: "Chunked upload — verify the staged set",
     auth: true,
-    description: "Lists received and missing chunk indexes so a dropped connection can resume exactly where it left off.",
+    description: "POST your collected chunk refs; each is verified against Telegram via getFile (metadata only). Reports missing and size-mismatched indexes so the client knows exactly what to re-send.",
+    body: "{ uploadId, chunkCount, chunkSize, size, chunks: [{ index, fileId }] }",
   },
   {
     method: "POST",
@@ -214,16 +215,16 @@ const FILE_ENDPOINTS: Endpoint[] = [
     title: "Chunked upload — finalize",
     auth: true,
     description:
-      "Verifies the assembled byte count, uploads to storage, registers the file record, cleans the temp session, and returns the same shape as single-shot POST /api/files.",
-    body: "{ uploadId }",
+      "Send the plan + ALL chunk refs. ANY server instance downloads the staged chunks, verifies every size, assembles, verifies the byte count, ships to storage, registers the file record, deletes the staged part-messages, and returns the same shape as single-shot POST /api/files.",
+    body: "{ uploadId, fileName, mimeType, size, chunkSize, chunkCount, label?, isPublic?, chunks: [{ index, messageId, fileId, storageMode? }] }",
   },
   {
     method: "POST",
     path: "/api/files/upload/abort",
     title: "Chunked upload — discard",
     auth: true,
-    description: "Frees the session's temp directory immediately instead of waiting for the 2-hour TTL janitor.",
-    body: "{ uploadId }",
+    description: "Deletes the staged Telegram part-messages you collected (best-effort) so an abandoned transfer leaves the storage chat clean.",
+    body: "{ uploadId, chunks: [{ messageId, storageMode? }] }",
   },
   {
     method: "POST",
@@ -566,16 +567,16 @@ Authorization: Bearer kv_live_aa6d…3d11
             id="files"
             eyebrow="04 · storage"
             title="Files — any size, any extension"
-            intro="Files stream to Telegram-backed storage (50 MB per file on the cloud Bot API; 2 GB with a self-hosted local Bot API server). Small files take the single-shot route; large files MUST take the chunked protocol — it splits the transfer into 4 MB requests that pass every platform's body limit, retries individual chunks, and resumes after dropped connections. The server assembles on disk, so memory stays bounded no matter the file size."
+            intro="Files stream to Telegram-backed storage (50 MB per file on the cloud Bot API; 2 GB with a self-hosted local Bot API server). Small files take the single-shot route; large files MUST take the chunked protocol — it splits the transfer into 4 MB requests that pass every platform's body limit and retries individual chunks. The protocol is STATELESS: every chunk is staged immediately as a Telegram document and the client collects the refs, so transfers survive multi-instance serverless routing (no sticky sessions, no affinity)."
           >
             <div className="glass rounded-3xl p-5 space-y-3">
               <h3 className="text-[15px] font-semibold">The chunked flow (what the dashboard does automatically)</h3>
               <div className="grid sm:grid-cols-4 gap-2.5 text-[12px]">
                 {[
-                  { s: "init", d: "POST metadata → uploadId + negotiated chunkSize" },
-                  { s: "chunk ×N", d: "Raw 4 MB bodies → written to disk server-side" },
-                  { s: "status", d: "Missing indexes → resume after any network drop" },
-                  { s: "complete", d: "Assemble → verify size → Telegram → file record" },
+                  { s: "init", d: "POST metadata → uploadId + negotiated chunkSize (pure math, no server state)" },
+                  { s: "chunk ×N", d: "Raw 4 MB bodies → staged as Telegram documents; client collects { messageId, fileId } refs" },
+                  { s: "status", d: "Verify the staged set via getFile metadata → re-send only missing/mismatched chunks" },
+                  { s: "complete", d: "Any instance downloads + assembles → verify → Telegram → file record + cleanup" },
                 ].map((step, i) => (
                   <div key={step.s} className="glass-soft rounded-2xl p-3 space-y-1">
                     <div className="font-mono text-[10px] text-primary">STEP {i + 1}</div>
@@ -585,7 +586,9 @@ Authorization: Bearer kv_live_aa6d…3d11
                 ))}
               </div>
               <p className="text-[12.5px] text-muted-foreground leading-relaxed">
-                Sessions expire after 2 hours and an automatic janitor sweeps abandoned uploads — a cron-able script
+                Give up mid-transfer and the uploader calls <code className="font-mono text-[11.5px]">abort</code> to delete
+                the staged part-messages; <code className="font-mono text-[11.5px]">complete</code> cleans them after
+                success too. An automatic janitor sweeps crashed assembly workspaces, and a cron-able script
                 (<code className="font-mono text-[11.5px]">scripts/cleanup-stale-uploads.ts</code>) also monitors the
                 server and restarts it if it ever goes down (502 self-heal).
               </p>
@@ -681,8 +684,7 @@ POST /api/email-otp/verify   { "email": "user@example.com", "code": "482913" } �
                     ["Single value size", "≈ 4 KB (Telegram message)", "Larger blobs belong in the Files API."],
                     ["File size — cloud Bot API", "50 MB", "Per-file. Unlimited number of files."],
                     ["File size — local Bot API", "2 GB", "Self-host telegram-bot-api for the big ceiling; chunked upload required."],
-                    ["Chunked upload session", "2 hours TTL", "Resumable via /status; janitor sweeps expired sessions."],
-                    ["Chunk size", "256 KB – 32 MB", "Default 4 MB — safely under serverless body limits."],
+                    ["Chunked upload chunk", "256 KB – 32 MB each", "Default 4 MB — safely under serverless body limits; staged as Telegram documents."],
                     ["Email OTP code", "10 min TTL, single-use", "30 s between sends, 10/hour per address."],
                     ["Serverless request body", "~4.5 MB (Vercel)", "Platform-imposed — the reason the chunked protocol exists."],
                   ].map((row) => (

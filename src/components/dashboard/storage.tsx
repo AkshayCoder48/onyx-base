@@ -162,8 +162,9 @@ export function CloudStorageView() {
       return uploadFileResilient(apiKey, opts.file, {
         label: opts.label,
         isPublic: opts.isPublic,
-      }, (p) => {
-        setUploadProgress({ sent: p.sentBytes, total: p.totalBytes, phase: p.phase })
+        onProgress: (p) => {
+          setUploadProgress({ sent: p.sentBytes, total: p.totalBytes, phase: p.phase })
+        },
       })
     },
     onSuccess: () => {

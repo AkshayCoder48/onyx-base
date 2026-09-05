@@ -4,8 +4,10 @@
  *
  * WHAT IT DOES
  * ────────────
- *  1. SWEEPS stale chunked-upload sessions (default TTL 2h) from
- *     `<tmpdir>/onyxbase-uploads/` so aborted uploads can never fill the disk.
+ *  1. SWEEPS stale chunked-upload workspaces (default TTL 2h) from
+ *     `<tmpdir>/onyxbase-uploads/` — protocol v2 is stateless, so /tmp only
+ *     holds transient assembly dirs from crashed `complete` calls; abandoned
+ *     transfers are cleaned from the TELEGRAM chat via /api/files/upload/abort.
  *  2. HEALTH-CHECKS the local dev server (default http://localhost:3000).
  *  3. If the server is DOWN (502 / connection refused) it KILLS zombie
  *     `next dev` processes hogging port 3000 and restarts a fresh one via
@@ -57,14 +59,16 @@ async function sweepUploads(force: boolean): Promise<number> {
   }
   for (const id of entries) {
     const dir = path.join(UPLOAD_ROOT, id)
-    const sessionFile = path.join(dir, 'session.json')
-    const s = await stat(sessionFile).catch(() => null)
-    // No session.json → debris from an interrupted init; TTL check otherwise.
-    const stale = !s || now - s.mtimeMs > SESSION_TTL_MS
+    const s = await stat(dir).catch(() => null)
+    if (!s || !s.isDirectory()) continue
+    // Protocol v2 is stateless: /tmp holds only transient assembly workspaces
+    // (removed in a `finally` by the complete route). Anything left here is
+    // debris from a crashed `complete` — sweep on the same TTL.
+    const stale = now - s.mtimeMs > SESSION_TTL_MS
     if (force || stale) {
       await rm(dir, { recursive: true, force: true }).catch(() => {})
       removed++
-      log(`removed session ${id}${s ? ' (expired)' : ' (debris)'}`)
+      log(`removed workspace ${id}${stale ? ' (expired)' : ' (forced)'}`)
     }
   }
   // Recreate the root so the next upload's mkdir is cheap.
@@ -139,7 +143,7 @@ async function selfHeal(): Promise<void> {
 
 async function runOnce() {
   const removed = await sweepUploads(FORCE)
-  log(`swept ${removed} stale upload session(s)`)
+  log(`swept ${removed} stale upload workspace(s)`)
   await selfHeal()
 }
 

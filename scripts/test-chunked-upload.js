@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-/** End-to-end test of the chunked upload system (any-size file fix).
+/** End-to-end test of the chunked upload system, protocol v2 (stateless,
+ * Telegram-staged — multi-instance safe).
  * Usage: node scripts/test-chunked-upload.js [sizeMB]
  */
 const BASE = process.env.BASE_URL || 'http://localhost:3000'
@@ -15,53 +16,63 @@ async function jfetch(url, init) {
 }
 
 async function main() {
-  console.log(`\n=== Chunked upload test — ${SIZE_MB} MB ===`)
+  console.log(`\n=== Chunked upload v2 test — ${SIZE_MB} MB → ${BASE} ===`)
   const size = SIZE_MB * 1024 * 1024
   const buf = Buffer.alloc(size, 7)
 
-  // 1. init
+  // 1. init — mints the plan (stateless).
   let r = await jfetch('/api/files/upload/init', {
     method: 'POST', headers: H,
-    body: JSON.stringify({ fileName: `chunk-test-${SIZE_MB}mb.bin`, mimeType: 'application/octet-stream', size, chunkSize: 4 * 1024 * 1024 }),
+    body: JSON.stringify({ fileName: `chunk2-test-${SIZE_MB}mb.bin`, mimeType: 'application/octet-stream', size, chunkSize: 4 * 1024 * 1024 }),
   })
   console.log('init →', r.status, JSON.stringify(r.body).slice(0, 160))
   if (r.status !== 200) process.exit(1)
   const { uploadId, chunkSize, chunkCount } = r.body
 
-  // 2. chunks
+  // 2. chunks — each staged as a Telegram document; collect refs.
+  const refs = []
   const t0 = Date.now()
   for (let i = 0; i < chunkCount; i++) {
     const start = i * chunkSize
     const end = Math.min(start + chunkSize, size)
     const blob = buf.subarray(start, end)
-    const res = await fetch(`${BASE}/api/files/upload/chunk?uploadId=${uploadId}&index=${i}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/octet-stream', 'Content-Length': String(end - start) },
-      body: blob,
-    })
+    const res = await fetch(
+      `${BASE}/api/files/upload/chunk?uploadId=${uploadId}&index=${i}&chunkCount=${chunkCount}&chunkSize=${chunkSize}&size=${size}`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${KEY}`, 'Content-Type': 'application/octet-stream' },
+        body: blob,
+      },
+    )
     const body = await res.json().catch(() => ({}))
-    if (res.status !== 200) {
+    if (res.status !== 200 || !body.ok) {
       console.log(`chunk ${i} → FAIL ${res.status}`, JSON.stringify(body).slice(0, 200))
       process.exit(1)
     }
+    refs.push({ index: i, messageId: body.messageId, fileId: body.fileId, storageMode: body.storageMode, botApiBaseUrl: body.botApiBaseUrl })
     process.stdout.write(`chunk ${i + 1}/${chunkCount} ok (${end - start} B)\r`)
   }
   console.log(`\nchunks done in ${((Date.now() - t0) / 1000).toFixed(1)}s`)
 
-  // 3. status
-  r = await jfetch(`/api/files/upload/status?uploadId=${uploadId}`, { headers: H })
-  console.log('status →', r.status, 'complete:', r.body.complete, 'missing:', r.body.missingChunks?.length)
+  // 3. status — verify the staged set via getFile metadata.
+  r = await jfetch('/api/files/upload/status', {
+    method: 'POST', headers: H,
+    body: JSON.stringify({ uploadId, chunkCount, chunkSize, size, chunks: refs }),
+  })
+  console.log('status →', r.status, 'complete:', r.body.complete, 'verified:', r.body.verified, 'missing:', JSON.stringify(r.body.missing), 'mismatched:', JSON.stringify(r.body.mismatched))
 
-  // 4. complete
+  // 4. complete — server downloads, assembles, registers, cleans up.
   r = await jfetch('/api/files/upload/complete', {
-    method: 'POST', headers: H, body: JSON.stringify({ uploadId }),
+    method: 'POST', headers: H, body: JSON.stringify({
+      uploadId, fileName: `chunk2-test-${SIZE_MB}mb.bin`, mimeType: 'application/octet-stream',
+      size, chunkSize, chunkCount, label: null, isPublic: true, chunks: refs,
+    }),
   })
   console.log('complete →', r.status, JSON.stringify(r.body).slice(0, 220))
   if (r.status !== 200) process.exit(1)
   console.log(`\n✓ UPLOAD SUCCEEDED — fileId ${r.body.file?.fileId}, download ${r.body.file?.downloadUrl}`)
 
-  // 5. memory report
-  const mem = process.memoryUsage ? null : null
+  // 5. server health after the transfer.
   console.log('\nServer health after upload:')
   const h = await jfetch('/api/health', { headers: H })
   console.log(' →', h.status, h.body.status, JSON.stringify(h.body.components))
