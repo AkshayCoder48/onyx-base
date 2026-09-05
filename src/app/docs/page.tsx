@@ -687,6 +687,7 @@ POST /api/email-otp/verify   { "email": "user@example.com", "code": "482913" } �
                     ["Chunked upload chunk", "256 KB – 32 MB each", "Default 4 MB — safely under serverless body limits; staged as Telegram documents."],
                     ["Email OTP code", "10 min TTL, single-use", "30 s between sends, 10/hour per address."],
                     ["Serverless request body", "~4.5 MB (Vercel)", "Platform-imposed — the reason the chunked protocol exists."],
+                    ["Multi-instance consistency", "Eventual, on instance recycle", "Writes land instantly on the handling instance + the Telegram mirror; other warm instances serve the prior snapshot until they recycle and rehydrate."],
                   ].map((row) => (
                     <tr key={row[0]}>
                       <td className="px-4 py-2.5 font-medium">{row[0]}</td>
