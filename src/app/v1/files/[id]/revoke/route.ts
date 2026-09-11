@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
+import { authenticateOrRespond, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import { findFileById, resolveFileBotToken, markFileLinkRevoked } from '@/lib/data-store'
 import { invalidateCachedFileUrl } from '@/lib/telegram'
 import { logAction } from '@/lib/kv'
@@ -15,8 +15,9 @@ export const runtime = 'nodejs'
  * Auth: `Authorization: Bearer kv_live_…` (owner only).
  */
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const z = authorize(user, req, { scope: 'files' })
   if (!z.ok) return authorizeFailResponse(z)

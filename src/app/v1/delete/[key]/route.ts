@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, authorize, authorizeFailResponse, fail, ok } from '@/lib/auth'
+import { authenticateOrRespond, authorize, authorizeFailResponse, fail, ok } from '@/lib/auth'
 import { deleteKey } from '@/lib/kv'
 
 export const runtime = 'nodejs'
@@ -12,8 +12,9 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ key: string }> },
 ) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const { key } = await params
   const collection = req.nextUrl.searchParams.get('collection') || 'default'

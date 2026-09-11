@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, authorize, authorizeFailResponse, ok, fail, getPublicOrigin } from '@/lib/auth'
+import { authenticateOrRespond, authorize, authorizeFailResponse, ok, fail, getPublicOrigin } from '@/lib/auth'
 import {
   listFileRecords,
   uploadFile,
@@ -21,8 +21,9 @@ export const maxDuration = 300
  * each — that link works without auth (unless the file was marked private).
  */
 export async function GET(req: NextRequest) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const z = authorize(user, req, { scope: 'files' })
   if (!z.ok) return authorizeFailResponse(z)
@@ -49,8 +50,9 @@ export async function GET(req: NextRequest) {
  *     -F "label=Q3 report"
  */
 export async function POST(req: NextRequest) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   let form: FormData
   try {

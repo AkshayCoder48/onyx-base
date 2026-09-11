@@ -1697,6 +1697,44 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
   return entry
 }
 
+// ─── Lazy record rehydrate-on-miss (read-your-writes across instances) ───────
+//
+// Serverless multi-instance reality: a write updates ONLY the instance that
+// handled it (in-memory + a debounced account-manifest sync to Telegram).
+// A different instance that hydrated an OLDER manifest will miss freshly
+// written records on local lookups — surfacing as spurious 404s to API
+// clients (e.g. the OnyxAgent workspace-sync reading back chunks it just
+// pushed through a different warm instance).
+//
+// The auth layer only rehydrates when the API KEY itself is missing locally.
+// This helper extends the same recovery to RECORD reads: on a record miss,
+// pull the latest account manifest from Telegram and let the caller retry.
+// A per-account freshness guard keeps a read storm from hammering Telegram —
+// during a burst only the first miss per window pays the rehydrate cost.
+
+const accountRehydrateGuard = new Map<string, number>()
+const ACCOUNT_REHYDRATE_MIN_INTERVAL_MS = 2000
+
+/**
+ * Best-effort guarded rehydrate of ONE account's latest manifest from the
+ * durable Telegram mirror. Returns true when a rehydrate actually ran and
+ * succeeded (the caller should retry its lookup); false when skipped by the
+ * freshness guard, when no manifest exists yet, or when the fetch failed.
+ * Never throws.
+ */
+export async function maybeRehydrateAccount(publicUserId: string): Promise<boolean> {
+  const last = accountRehydrateGuard.get(publicUserId) ?? 0
+  const now = Date.now()
+  if (now - last < ACCOUNT_REHYDRATE_MIN_INTERVAL_MS) return false
+  accountRehydrateGuard.set(publicUserId, now)
+  try {
+    const r = await rehydrateAccountFromTelegram(publicUserId)
+    return r.attempted && !r.error
+  } catch {
+    return false
+  }
+}
+
 /**
  * Fetch + restore ONE account's manifest from Telegram (by userId). Used by the
  * auth layer on a key-miss: instead of pulling the whole-world V3 document, we

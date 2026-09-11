@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, authorize, authorizeFailResponse, coerceValue, fail, ok } from '@/lib/auth'
+import { authenticateOrRespond, authorize, authorizeFailResponse, coerceValue, fail, ok } from '@/lib/auth'
 import { setKey } from '@/lib/kv'
 
 export const runtime = 'nodejs'
@@ -13,8 +13,9 @@ export const runtime = 'nodejs'
  * everything else is stored as a string.
  */
 export async function POST(req: NextRequest) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   let body: Record<string, unknown>
   try {

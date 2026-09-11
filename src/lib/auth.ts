@@ -424,6 +424,53 @@ export class RehydrateFailedError extends Error {
 }
 
 /**
+ * Authenticate AND catch the failure modes raw routes used to let escape:
+ *
+ *   - `authenticate()` THROWS RehydrateFailedError when the durable Telegram
+ *     backend is temporarily unreachable (cold instance + Telegram outage or
+ *     throttling). Raw `/v1/*` routes call it directly with no try/catch, so
+ *     the throw escaped as an opaque unhandled HTTP 500 — clients saw a
+ *     meaningless "KV read failed (HTTP 500)". This wrapper converts it into
+ *     a structured 503 with code `auth_backend_unavailable` (matching
+ *     withApiHandler's behavior) so clients can retry with backoff.
+ *   - A genuinely invalid/missing key → structured 401 (code `unauthenticated`).
+ *
+ * Usage:
+ *   const auth = await authenticateOrRespond(req.headers.get('authorization'))
+ *   if ('errorResponse' in auth) return auth.errorResponse
+ *   const user = auth.user
+ */
+export async function authenticateOrRespond(
+  authHeader: string | null,
+): Promise<{ user: AuthenticatedUser } | { errorResponse: Response }> {
+  let user: AuthenticatedUser | null
+  try {
+    user = await authenticate(authHeader)
+  } catch {
+    return {
+      errorResponse: Response.json(
+        {
+          ok: false,
+          error:
+            'Could not validate your session because the durable backend is temporarily unreachable. Please try again in a moment.',
+          code: 'auth_backend_unavailable',
+        },
+        { status: 503 },
+      ),
+    }
+  }
+  if (!user) {
+    return {
+      errorResponse: Response.json(
+        { ok: false, error: 'Unauthorized — invalid or missing API key.', code: 'unauthenticated' },
+        { status: 401 },
+      ),
+    }
+  }
+  return { user }
+}
+
+/**
  * Authenticate AND require admin privileges. Returns null if the key is
  * missing, not an admin key, or revoked. Used by all /api/admin/* routes.
  */

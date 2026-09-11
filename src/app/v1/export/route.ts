@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, authorize, authorizeFailResponse, fail, ok } from '@/lib/auth'
+import { authenticateOrRespond, authorize, authorizeFailResponse, fail, ok } from '@/lib/auth'
 import { exportData, logAction } from '@/lib/kv'
 import { sendEventMessage } from '@/lib/telegram'
 
@@ -13,8 +13,9 @@ export const runtime = 'nodejs'
  * { "coins": 500, "theme": "dark", "premium": true, "users.score": 42 }
  */
 export async function GET(req: NextRequest) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const collection = req.nextUrl.searchParams.get('collection') || undefined
 

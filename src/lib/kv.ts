@@ -21,6 +21,7 @@ import {
   resolveChatId,
   resolveBotToken,
   resolveBotApiBaseUrl,
+  maybeRehydrateAccount,
 } from '@/lib/data-store'
 import { notifyRealtime } from '@/lib/realtime'
 
@@ -119,6 +120,28 @@ export async function getKey(
   return toView(rec)
 }
 
+/**
+ * Get a single key with read-your-writes recovery across serverless
+ * instances. On a LOCAL miss, the record may simply live on another instance
+ * (or in a newer Telegram manifest snapshot than the one this instance
+ * hydrated). Pull the account's latest manifest (rate-guarded) and retry the
+ * lookup once before answering 404 — this is what the docs describe as the
+ * "lazily, on read" rehydrate, and fixes clients seeing spurious 404s for
+ * records they just wrote (e.g. OnyxAgent workspace-sync chunk reads).
+ */
+export async function getKeyWithRehydrate(
+  user: AuthenticatedUser,
+  key: string,
+  collection = 'default',
+): Promise<RecordView | null> {
+  let rec = await getKey(user, key, collection)
+  if (rec) return rec
+  const rehydrated = await maybeRehydrateAccount(user.userId)
+  if (!rehydrated) return null
+  rec = await getKey(user, key, collection)
+  return rec
+}
+
 /** Delete a key. Returns whether a record was removed. */
 export async function deleteKey(
   user: AuthenticatedUser,
@@ -143,6 +166,25 @@ export async function listKeys(
 ): Promise<RecordView[]> {
   const records = listRecords(user.dbUserId, collection)
   return records.map(toView)
+}
+
+/**
+ * List keys with read-your-writes recovery. A cold instance with an empty
+ * (locally) view of the collection may simply not have hydrated the account
+ * yet — pull the latest manifest (rate-guarded) and re-list. Only rehydrates
+ * when the local result is EMPTY, so repeated listing of a populated
+ * collection never touches Telegram.
+ */
+export async function listKeysWithRehydrate(
+  user: AuthenticatedUser,
+  collection?: string,
+): Promise<RecordView[]> {
+  let records = await listKeys(user, collection)
+  if (records.length > 0) return records
+  const rehydrated = await maybeRehydrateAccount(user.userId)
+  if (!rehydrated) return records
+  records = await listKeys(user, collection)
+  return records
 }
 
 /** Export every record (optionally scoped to a collection) as a JSON object. */

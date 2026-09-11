@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
+import { authenticateOrRespond, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import {
   describeUserTable,
   dropUserTable,
@@ -21,8 +21,9 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ name: string }> },
 ) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const { name } = await params
   const z = authorize(user, req, { scope: 'tables', table: name })
@@ -44,8 +45,9 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ name: string }> },
 ) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const { name } = await params
   const z = authorize(user, req, { scope: 'tables', table: name })
@@ -73,8 +75,9 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ name: string }> },
 ) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const { name } = await params
   const z = authorize(user, req, { scope: 'tables', table: name })

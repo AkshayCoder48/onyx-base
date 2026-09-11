@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
+import { authenticateOrRespond, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import { listCollections, createCollectionName, resolveChatId } from '@/lib/data-store'
 import { logAction } from '@/lib/kv'
 import { sendEventMessage } from '@/lib/telegram'
@@ -13,8 +13,9 @@ export const runtime = 'nodejs'
  * Auth: `Authorization: Bearer kv_live_…`
  */
 export async function GET(req: NextRequest) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const z = authorize(user, req, { scope: 'collections' })
   if (!z.ok) return authorizeFailResponse(z)
@@ -32,8 +33,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const body = await req.json().catch(() => ({}))
   const name = (body.name as string)?.trim()

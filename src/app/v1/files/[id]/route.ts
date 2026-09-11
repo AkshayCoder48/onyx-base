@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, authorize, authorizeFailResponse, ok, fail, getPublicOrigin } from '@/lib/auth'
+import { authenticateOrRespond, authorize, authorizeFailResponse, ok, fail, getPublicOrigin } from '@/lib/auth'
 import {
   findFileById,
   deleteFileRecord,
@@ -11,8 +11,9 @@ export const runtime = 'nodejs'
 
 /** GET /v1/files/[id] — fetch one file's metadata (owner only). */
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const z = authorize(user, req, { scope: 'files' })
   if (!z.ok) return authorizeFailResponse(z)
@@ -26,8 +27,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
 /** DELETE /v1/files/[id] — permanently delete a file (DB + Telegram message). */
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const z = authorize(user, req, { scope: 'files' })
   if (!z.ok) return authorizeFailResponse(z)

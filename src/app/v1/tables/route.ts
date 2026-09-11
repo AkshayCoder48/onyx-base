@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
+import { authenticateOrRespond, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
 import {
   listUserTables,
   createUserTable,
@@ -22,8 +22,9 @@ export const runtime = 'nodejs'
  * resolve to a user and only ever see that user's own tables.
  */
 export async function GET(req: NextRequest) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const z = authorize(user, req, { scope: 'tables' })
   if (!z.ok) return authorizeFailResponse(z)
@@ -41,8 +42,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const user = await authenticate(req.headers.get('authorization'))
-  if (!user) return fail('Unauthorized — invalid or missing API key.', 401)
+  const auth = await authenticateOrRespond(req.headers.get('authorization'))
+  if ('errorResponse' in auth) return auth.errorResponse
+  const user = auth.user
 
   const body = (await req.json().catch(() => null)) as {
     name?: unknown

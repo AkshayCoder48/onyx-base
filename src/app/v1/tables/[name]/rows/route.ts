@@ -1,5 +1,5 @@
 import { NextRequest } from 'next/server'
-import { authenticate, authorize, authorizeFailResponse, ok, fail } from '@/lib/auth'
+import { authenticateOrRespond, authenticate, authorize, authorizeFailResponse, ok, fail, type AuthenticatedUser } from '@/lib/auth'
 import {
   findUserTable,
   listRows,
@@ -9,6 +9,7 @@ import {
   canRead,
   canWrite,
   ValidationError,
+  type UserTableMeta,
 } from '@/lib/user-tables'
 
 export const runtime = 'nodejs'
@@ -24,12 +25,34 @@ export const runtime = 'nodejs'
  * Auth: `Authorization: Bearer kv_live_…` (or admin key)
  */
 
-async function resolveOwner(req: NextRequest, name: string) {
-  const user = await authenticate(req.headers.get('authorization'))
+async function resolveOwner(
+  req: NextRequest,
+  name: string,
+): Promise<{ user: AuthenticatedUser; meta: UserTableMeta | null } | null | Response> {
+  let user: AuthenticatedUser | null
+  try {
+    user = await authenticate(req.headers.get('authorization'))
+  } catch {
+    // Durable backend temporarily unreachable during rehydrate — surface a
+    // structured 503 instead of an unhandled 500.
+    return Response.json(
+      {
+        ok: false,
+        error: 'Could not validate your session because the durable backend is temporarily unreachable. Please try again in a moment.',
+        code: 'auth_backend_unavailable',
+      },
+      { status: 503 },
+    )
+  }
   if (!user) return null
   const meta = await findUserTable(user.dbUserId, name)
   if (!meta) return { user, meta: null }
   return { user, meta }
+}
+
+/** True when resolveOwner returned a 503 Response (backend unreachable). */
+function isAuthErrorResponse(ctx: unknown): ctx is Response {
+  return ctx instanceof Response
 }
 
 export async function GET(
@@ -38,6 +61,7 @@ export async function GET(
 ) {
   const { name } = await params
   const ctx = await resolveOwner(req, name)
+  if (isAuthErrorResponse(ctx)) return ctx
   if (!ctx) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const z = authorize(ctx.user, req, { scope: 'tables', table: name })
@@ -68,6 +92,7 @@ export async function POST(
 ) {
   const { name } = await params
   const ctx = await resolveOwner(req, name)
+  if (isAuthErrorResponse(ctx)) return ctx
   if (!ctx) return fail('Unauthorized — invalid or missing API key.', 401)
 
   if (!ctx.meta) return fail(`Table "${name}" does not exist.`, 404)
@@ -114,6 +139,7 @@ export async function PATCH(
 ) {
   const { name } = await params
   const ctx = await resolveOwner(req, name)
+  if (isAuthErrorResponse(ctx)) return ctx
   if (!ctx) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const z = authorize(ctx.user, req, { scope: 'tables', table: name })
@@ -160,6 +186,7 @@ export async function DELETE(
 ) {
   const { name } = await params
   const ctx = await resolveOwner(req, name)
+  if (isAuthErrorResponse(ctx)) return ctx
   if (!ctx) return fail('Unauthorized — invalid or missing API key.', 401)
 
   const z = authorize(ctx.user, req, { scope: 'tables', table: name })
