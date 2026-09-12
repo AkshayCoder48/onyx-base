@@ -51,7 +51,11 @@ export interface EmailSendInput {
   htmlBody?: string
   /** $VAR_NAME$ → value substitutions. */
   variables?: Record<string, unknown>
-  /** Per-send sender name override (falls back to the credential's fromName). */
+  /**
+   * DEPRECATED no-op (kept for backward compatibility): MCPEmails has no
+   * per-send display-name argument — the sender name shown to recipients
+   * comes from the inbox's sender identity on mcpemails.com.
+   */
   fromName?: string
   /** Request ID (minted by the route). */
   requestId: string
@@ -198,7 +202,13 @@ export async function orchestrateEmailSend(
   // ── 5. Forward to MCPEmail with the USER'S key ──────────────────────────
   // The platform API key never appears in this call. Only the user's own
   // credential authenticates the upstream hop.
-  const fromName = input.fromName?.trim() || cred.value.fromName || undefined
+  //
+  // NOTE on fromName: MCPEmails' email_compose schema has NO display-name
+  // argument (additionalProperties: false) — forwarding one made every send
+  // fail silently (HTTP 200 + isError: true). The sender display name is
+  // controlled by the inbox's sender identity on mcpemails.com. `fromName`
+  // in the request/credential is accepted for compatibility but is NOT
+  // forwarded upstream.
   let upstreamStatus: number | undefined
   try {
     const result = await sendEmailViaMcpe(cred.value.apiKey, {
@@ -206,7 +216,6 @@ export async function orchestrateEmailSend(
       subject: render.rendered.subject,
       body: render.rendered.body ?? '',
       htmlBody: render.rendered.htmlBody,
-      ...(fromName ? { fromName } : {}),
     })
     upstreamStatus = 200
     touchCredentialLastUsed(user.dbUserId, user.userId, credName)
@@ -221,13 +230,14 @@ export async function orchestrateEmailSend(
     })
     return ok({
       success: true,
-      message: 'Email request completed',
+      message: 'Email sent and accepted by MCPEmail',
       request_id: requestId,
       credential: credName,
       recipients: to.length,
       variables_applied: render.rendered.appliedVariables,
       latency_ms: Date.now() - t0,
       upstream_message_id: result.messageId,
+      ...(result.notes ? { upstream_notes: result.notes } : {}),
     })
   } catch (err) {
     // ── 6. Sanitized failure mapping (PRD §20) ────────────────────────────
@@ -248,6 +258,13 @@ export async function orchestrateEmailSend(
         code = 'upstream_rate_limited'
         status = 502
         message = 'MCPEmail rate-limited the request (their per-key quota). Adjust your automation frequency or the credential rate limit.'
+      } else if (err.code === 'tool_error') {
+        // MCPEmails answered HTTP 200 but the tool itself refused (invalid
+        // arguments, no mailbox connected, provider failure…). The scrubbed
+        // upstream text is actionable — pass it through verbatim-ish.
+        code = 'upstream_rejected'
+        status = 502
+        message = 'MCPEmail refused the send (nothing was delivered).'
       }
       // Only include the upstream detail AFTER scrubbing secrets.
       message += ` Upstream detail: ${scrubSecrets(err.message).slice(0, 200)}`

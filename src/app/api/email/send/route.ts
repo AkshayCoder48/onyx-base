@@ -22,16 +22,21 @@ export const runtime = 'nodejs'
  *     "body": "Hello $NAME$,\n\nYour code is $OTP$.",
  *     "htmlBody": "<p>Hello $NAME$…</p>",   // optional
  *     "variables": { "NAME": "Akshay", "OTP": "483921" },
- *     "fromName": "My App"                  // optional per-send override
+ *     "fromName": "My App"                  // DEPRECATED no-op (kept for
+ *                                           // compatibility — not forwarded;
+ *                                           // the sender name lives on the
+ *                                           // mcpemails.com inbox identity)
  *   }
  *
  * Responses (all carry `request_id` + `X-Request-Id` header):
  *   200 { ok, success, message, request_id, credential, recipients,
- *        variables_applied, latency_ms, upstream_message_id? }
+ *        variables_applied, latency_ms, upstream_message_id?,
+ *        upstream_notes? }
  *   400 bad_request / bad_recipient / missing_variable { variable, field }
  *   401 invalid_api_key          403 insufficient_scope
  *   404 credential_not_found     429 rate_limited
- *   502 upstream_authentication_failed / upstream_error / upstream_rate_limited
+ *   502 upstream_authentication_failed / upstream_rejected /
+ *       upstream_error / upstream_rate_limited
  *   504 upstream_timeout
  *
  * The response NEVER contains the MCPEmail key (or any credential material).

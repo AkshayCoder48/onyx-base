@@ -137,7 +137,7 @@ function EndpointCard({
   const methodColor =
     method === 'GET' ? 'bg-primary/15 text-primary border-primary/30'
     : method === 'POST' ? 'bg-amber-100 text-amber-800 border-amber-300'
-    : method === 'PATCH' ? 'bg-violet-100 text-violet-700 border-violet-300'
+    : method === 'PATCH' ? 'bg-orange-100 text-orange-700 border-orange-300'
     : 'bg-rose-100 text-rose-700 border-rose-300'
   return (
     <div className="rounded-xl border border-border/60 bg-card/30 overflow-hidden">
@@ -641,8 +641,8 @@ curl -X POST ${apiBase}/v1/set \\
                   read/write key can&apos;t destroy data.
                 </p>
               </div>
-              <div className="rounded-md border border-violet-300/60 bg-violet-100/40 p-3">
-                <div className="text-[11px] font-mono uppercase tracking-wider text-violet-800 mb-1">files</div>
+              <div className="rounded-md border border-amber-300/60 bg-amber-100/40 p-3">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-amber-800 mb-1">files</div>
                 <p className="text-[12px] text-muted-foreground leading-relaxed">
                   <code className="font-mono">/v1/files/*</code> — upload, list, metadata, link
                   mint/revoke, delete, and the public download proxy.

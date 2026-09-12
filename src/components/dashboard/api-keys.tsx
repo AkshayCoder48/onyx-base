@@ -61,7 +61,7 @@ const SCOPE_BADGE_CLASS: Record<ScopeName, string> = {
   read: 'border-emerald-400/30 text-emerald-600 dark:text-emerald-400',
   write: 'border-amber-400/30 text-amber-600 dark:text-amber-400',
   delete: 'border-red-400/30 text-red-600 dark:text-red-400',
-  files: 'border-violet-400/30 text-violet-600 dark:text-violet-400',
+  files: 'border-orange-400/40 text-orange-700 dark:text-orange-300',
   tables: 'border-cyan-400/30 text-cyan-600 dark:text-cyan-400',
   collections: 'border-pink-400/30 text-pink-600 dark:text-pink-400',
   export: 'border-orange-400/30 text-orange-600 dark:text-orange-400',

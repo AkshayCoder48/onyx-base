@@ -25,9 +25,11 @@ export const runtime = 'nodejs'
  *     "name": "personal_email",              // required, 1–64 chars [A-Za-z0-9_-]
  *     "apiKey": "mcpe_<64-hex>",             // required — the USER'S OWN key
  *     "label"?: "Personal inbox",            // optional
- *     "fromName"?: "My App",                 // optional sender display name
+ *     "fromName"?: "My App",                 // optional — LABEL ONLY, never
+ *                                           // forwarded (MCPEmails has no
+ *                                           // per-send display-name arg)
  *     "rateLimitPerMin"?: 30,                // optional custom MCPEmail rate limit (null = unlimited)
- *     "testConnection"?: true                // default true — live initialize handshake
+ *     "testConnection"?: true                // default true — initialize + inbox check
  *   }
  *
  * The credential is stored in the CALLER'S OWN account (cloudkv + Telegram
@@ -92,8 +94,19 @@ export async function POST(req: NextRequest) {
           email: i.email,
           provider: i.provider,
         }))
+        connection.inboxCount = inboxes.length
+        // A VALID key with ZERO inboxes passes the initialize handshake but
+        // cannot send ANY email — every compose would be refused upstream
+        // ("no mailbox connected"). Surface that loudly at connect time
+        // instead of letting sends fail silently later.
+        if (inboxes.length === 0) {
+          connection.warning =
+            'This MCPEmails key is valid but has NO mailbox connected — sends will be refused until you connect an inbox at https://mcpemails.com/dashboard/inboxes.'
+        }
       } catch {
-        // inbox_list failed but initialize passed — don't block the save.
+        // inbox_list failed but initialize passed — don't block the save,
+        // but flag it so the user knows the inbox state is unverified.
+        connection.warning = 'Key validated, but the inbox list could not be retrieved from MCPEmails.'
       }
     } catch (err) {
       // Log WITHOUT the key (logRequest redacts anyway; scrub for the message).

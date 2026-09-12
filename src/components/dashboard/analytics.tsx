@@ -41,7 +41,7 @@ export function AnalyticsView() {
         <Kpi icon={Activity} label="Events (14d)" value={d.totalEvents} color="text-primary" />
         <Kpi icon={FolderTree} label="Collections" value={d.byCollection.length} color="text-sky-600" />
         <Kpi icon={TrendingUp} label="Records" value={totalRecords} color="text-primary" />
-        <Kpi icon={Type} label="Value types" value={d.byType.length} color="text-violet-600" />
+        <Kpi icon={Type} label="Value types" value={d.byType.length} color="text-rose-600" />
       </div>
 
       <div className="grid lg:grid-cols-2 gap-4 mb-4">

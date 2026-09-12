@@ -619,7 +619,7 @@ function CardValueText({ value, type }: { value: unknown; type: string }) {
   if (type === 'string') return <>{String(value)}</>
   if (type === 'boolean') return <span className="text-amber-700">{String(value)}</span>
   if (type === 'number') return <span className="text-sky-700">{String(value)}</span>
-  return <span className="text-violet-700/90">{JSON.stringify(value)}</span>
+  return <span className="text-rose-700/90">{JSON.stringify(value)}</span>
 }
 
 /** Determine if a value is "long" and deserves an expandable cell. */
@@ -644,7 +644,7 @@ function ValueCell({ value, type, expanded }: { value: unknown; type: string; ex
   }
   const json = JSON.stringify(value)
   const display = expanded || json.length <= 80 ? json : json.slice(0, 80) + '…'
-  return <span className="font-mono text-sm text-violet-700/90">{display}</span>
+  return <span className="font-mono text-sm text-rose-700/90">{display}</span>
 }
 
 /** Full pretty-printed value for the expanded row / card. */

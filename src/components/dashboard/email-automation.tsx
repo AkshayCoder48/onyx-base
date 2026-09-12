@@ -60,6 +60,8 @@ interface ConnectResponse {
     serverName?: string
     serverVersion?: string
     inboxes?: { inbox_id: string; email: string; provider: string }[]
+    inboxCount?: number
+    warning?: string
   }
   request_id?: string
 }
@@ -96,6 +98,7 @@ interface SendResponse {
   variables_applied: string[]
   latency_ms: number
   upstream_message_id?: string
+  upstream_notes?: string[]
 }
 
 interface RecentRequest {
@@ -341,7 +344,9 @@ function CredentialsCard({
         toast.success(
           `Connected as "${trimmedName}" — MCPEmails ${res.connection.serverName} v${res.connection.serverVersion}`,
         )
-        if (res.connection.inboxes?.length) {
+        if (res.connection.warning) {
+          toast.error(res.connection.warning, { duration: 9000 })
+        } else if (res.connection.inboxes?.length) {
           toast.info(
             `${res.connection.inboxes.length} inbox(es): ${res.connection.inboxes
               .slice(0, 3)
@@ -435,7 +440,7 @@ function CredentialsCard({
                   )}
                 </div>
                 <div className="text-[10px] text-muted-foreground/70 mt-0.5">
-                  {cred.fromName ? `from: ${cred.fromName} · ` : ''}
+                  {cred.fromName ? `label: ${cred.fromName} · ` : ''}
                   {cred.lastUsedAt ? `last used ${new Date(cred.lastUsedAt).toLocaleString()}` : 'never used'}
                 </div>
               </div>
@@ -529,7 +534,7 @@ function CredentialsCard({
         <div className="grid sm:grid-cols-2 gap-3">
           <div className="space-y-1.5">
             <Label htmlFor="cred-from" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Sender name <span className="text-muted-foreground/50 normal-case">(optional)</span>
+              Sender name <span className="text-muted-foreground/50 normal-case">(label only — not forwarded)</span>
             </Label>
             <Input
               id="cred-from"
@@ -538,6 +543,9 @@ function CredentialsCard({
               placeholder="My App"
               className="text-sm h-9"
             />
+            <p className="text-[11px] leading-snug text-muted-foreground/80">
+              Your recipients see the sender name configured on your mcpemails.com inbox identity — MCPEmails has no per-send display-name argument.
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="cred-rate" className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -834,6 +842,16 @@ function ComposerCard({
             {result.variables_applied.length > 0 && (
               <div className="text-muted-foreground">
                 variables applied: {result.variables_applied.map((v) => `$${v}$`).join(', ')}
+              </div>
+            )}
+            {result.upstream_notes && result.upstream_notes.length > 0 && (
+              <div className="text-muted-foreground/90">
+                MCPEmails notes: {result.upstream_notes.join(' · ')}
+              </div>
+            )}
+            {result.upstream_message_id && (
+              <div className="text-muted-foreground font-mono truncate">
+                upstream message id: {result.upstream_message_id}
               </div>
             )}
           </div>

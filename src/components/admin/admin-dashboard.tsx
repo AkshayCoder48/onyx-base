@@ -948,7 +948,7 @@ function ValueCell({ value, type, expanded }: { value: unknown; type: string; ex
   }
   const json = JSON.stringify(value)
   const display = expanded || json.length <= 80 ? json : json.slice(0, 80) + '…'
-  return <span className="font-mono text-sm text-violet-700/90">{display}</span>
+  return <span className="font-mono text-sm text-rose-700/90">{display}</span>
 }
 
 function formatExpanded(value: unknown, type: string): string {

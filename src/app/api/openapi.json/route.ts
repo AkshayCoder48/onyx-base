@@ -369,7 +369,7 @@ const SPEC = {
                   body: { type: 'string', example: 'Hello $NAME$, your code is $OTP$.' },
                   htmlBody: { type: 'string', description: 'Optional HTML body (variables apply).' },
                   variables: { type: 'object', example: { NAME: 'Akshay', OTP: '483921' }, description: 'Values for every $VAR_NAME$ used.' },
-                  fromName: { type: 'string', description: 'Optional per-send sender name override.' },
+                  fromName: { type: 'string', description: 'DEPRECATED no-op kept for compatibility — not forwarded upstream. The sender display name is the mcpemails.com inbox identity.' },
                 },
                 required: ['credential', 'to', 'subject'],
               },
@@ -382,7 +382,7 @@ const SPEC = {
           '401': { description: 'invalid_api_key — platform key required' },
           '404': { description: 'credential_not_found — fail closed, no fallback' },
           '429': { description: 'rate_limited (per-IP, per-key or per-credential custom limit)' },
-          '502': { description: 'upstream_authentication_failed / upstream_error / upstream_rate_limited' },
+          '502': { description: 'upstream_authentication_failed / upstream_rejected (MCPEmails tool-level refusal, e.g. no mailbox connected) / upstream_error / upstream_rate_limited' },
           '504': { description: 'upstream_timeout' },
         },
       },
@@ -391,7 +391,7 @@ const SPEC = {
       post: {
         summary: 'Send using a stored template (name) or an inline template',
         description:
-          'One template, different variables per request — the stored template is never modified. Body { credential, template: "welcome" | { subject, body, htmlBody? }, to, variables, fromName? }. Unknown template name → 404 template_not_found. Optional subject/body/htmlBody fields on the request override the template fields.',
+          'One template, different variables per request — the stored template is never modified. Body { credential, template: "welcome" | { subject, body, htmlBody? }, to, variables }. Unknown template name → 404 template_not_found. Optional subject/body/htmlBody fields on the request override the template fields.',
         requestBody: {
           required: true,
           content: {
@@ -403,7 +403,6 @@ const SPEC = {
                   template: { type: 'string', example: 'welcome', description: 'Stored template name, or an inline { subject, body, htmlBody? } object.' },
                   to: { type: 'string', example: 'user@example.com' },
                   variables: { type: 'object', example: { NAME: 'Akshay', OTP: '483921' } },
-                  fromName: { type: 'string' },
                 },
                 required: ['credential', 'template', 'to'],
               },
@@ -450,7 +449,7 @@ const SPEC = {
       post: {
         summary: 'Connect (or update) a NAMED MCPEmail credential',
         description:
-          'One-time setup. Body { name, apiKey (mcpe_<64-hex>), label?, fromName?, rateLimitPerMin?, testConnection? }. testConnection defaults to true — the key is validated with a live mcpemails.com initialize handshake before it is stored. The credential is stored in YOUR account (cloudkv + your private pinned Telegram manifest) and mirrored durably; the platform never pools user keys. rateLimitPerMin sets a CUSTOM rate limit for MCPEmail sends through this credential (null/omitted = unlimited up to the platform hard cap).',
+          'One-time setup. Body { name, apiKey (mcpe_<64-hex>), label?, fromName? (label only — not forwarded), rateLimitPerMin?, testConnection? }. testConnection defaults to true — the key is validated with a live mcpemails.com initialize handshake before it is stored. The credential is stored in YOUR account (cloudkv + your private pinned Telegram manifest) and mirrored durably; the platform never pools user keys. rateLimitPerMin sets a CUSTOM rate limit for MCPEmail sends through this credential (null/omitted = unlimited up to the platform hard cap).',
         requestBody: {
           required: true,
           content: {
@@ -461,7 +460,7 @@ const SPEC = {
                   name: { type: 'string', example: 'personal_email', description: '1–64 chars [A-Za-z0-9_-], no leading dash.' },
                   apiKey: { type: 'string', example: 'mcpe_4c7b1e9a0d5f38a2b6e04d17c9f2a58b3d6e0f1a2b4c6d8e0f2a4b6c8d0e1f3a' },
                   label: { type: 'string', example: 'Personal inbox' },
-                  fromName: { type: 'string', example: 'My App' },
+                  fromName: { type: 'string', example: 'My App', description: 'Label only — never forwarded; MCPEmails uses the inbox sender identity.' },
                   rateLimitPerMin: { type: 'integer', example: 30, nullable: true },
                   testConnection: { type: 'boolean', example: true },
                 },

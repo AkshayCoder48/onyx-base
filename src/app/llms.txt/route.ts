@@ -484,7 +484,7 @@ never a project-wide key.
 |:---|:---|:---|
 | \`POST\` | \`/api/credentials/connect\` | Connect YOUR \`mcpe_*\` key under a name (live handshake, masked response, optional per-credential \`rateLimitPerMin\`). Mirrored to your private Telegram manifest. |
 | \`GET\` | \`/api/credentials\` | List credentials (masked views only). \`DELETE /api/credentials/:name\` disconnects. |
-| \`POST\` | \`/api/email/send\` | Send an email: \`{ credential, to, subject, body?, htmlBody?, variables?, fromName? }\`. \`$VAR_NAME$\` substitution — a missing variable aborts the send (\`missing_variable\`). Unknown credential → \`404 credential_not_found\` (fail closed). Returns \`request_id\`. |
+| \`POST\` | \`/api/email/send\` | Send an email: \`{ credential, to, subject, body?, htmlBody?, variables? }\`. \`$VAR_NAME$\` substitution — a missing variable aborts the send (\`missing_variable\`). Unknown credential → \`404 credential_not_found\` (fail closed). Returns \`request_id\`. |
 | \`POST\` | \`/api/email/template/send\` | Send via a stored template name or inline \`{ subject, body, htmlBody? }\`. Template never rebuilt. |
 | \`GET\` | \`/api/email/status/:requestId\` | Request status (ts, credential name, sent/failed, latency, upstream status) — metadata only. \`GET /api/email/requests\` lists recent. |
 | \`GET\` · \`POST\` | \`/api/email/templates\` | List / save named templates; \`GET\`·\`DELETE /api/email/templates/:name\` for one. |

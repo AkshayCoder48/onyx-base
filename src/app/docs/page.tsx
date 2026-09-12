@@ -245,7 +245,7 @@ const EMAIL_ENDPOINTS: Endpoint[] = [
     auth: true,
     description:
       "Store YOUR mcpe_ key under a name you choose (personal_email, work_email…). testConnection (default true) validates it with a live mcpemails.com handshake before saving. The credential lives in YOUR account and is mirrored to YOUR private pinned Telegram manifest — the platform never pools user keys, and the response returns only the MASKED key (mcpe_4c7b1e9a…1f3a). Set rateLimitPerMin for a custom MCPEmail send-rate cap per credential.",
-    body: "{ name, apiKey, label?, fromName?, rateLimitPerMin?, testConnection? }",
+    body: "{ name, apiKey, label?, fromName? (label only), rateLimitPerMin?, testConnection? }",
     example: `curl -X POST ${BASE}/api/credentials/connect \\
   -H "Authorization: Bearer kv_live_…" \\
   -H "Content-Type: application/json" \\
@@ -258,7 +258,7 @@ const EMAIL_ENDPOINTS: Endpoint[] = [
     auth: true,
     description:
       "The core automation endpoint. Reference the credential BY NAME — the platform resolves it from your private store and forwards the send to MCPEmail with YOUR key (the platform kv_live_* key is never forwarded upstream). $VAR_NAME$ placeholders in subject/body/htmlBody are substituted from variables; a missing variable aborts the send with 400 missing_variable (never half-rendered). No credential → 404 credential_not_found — the system FAILS CLOSED, there is no project-wide fallback key. Every response carries a request_id.",
-    body: "{ credential, to, subject, body?, htmlBody?, variables?, fromName? }",
+    body: "{ credential, to, subject, body?, htmlBody?, variables? }",
     example: `curl -X POST ${BASE}/api/email/send \\
   -H "Authorization: Bearer kv_live_…" \\
   -H "Content-Type: application/json" \\
@@ -275,7 +275,7 @@ const EMAIL_ENDPOINTS: Endpoint[] = [
     auth: true,
     description:
       "Save an email structure once (name + subject + body [+ htmlBody]), then vary the variables per request. The template is never modified on send. template may also be an inline { subject, body, htmlBody? } object for one-off structures.",
-    body: "{ credential, template: name | {subject, body, htmlBody?}, to, variables?, fromName? }",
+    body: "{ credential, template: name | {subject, body, htmlBody?}, to, variables? }",
     example: `curl -X POST ${BASE}/api/email/template/send \\
   -H "Authorization: Bearer kv_live_…" \\
   -H "Content-Type: application/json" \\

@@ -17,13 +17,13 @@ const ACTION_STYLES: Record<string, string> = {
   get: 'border-sky-300 text-sky-800 bg-sky-100',
   delete: 'border-red-300 text-red-700 bg-red-100',
   login: 'border-amber-300 text-amber-800 bg-amber-100',
-  export: 'border-violet-300 text-violet-800 bg-violet-100',
+  export: 'border-orange-300 text-orange-800 bg-orange-100',
 }
 
 const SOURCE_STYLES: Record<string, string> = {
   cli: 'text-primary',
   api: 'text-sky-300',
-  dashboard: 'text-violet-300',
+  dashboard: 'text-amber-700',
   system: 'text-muted-foreground',
 }
 
