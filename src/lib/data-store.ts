@@ -2244,57 +2244,23 @@ export async function syncAccountManifestToTelegram(
       notePacingThrottle(Math.ceil((35000 - paceAgeMs) / 1000))
       return null
     }
+    // ACCOUNT PACING: this account synced <45s ago (globally, per the
+    // index) — yield. Unbypassable (index-derived, runs on ALL paths
+    // including sticky fast paths) unlike per-key checks. Bounds each
+    // account to ~1/45s; a 20s ticker yields most rounds, freeing windows
+    // for real writes. New accounts (no entry) always proceed.
+    if (existing?.updatedAt) {
+      const accAgeMs = Date.now() - Date.parse(existing.updatedAt)
+      if (Number.isFinite(accAgeMs) && accAgeMs < 45000) {
+        notePacingThrottle(Math.ceil((45000 - accAgeMs) / 1000))
+        return null
+      }
+    }
     let base: AccountManifest | null = null
     if (existing && !revUnchanged) {
       base = await fetchBase(existing.fileId)
       if (!base) {
         console.error(`[store] sync aborted for ${userId}: durable base unreadable (not clobbering)`)
-        return null
-      }
-    }
-    // HOT-KEY PACING: if EVERYTHING changed in this sync was already synced
-    // <90s ago (globally, per the base), yield — this is a hot key (e.g. an
-    // external 20s ticker) re-landing trivia. Real writes (any fresh, new,
-    // or deleted key) always proceed. New accounts (no base) always proceed.
-    if (base) {
-      const baseRecs = new Map(
-        (base.records || []).map((r) => [`${r.collection}|${r.key}`, r.updatedAt || '']),
-      )
-      let freshChange = false
-      for (const r of local.records || []) {
-        const b = baseRecs.get(`${r.collection}|${r.key}`)
-        if (b === undefined || (r.updatedAt || '') > b) {
-          if (b === undefined) {
-            freshChange = true
-            break
-          }
-          const ageMs = Date.now() - Date.parse(b)
-          if (!Number.isFinite(ageMs) || ageMs >= 90000) {
-            freshChange = true
-            break
-          }
-        }
-      }
-      // Deletions (in base, missing locally) always count as fresh — rare
-      // and must never be paced away. (Tombstones ride the merge.)
-      if (!freshChange) {
-        const localKeys = new Set((local.records || []).map((r) => `${r.collection}|${r.key}`))
-        for (const k of baseRecs.keys()) {
-          if (!localKeys.has(k)) {
-            freshChange = true
-            break
-          }
-        }
-      }
-      if (!freshChange) {
-        let oldest = 0
-        for (const r of local.records || []) {
-          const b = baseRecs.get(`${r.collection}|${r.key}`)
-          if (b === undefined) continue
-          const ageMs = Date.now() - Date.parse(b)
-          if (Number.isFinite(ageMs)) oldest = Math.max(oldest, ageMs)
-        }
-        notePacingThrottle(Math.max(5, Math.ceil((90000 - oldest) / 1000)))
         return null
       }
     }

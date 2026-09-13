@@ -76,10 +76,10 @@ export function RecordDialog({ open, onOpenChange, record }: Props) {
         method: 'POST',
         body: payload,
       })
-      // Pacing yields (durable:false) are transient by construction (index
-      // writes are globally paced ~1/35s) — silently re-try the idempotent
+      // Pacing yields (durable:false) are transient by construction (writes
+      // are paced ~1/45s per account) — silently re-try the idempotent
       // upsert a few times before telling the user it's still pending.
-      for (let i = 0; res.record?.durable === false && i < 3; i++) {
+      for (let i = 0; res.record?.durable === false && i < 4; i++) {
         await new Promise((r) => setTimeout(r, 12000))
         try {
           res = await api<{ record?: { durable?: boolean } }>('/api/dashboard/records', {

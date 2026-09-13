@@ -208,10 +208,10 @@ export function DatabaseView() {
     try {
       const url = `/api/dashboard/records/${encodeURIComponent(deleteTarget.key)}?collection=${encodeURIComponent(deleteTarget.collection)}`
       let res = await api<{ deleted?: boolean; durable?: boolean }>(url, { method: 'DELETE' })
-      // Pacing yields are transient (~1/35s global writes) — re-try the
+      // Pacing yields are transient (~1/45s per account) — re-try the
       // delete a few times (each attempt also spreads the tombstone to the
       // instance it lands on) before reporting sync-pending.
-      for (let i = 0; res.durable === false && i < 3; i++) {
+      for (let i = 0; res.durable === false && i < 4; i++) {
         await new Promise((r) => setTimeout(r, 12000))
         try {
           res = await api<{ deleted?: boolean; durable?: boolean }>(url, { method: 'DELETE' })
