@@ -263,18 +263,17 @@ export async function listKeys(
 }
 
 /**
- * List keys with read-your-writes recovery. A cold instance with an empty
- * (locally) view of the collection may simply not have hydrated the account
- * yet — pull the latest manifest (rate-guarded) and re-list. Only rehydrates
- * when the local result is EMPTY, so repeated listing of a populated
- * collection never touches Telegram.
+ * List keys with read-your-writes recovery + freshness. A non-empty local
+ * view may still be STALE (another instance wrote since we hydrated), so we
+ * always offer a refresh: maybeRehydrateAccount is rev-aware and
+ * guard-throttled, costing ~1 getChat when fresh and a manifest download
+ * only when the pinned rev actually advanced.
  */
 export async function listKeysWithRehydrate(
   user: AuthenticatedUser,
   collection?: string,
 ): Promise<RecordView[]> {
   let records = await listKeys(user, collection)
-  if (records.length > 0) return records
   const rehydrated = await maybeRehydrateAccount(user.userId)
   if (!rehydrated) return records
   records = await listKeys(user, collection)
@@ -283,18 +282,16 @@ export async function listKeysWithRehydrate(
 
 /**
  * Export every record (optionally scoped to a collection) as a JSON object.
- * Rehydrates when the local view is empty (same recovery as list) so a cold
- * instance doesn't export {} for data that exists durably.
+ * Same always-refresh recovery as list, so instances never export stale
+ * partial state while another instance holds newer writes.
  */
 export async function exportData(
   user: AuthenticatedUser,
   collection?: string,
 ): Promise<Record<string, unknown>> {
   let records = await listKeys(user, collection)
-  if (records.length === 0) {
-    const rehydrated = await maybeRehydrateAccount(user.userId)
-    if (rehydrated) records = await listKeys(user, collection)
-  }
+  const rehydrated = await maybeRehydrateAccount(user.userId)
+  if (rehydrated) records = await listKeys(user, collection)
   const out: Record<string, unknown> = {}
   for (const r of records) {
     const bucket = r.collection === 'default' ? '' : `${r.collection}.`

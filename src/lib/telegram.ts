@@ -157,7 +157,9 @@ async function getBotJson(url: string): Promise<BotJsonResponse | null> {
       const data = (await res.json().catch(() => null)) as BotJsonResponse | null
       if (!data) return null
       if (data.ok) return data
-      const wait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
+      const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
+      // Jitter UP so instances racing the same flood don't retry in lockstep.
+      const wait = baseWait > 0 ? Math.min(baseWait * (1 + Math.random()), 30) : 0
       if (wait > 0 && attempt === 0) {
         await sleep(wait * 1000)
         continue
@@ -186,7 +188,9 @@ async function postBotJson(url: string, body: unknown): Promise<BotJsonResponse 
       const data = (await res.json().catch(() => null)) as BotJsonResponse | null
       if (!data) return null
       if (data.ok) return data
-      const wait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
+      const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
+      // Jitter UP so instances racing the same flood don't retry in lockstep.
+      const wait = baseWait > 0 ? Math.min(baseWait * (1 + Math.random()), 30) : 0
       if (wait > 0 && attempt === 0) {
         await sleep(wait * 1000)
         continue
@@ -817,6 +821,12 @@ export async function pinAccountIndex(
         disable_web_page_preview: true,
       })
       if (editData?.ok) return pinned.message_id
+      // "Message is not modified" means the pin already holds exactly this
+      // content (converged retry / duplicate sync) — that IS success. Without
+      // this we fall through to send+pin spam on every duplicate sync.
+      if (editData && /message is not modified/i.test(editData.description ?? '')) {
+        return pinned.message_id
+      }
     }
     const sendData = await postBotJson(`${apiBase}/sendMessage`, {
       chat_id: chatId,
@@ -1233,29 +1243,40 @@ export async function getFileDownloadUrl(
   const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
   const fileBase = resolveBotApiOrigin(botApiBaseUrlOverride)
 
-  try {
-    const res = await fetchWithTimeout(
-      `${apiBase}/getFile?file_id=${encodeURIComponent(fileId)}`,
-    )
-    const data = (await res.json()) as {
-      ok: boolean
-      description?: string
-      result?: { file_path?: string; file_size?: number }
-    }
-    if (!data.ok || !data.result?.file_path) {
+  // ONE flood-aware retry: getFile sits on the rehydrate hot path, and a
+  // single 429 there used to fail the whole rehydrate into a spurious 404.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetchWithTimeout(
+        `${apiBase}/getFile?file_id=${encodeURIComponent(fileId)}`,
+      )
+      const data = (await res.json()) as {
+        ok: boolean
+        description?: string
+        result?: { file_path?: string; file_size?: number }
+      }
+      if (data.ok && data.result?.file_path) {
+        // Download URL format: <origin>/file/bot<token>/<file_path>
+        // Works for both cloud (api.telegram.org) and local Bot API servers.
+        return {
+          url: `${fileBase}/file/bot${botToken}/${data.result.file_path}`,
+          fileSize: data.result.file_size ?? null,
+        }
+      }
+      const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
+      if (baseWait > 0 && attempt === 0) {
+        await sleep(Math.min(baseWait * (1 + Math.random()), 30) * 1000)
+        continue
+      }
       console.error('[telegram] getFile failed:', data.description)
       return null
+    } catch (err) {
+      if (attempt === 0) continue
+      console.error('[telegram] getFile error:', err)
+      return null
     }
-    // Download URL format: <origin>/file/bot<token>/<file_path>
-    // Works for both cloud (api.telegram.org) and local Bot API servers.
-    return {
-      url: `${fileBase}/file/bot${botToken}/${data.result.file_path}`,
-      fileSize: data.result.file_size ?? null,
-    }
-  } catch (err) {
-    console.error('[telegram] getFile error:', err)
-    return null
   }
+  return null
 }
 
 // ─── getFile URL cache (anti-spam for Telegram) ──────────────────────────────

@@ -38,7 +38,6 @@ import {
   sendAccountManifest,
   fetchAccountManifest,
   sendLargeValueDocument,
-  deleteTelegramMessage,
   SYSTEM_ACCOUNT_ID,
   type AccountIndex,
   type AccountIndexEntry,
@@ -2014,6 +2013,62 @@ export function mergeAccountManifests(local: AccountManifest, remote: AccountMan
   }
 }
 
+const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(() => r(), ms))
+
+/**
+ * Backoff sleep with upward jitter (base → 2×base, capped) so concurrent
+ * instances racing the same flood cooldown don't retry in lockstep and
+ * re-trigger the 429 as a synchronized stampede.
+ */
+function sleepWithJitter(baseMs: number): Promise<void> {
+  const jittered = baseMs * (1 + Math.random())
+  return sleepMs(Math.min(jittered, 8000))
+}
+
+/**
+ * Fetch a FRESH account index (bypass the per-instance cache) with bounded
+ * flood retries. Reads are safe to retry. Null-after-retries means either a
+ * genuinely fresh system (no index pinned yet → caller proceeds with a blank
+ * index) or sustained flood (the subsequent pin then fails honestly, so the
+ * write reports durable:false instead of a false ok).
+ */
+async function fetchFreshIndexWithRetry(): Promise<AccountIndex> {
+  for (let i = 0; i < 3; i++) {
+    try {
+      const idx = await fetchAccountIndex()
+      if (idx) return idx
+    } catch {
+      // retry below
+    }
+    if (i < 2) await sleepWithJitter(800 * (i + 1))
+  }
+  return {
+    cloudkv: true as const,
+    kind: 'account-index' as const,
+    version: 4 as const,
+    exportedAt: new Date().toISOString(),
+    accounts: {},
+  }
+}
+
+/**
+ * Fetch the durable base manifest with bounded flood retries (readonly —
+ * safe to retry). Null-after-retries aborts the sync (anti-clobber: we
+ * never pin a local-only merge over unreadable durable state).
+ */
+async function fetchBaseWithRetry(fileId: string): Promise<AccountManifest | null> {
+  for (let i = 0; i < 3; i++) {
+    try {
+      const base = await fetchAccountManifest(fileId)
+      if (base) return base
+    } catch {
+      // retry below
+    }
+    if (i < 2) await sleepWithJitter(800 * (i + 1))
+  }
+  return null
+}
+
 /**
  * Sync ONE account's manifest to Telegram + update the pinned index. Used after
  * a write that affects only one account (the common case). Debounced per-account
@@ -2024,25 +2079,14 @@ export function mergeAccountManifests(local: AccountManifest, remote: AccountMan
 export async function syncAccountManifestToTelegram(userId: string): Promise<AccountIndexEntry | null> {
   const local = buildAccountManifest(userId)
   if (!local) return null
-  // Fetch-merge-pin with pin-race retry. NEVER upload a partial local-only
-  // manifest over durable state (the old last-pin-wins clobber that wiped
-  // other instances' keys). On base-fetch failure we ABORT (safer than
-  // clobbering) and let the next write/debounced sync retry.
+  // Fetch-merge-pin with pin-race + flood retry. NEVER upload a partial
+  // local-only manifest over durable state (the old last-pin-wins clobber
+  // that wiped other instances' keys). Flood failures RETRY with backoff
+  // (bounded) instead of instantly failing into memory-only mode.
   for (let attempt = 0; attempt < 3; attempt++) {
-    let idx: AccountIndex
-    try {
-      // Fresh index every attempt (bypass the per-instance cache — another
-      // instance may have pinned newer since we last looked).
-      idx = (await fetchAccountIndex()) ?? {
-        cloudkv: true as const,
-        kind: 'account-index' as const,
-        version: 4 as const,
-        exportedAt: new Date().toISOString(),
-        accounts: {},
-      }
-    } catch {
-      return null
-    }
+    // Fresh index every attempt (bypass the per-instance cache — another
+    // instance may have pinned newer since we last looked).
+    const idx = await fetchFreshIndexWithRetry()
     const existing = idx.accounts[userId]
     // FAST PATH: index still points at the rev we last pinned/restored, so
     // no other instance wrote since — durable base ⊆ local state, skip the
@@ -2050,11 +2094,7 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
     const revUnchanged = !!existing && existing.messageId === lastDurableRev.get(userId)
     let base: AccountManifest | null = null
     if (existing && !revUnchanged) {
-      try {
-        base = await fetchAccountManifest(existing.fileId)
-      } catch {
-        base = null
-      }
+      base = await fetchBaseWithRetry(existing.fileId)
       if (!base) {
         console.error(`[store] sync aborted for ${userId}: durable base unreadable (not clobbering)`)
         return null
@@ -2064,10 +2104,14 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
     // Fold the converged state back into THIS instance too (fast cross-
     // instance convergence; merge semantics make this safe).
     restoreAccountManifest(merged)
-    // Upload FIRST, delete the superseded doc only AFTER the new pin
-    // verifies (deleting before upload risks total loss on failure).
+    // Upload FIRST. On upload failure (flood) back off and retry the whole
+    // merge — our local state still holds the write, nothing is lost.
     const sent = await sendAccountManifest(merged)
-    if (!sent) return null
+    if (!sent) {
+      console.warn(`[store] sync upload failed for ${userId} (attempt ${attempt + 1}) — backing off`)
+      await sleepWithJitter(1000 * (attempt + 1))
+      continue
+    }
     const recordCount = (merged.records ?? []).length
     const entry: AccountIndexEntry = {
       userId,
@@ -2080,13 +2124,15 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
     idx.accounts[userId] = entry
     idx.exportedAt = new Date().toISOString()
     const pinnedId = await pinAccountIndex(idx)
-    if (!pinnedId) return null
+    if (!pinnedId) {
+      console.warn(`[store] sync pin failed for ${userId} (attempt ${attempt + 1}) — backing off`)
+      await sleepWithJitter(1000 * (attempt + 1))
+      continue
+    }
     // Verify we still hold the pin — another instance may have pinned
-    // after our fetch (proven loss → re-merge + re-pin; nothing is dropped
-    // because our data is in our uploaded doc AND our local store, and the
-    // next merge picks it up from local). An UNREADABLE verify (flood /
-    // network) is ACCEPTED, not retried: merge is the real safety net, and
-    // spinning extra calls into a 429 storm only deepens it.
+    // after our fetch. ONLY an explicit match is success: an UNREADABLE
+    // verify (flood/network) must NOT be accepted (that turned lost races
+    // into false-durable writes) — it consumes an attempt and re-merges.
     let verify: AccountIndex | null = null
     try {
       verify = await fetchAccountIndex()
@@ -2094,18 +2140,20 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
       verify = null
     }
     const current = verify?.accounts[userId]
-    if (!verify || (current && current.messageId === sent.messageId)) {
-      if (existing && existing.messageId !== sent.messageId) {
-        void deleteTelegramMessage(existing.messageId).catch(() => false)
-      }
+    if (verify && current && current.messageId === sent.messageId) {
+      // NOTE: superseded docs are intentionally NOT deleted. Deleting them
+      // racy-breaks concurrent readers mid-download (fetch index → victim
+      // doc deleted → rehydrate fails → spurious 404s). Chat history is
+      // free and unbounded; old manifests are harmless backups.
       accountIndexCache = idx
       lastDurableRev.set(userId, sent.messageId)
       v4ModeActive = true
       return entry
     }
-    console.warn(`[store] sync pin race for ${userId} (attempt ${attempt + 1}) — re-merging`)
+    console.warn(`[store] sync pin race/unverified for ${userId} (attempt ${attempt + 1}) — re-merging`)
+    await sleepWithJitter(700 * (attempt + 1))
   }
-  console.error(`[store] sync failed for ${userId} after 3 pin races`)
+  console.error(`[store] sync failed for ${userId} after 3 attempts`)
   return null
 }
 
@@ -2133,6 +2181,11 @@ const ACCOUNT_REHYDRATE_MIN_INTERVAL_MS = 2000
  * succeeded (the caller should retry its lookup); false when skipped by the
  * freshness guard, when no manifest exists yet, or when the fetch failed.
  * Never throws.
+ *
+ * Rev-aware: the pinned rev is compared against the rev this instance last
+ * pinned/restored, and the manifest download is skipped when they match
+ * (the miss is genuine). This makes the call cheap enough (~1 getChat) to
+ * run on EVERY list/export for freshness — not just on empty results.
  */
 export async function maybeRehydrateAccount(publicUserId: string): Promise<boolean> {
   const last = accountRehydrateGuard.get(publicUserId) ?? 0
@@ -2140,6 +2193,9 @@ export async function maybeRehydrateAccount(publicUserId: string): Promise<boole
   if (now - last < ACCOUNT_REHYDRATE_MIN_INTERVAL_MS) return false
   accountRehydrateGuard.set(publicUserId, now)
   try {
+    const idx = await fetchAccountIndex()
+    const entry = idx?.accounts[publicUserId]
+    if (idx && entry && entry.messageId === lastDurableRev.get(publicUserId)) return false
     const r = await rehydrateAccountFromTelegram(publicUserId)
     return r.attempted && !r.error
   } catch {
