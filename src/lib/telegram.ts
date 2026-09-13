@@ -246,6 +246,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 function retryAfterSeconds(data: unknown): number | null {
   if (typeof data === 'object' && data !== null) {
     const d = data as { parameters?: { retry_after?: unknown }; description?: unknown }
+    // Local breaker short-circuit: fail INSTANTLY (baseWait 0 → no wait, no
+    // retry). The breaker owns the cooldown; waiting here only burns time.
+    if (typeof d.description === 'string' && d.description.includes('local flood breaker')) return 0
     const ra = d.parameters?.retry_after
     if (typeof ra === 'number' && ra > 0) return Math.min(ra, 10)
     if (typeof d.description === 'string') {
@@ -276,10 +279,11 @@ async function getBotJson(url: string): Promise<BotJsonResponse | null> {
       if (!data) return null
       if (data.ok) return data
       const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
-      // Jitter UP so instances racing the same flood don't retry in lockstep.
-      // Hard-capped: layered retries multiply, so no single wait may exceed
-      // a few seconds — sustained floods fail fast to the caller instead.
-      const wait = baseWait > 0 ? Math.min(baseWait * (1 + Math.random()), 4) : 0
+      // Comply with Telegram's cooldown IN FULL plus margin. Under-waiting
+      // re-violates and EXTENDS the throttle (a 4s wait against retry_after=5
+      // self-sustains forever — proven live). retry_after is already capped
+      // at 10s inside retryAfterSeconds, so no single wait exceeds ~15s.
+      const wait = baseWait > 0 ? baseWait + 3 + Math.random() * 2 : 0
       if (wait > 0 && attempt === 0) {
         await sleep(wait * 1000)
         continue
@@ -309,10 +313,11 @@ async function postBotJson(url: string, body: unknown): Promise<BotJsonResponse 
       if (!data) return null
       if (data.ok) return data
       const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
-      // Jitter UP so instances racing the same flood don't retry in lockstep.
-      // Hard-capped: layered retries multiply, so no single wait may exceed
-      // a few seconds — sustained floods fail fast to the caller instead.
-      const wait = baseWait > 0 ? Math.min(baseWait * (1 + Math.random()), 4) : 0
+      // Comply with Telegram's cooldown IN FULL plus margin. Under-waiting
+      // re-violates and EXTENDS the throttle (a 4s wait against retry_after=5
+      // self-sustains forever — proven live). retry_after is already capped
+      // at 10s inside retryAfterSeconds, so no single wait exceeds ~15s.
+      const wait = baseWait > 0 ? baseWait + 3 + Math.random() * 2 : 0
       if (wait > 0 && attempt === 0) {
         await sleep(wait * 1000)
         continue
@@ -999,7 +1004,9 @@ async function sendDocumentWithRetry(
       } | null
       if (!sendData) return null
       if (sendData.ok && sendData.result?.document) return sendData.result
-      const wait = sendRes.status === 429 ? (retryAfterSeconds(sendData) ?? 5) : 0
+      const baseWait = sendRes.status === 429 ? (retryAfterSeconds(sendData) ?? 5) : 0
+      // Full cooldown + margin (under-waiting re-violates and extends).
+      const wait = baseWait > 0 ? baseWait + 3 + Math.random() * 2 : 0
       if (wait > 0 && attempt === 0) {
         await sleep(wait * 1000)
         continue
@@ -1417,7 +1424,8 @@ export async function getFileDownloadUrl(
       }
       const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
       if (baseWait > 0 && attempt === 0) {
-        await sleep(Math.min(baseWait * (1 + Math.random()), 4) * 1000)
+        // Full cooldown + margin (under-waiting re-violates and extends).
+        await sleep((baseWait + 3 + Math.random() * 2) * 1000)
         continue
       }
       console.error('[telegram] getFile failed:', data.description)
