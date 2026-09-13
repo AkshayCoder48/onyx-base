@@ -2044,8 +2044,12 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
       return null
     }
     const existing = idx.accounts[userId]
+    // FAST PATH: index still points at the rev we last pinned/restored, so
+    // no other instance wrote since — durable base ⊆ local state, skip the
+    // manifest download entirely.
+    const revUnchanged = !!existing && existing.messageId === lastDurableRev.get(userId)
     let base: AccountManifest | null = null
-    if (existing) {
+    if (existing && !revUnchanged) {
       try {
         base = await fetchAccountManifest(existing.fileId)
       } catch {
@@ -2095,6 +2099,7 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
         void deleteTelegramMessage(existing.messageId).catch(() => false)
       }
       accountIndexCache = idx
+      lastDurableRev.set(userId, sent.messageId)
       v4ModeActive = true
       return entry
     }
@@ -2173,6 +2178,7 @@ export async function rehydrateAccountFromTelegram(userId: string): Promise<{
     const manifest = await fetchAccountManifest(entry.fileId)
     if (!manifest) return { attempted: true, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0, error: 'download failed' }
     const r = restoreAccountManifest(manifest)
+    lastDurableRev.set(userId, entry.messageId)
     if (r.users || r.apiKeys || r.records || r.logs || r.files) {
       console.log(`[store] V4 rehydrated account ${userId}: +${r.users} user, +${r.apiKeys} keys, +${r.records} records, +${r.logs} logs, +${r.files} files`)
     }
@@ -2310,6 +2316,13 @@ function ensureV4Probed(): Promise<void> {
  */
 const lastSyncStartAt = new Map<string, number>()
 const lastSyncEndAt = new Map<string, number>()
+/**
+ * Manifest messageId this instance last pinned (or restored from) per
+ * account. Sync fast path: if the fresh index still points at this rev,
+ * nobody else wrote since, so the durable base is a subset of local state
+ * and the multi-hundred-KB manifest download can be skipped.
+ */
+const lastDurableRev = new Map<string, number>()
 
 function runAccountSyncNow(userId: string): Promise<boolean> {
   const existing = accountSyncInFlight.get(userId)
@@ -2745,10 +2758,11 @@ export function addLog(opts: {
     createdAt: new Date().toISOString(),
   }
   store.logs.push(entry)
-  // Cap logs at 1000 per user to avoid unbounded growth.
+  // Cap logs at 200 per user: logs ride inside every manifest upload, so an
+  // unbounded log tail directly taxes every write's latency.
   const userLogs = store.logs.filter((l) => l.userId === opts.dbUserId)
-  if (userLogs.length > 1000) {
-    const keep = userLogs.slice(-1000).map((l) => l.id)
+  if (userLogs.length > 200) {
+    const keep = userLogs.slice(-200).map((l) => l.id)
     store.logs = store.logs.filter((l) => l.userId !== opts.dbUserId || keep.includes(l.id))
   }
   saveToDisk()
