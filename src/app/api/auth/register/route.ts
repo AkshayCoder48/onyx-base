@@ -6,7 +6,7 @@ import {
   authenticate,
   isValidEmail,
 } from '@/lib/auth'
-import { createUser, deleteUserByDbId, findUserByDbId, findUserByEmail, flushAccountSync } from '@/lib/data-store'
+import { createUser, deleteUserByDbId, findUserByDbId, findUserByEmail, findUserByEmailWithRehydrate, flushAccountSync } from '@/lib/data-store'
 import { logAction } from '@/lib/kv'
 import { sendEventMessage } from '@/lib/telegram'
 import { verifyEmail } from '@/lib/email-verify'
@@ -93,7 +93,7 @@ export async function POST(req: NextRequest) {
   // If this email is already registered, do NOT create a second account.
   // Tell the user to sign in instead.
   if (email) {
-    const existingUser = findUserByEmail(email)
+    const existingUser = await findUserByEmailWithRehydrate(email)
     if (existingUser) {
       return fail(
         'An account with this email already exists. Use the "Sign in" tab — sign in with your API key, or with your email + password if you lost the key.',

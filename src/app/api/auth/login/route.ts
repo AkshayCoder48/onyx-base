@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { ok, fail } from '@/lib/auth'
 import {
-  findUserByCredentials,
+  findUserByCredentialsWithRehydrate,
   findUserByEmail,
   listApiKeys,
   rehydrateUserFromTelegram,
@@ -83,7 +83,7 @@ export async function POST(req: NextRequest) {
     return fail('Password is required.', 400)
   }
 
-  const user = findUserByCredentials(email, password)
+  const user = await findUserByCredentialsWithRehydrate(email, password)
   if (!user) {
     // Deliberately generic — don't reveal whether the email exists.
     return fail('Incorrect email or password.', 401)

@@ -730,6 +730,50 @@ export function findUserByCredentials(
 }
 
 /**
+ * Email lookup with the same V4 index-scan slow path `authenticate()` uses
+ * for API keys. `findUserByEmail` is memory-only, so a fresh serverless
+ * instance (which never handled the register) can't see users created
+ * elsewhere — email+password login 401s cross-instance for every new user.
+ * On a local miss, scan the pinned account index and rehydrate each
+ * account's manifest until the email is found (rehydrated users stay in
+ * memory, so each instance pays the scan at most once per unknown email).
+ */
+export async function findUserByEmailWithRehydrate(email: string): Promise<UserRecord | undefined> {
+  const fast = findUserByEmail(email)
+  if (fast) return fast
+  try {
+    const idx = await getAccountIndex()
+    if (!idx) return undefined
+    for (const entry of Object.values(idx.accounts)) {
+      await rehydrateAccountFromTelegram(entry.userId)
+      const hit = findUserByEmail(email)
+      if (hit) return hit
+    }
+  } catch {
+    // Rehydrate failure surfaces as a plain miss — the caller reports its
+    // generic auth error (same as a wrong email).
+  }
+  return undefined
+}
+
+/**
+ * Credential check with cross-instance email discovery. Same contract as
+ * `findUserByCredentials`, but a fresh instance can still verify users
+ * registered elsewhere.
+ */
+export async function findUserByCredentialsWithRehydrate(
+  email: string,
+  password: string,
+): Promise<UserRecord | null> {
+  const fast = findUserByCredentials(email, password)
+  if (fast) return fast
+  const user = await findUserByEmailWithRehydrate(email)
+  if (!user) return null
+  if (!verifyPassword(password, user.passwordHash)) return null
+  return user
+}
+
+/**
  * Set or update a user's password. Used by an authenticated "set password"
  * flow so legacy accounts (created without a password) can add one later.
  * Returns the updated user, or null if the user doesn't exist.
