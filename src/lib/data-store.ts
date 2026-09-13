@@ -39,6 +39,7 @@ import {
   fetchAccountManifest,
   sendLargeValueDocument,
   manifestContentSha,
+  throttleYieldMs,
   SYSTEM_ACCOUNT_ID,
   type AccountIndex,
   type AccountIndexEntry,
@@ -2171,6 +2172,10 @@ export async function syncAccountManifestToTelegram(
   userId: string,
   opts?: { scheduleRepair?: boolean },
 ): Promise<AccountIndexEntry | null> {
+  // Throttle yield: Telegram throttled THIS instance inside the live
+  // window — make ZERO calls (calling in re-violates and EXTENDS it, which
+  // is how one failed op spawned minutes of self-sustaining swarm).
+  if (throttleYieldMs() > 0) return null
   // Fetch-merge-pin with pin-race + flood retry. NEVER upload a partial
   // local-only manifest over durable state (the old last-pin-wins clobber
   // that wiped other instances' keys). Flood failures RETRY with backoff

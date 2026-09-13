@@ -196,6 +196,20 @@ export function lastThrottleInfo(): { retryAfterSecs: number; observedAt: number
   return lastThrottle
 }
 
+/**
+ * Milliseconds remaining in Telegram's current throttle window on THIS
+ * instance (retry_after + 2s margin), or 0 when there is no live throttle.
+ * Sync funnels check this FIRST and yield (no calls at all) while it is
+ * positive: calling into a live throttle re-violates and EXTENDS it, which
+ * is how one failed op used to spawn minutes of self-sustaining swarm.
+ */
+export function throttleYieldMs(): number {
+  if (!lastThrottle) return 0
+  const endsAt = lastThrottle.observedAt + (lastThrottle.retryAfterSecs + 2) * 1000
+  const remaining = endsAt - Date.now()
+  return remaining > 0 ? remaining : 0
+}
+
 async function breakerFetch(url: string, init?: RequestInit): Promise<Response> {
   if (Date.now() < breakerOpenUntil) return fakeFloodResponse()
   try {
