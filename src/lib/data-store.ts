@@ -2103,9 +2103,18 @@ function schedulePostVerifyRepair(userId: string, pinnedRev: number): void {
         restoreAccountManifest(merged)
         const sent = await sendAccountManifest(merged)
         if (!sent) continue
-        const entry = await pinAccountIndex(idx, userId, sent.messageId, sent.fileId, merged)
-        if (!entry) continue
-        rev = entry.messageId
+        idx.accounts[userId] = {
+          userId,
+          messageId: sent.messageId,
+          fileId: sent.fileId,
+          bytes: sent.bytes,
+          recordCount: (merged.records ?? []).length,
+          updatedAt: new Date().toISOString(),
+        }
+        idx.exportedAt = new Date().toISOString()
+        const pinnedId = await pinAccountIndex(idx)
+        if (!pinnedId) continue
+        rev = sent.messageId
         lastDurableRev.set(userId, rev)
       }
     } catch {
