@@ -2125,37 +2125,82 @@ async function fetchBase(fileId: string): Promise<AccountManifest | null> {
  * and re-pin. Merges are unions, so overlapping repairs converge
  * monotonically instead of fighting.
  *
- * Persistent (up to 40 rounds x 5s — retries until the function freezes)
- * and fully background — client latency unaffected. Floods can outlast a
- * 3-round repair and strand a verified write off-tip FOREVER (nothing else
- * re-pushes that instance's memory), so the repair must outlast floods.
- * Never throws.
+ * Persistent (up to 12 rounds x 10s) and fully background — client latency
+ * unaffected. Floods can outlast a 3-round repair and strand a verified
+ * write off-tip FOREVER (nothing else re-pushes that instance's memory),
+ * so the repair must outlast floods. Never throws.
+ *
+ * CALM (learned live): blind re-pinning on every "tip moved" duels with
+ * fellow repairs/syncs — each treats the other's fresh pin as a rival
+ * overwrite and re-pins, a 40-round self-sustaining flood that trips the
+ * breaker and starves real writes. So: single-flight per account (a second
+ * schedule just advances the running repair's target), fresh tips are
+ * ADOPTED (someone is actively converging right now — don't pile on), and
+ * a merge-compare proves our state is inside the tip before adopting
+ * forever (else our keys could strand silently under a live rival).
  */
+const activeRepairs = new Map<string, { targetRev: number }>()
 function schedulePostVerifyRepair(userId: string, pinnedRev: number): void {
+  const already = activeRepairs.get(userId)
+  if (already) {
+    if (pinnedRev > already.targetRev) already.targetRev = pinnedRev
+    return
+  }
+  const state = { targetRev: pinnedRev }
+  activeRepairs.set(userId, state)
   const repair = async (): Promise<unknown> => {
     try {
-      let rev = pinnedRev
-      for (let round = 0; round < 40; round++) {
-        await sleepMs(5000)
+      let freshAdoptions = 0
+      for (let round = 0; round < 12; round++) {
+        await sleepMs(10000)
         const idx = await fetchFreshIndex()
         if (!idx) continue
         const cur = idx.accounts[userId]
         // Still the tip — nobody overwrote us. Done.
-        if (cur && cur.messageId === rev) return null
-        console.warn(
-          `[store] post-verify repair for ${userId}: tip moved (round ${round + 1}) — re-merging`,
-        )
+        if (cur && cur.messageId === state.targetRev) return null
+        const tipAgeMs = cur ? Date.now() - Date.parse(cur.updatedAt ?? '') : NaN
+        if (cur && Number.isFinite(tipAgeMs) && tipAgeMs < 90000) {
+          // Fresh tip: a fellow sync/repair pinned seconds ago and is
+          // likely still converging — adopt it instead of dueling.
+          state.targetRev = cur.messageId
+          freshAdoptions++
+          if (freshAdoptions < 3) continue
+          // Adopted 3x yet still divergent: prove our state is actually
+          // INSIDE the tip (merge adds nothing) before adopting forever.
+          freshAdoptions = 0
+          try {
+            const tip = cur.fileId ? await fetchBase(cur.fileId) : null
+            const local = buildAccountManifest(userId)
+            if (
+              tip &&
+              local &&
+              manifestContentSha(mergeAccountManifests(local, tip)) === manifestContentSha(tip)
+            ) {
+              lastDurableRev.set(userId, cur.messageId)
+              return null
+            }
+          } catch {
+            // Compare failed — fall through to a genuine re-merge below.
+          }
+        } else {
+          console.warn(
+            `[store] post-verify repair for ${userId}: tip moved (round ${round + 1}) — re-merging`,
+          )
+        }
         // Full VERIFIED sync (fetch-merge-pin-verify with retries). An
         // open-loop pin here would just join the clobber race against rival
         // repairs — the verify/retry loop is what makes rounds converge.
         const entry = await syncAccountManifestToTelegram(userId, { scheduleRepair: false })
         if (entry) {
-          rev = entry.messageId
-          lastDurableRev.set(userId, rev)
+          state.targetRev = entry.messageId
+          lastDurableRev.set(userId, entry.messageId)
+          freshAdoptions = 0
         }
       }
     } catch {
       // Background repair must never throw.
+    } finally {
+      if (activeRepairs.get(userId) === state) activeRepairs.delete(userId)
     }
     return null
   }
@@ -2295,8 +2340,18 @@ export async function syncAccountManifestToTelegram(
     // after our fetch. FRESH read; ONLY an explicit match is success. An
     // UNREADABLE verify (flood) is NOT accepted (that turned lost races
     // into false-durable writes) — it fails the attempt.
-    const verify = await fetchFreshIndex()
-    const current = verify?.accounts[userId]
+    // PATIENCE: Telegram's pin propagation lags intermittently (getChat
+    // returns the PRE-pin index for a few seconds after a landed pin).
+    // A single immediate read turned that lag into a false "race" → full
+    // re-upload + re-pin → repair storm. Poll briefly; strictness kept
+    // (explicit match still required, just not on the first try).
+    let verify = await fetchFreshIndex()
+    let current = verify?.accounts[userId]
+    for (let v = 0; v < 2 && !(verify && current && current.messageId === sent.messageId); v++) {
+      await sleepMs(3000)
+      verify = await fetchFreshIndex()
+      current = verify?.accounts[userId]
+    }
     if (verify && current && current.messageId === sent.messageId) {
       // NOTE: superseded docs are intentionally NOT deleted. Deleting them
       // racy-breaks concurrent readers mid-download (fetch index → victim
