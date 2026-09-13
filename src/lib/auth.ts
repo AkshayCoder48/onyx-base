@@ -338,8 +338,10 @@ export async function authenticate(
     const idx = await getAccountIndex()
     if (idx) {
       // V4: iterate accounts, fetch each manifest, retry the key lookup after each.
+      let searchedAny = false
       for (const entry of Object.values(idx.accounts)) {
-        await rehydrateAccountFromTelegram(entry.userId)
+        const r = await rehydrateAccountFromTelegram(entry.userId)
+        if (r.attempted && !r.error) searchedAny = true
         result = findUserByApiKey(token)
         if (result) {
           // Apply the same admin-grant check as the fast path.
@@ -352,6 +354,13 @@ export async function authenticate(
             isAdmin: Boolean(adminGrant),
           }
         }
+      }
+      // Honest auth: if EVERY manifest download failed (Telegram flood),
+      // we searched NOTHING — that is a 503 (backend unreachable), never
+      // a 401 (which would blame the user's valid key). 401 is only for
+      // "searched and absent".
+      if (!searchedAny && Object.keys(idx.accounts).length > 0) {
+        throw new Error('all account manifest downloads failed (Telegram flood/unreachable)')
       }
     } else {
       // V3 fallback: pull the whole-world document.
