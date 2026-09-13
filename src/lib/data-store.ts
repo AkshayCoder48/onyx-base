@@ -2070,15 +2070,18 @@ async function fetchBase(fileId: string): Promise<AccountManifest | null> {
  * and re-pin. Merges are unions, so overlapping repairs converge
  * monotonically instead of fighting.
  *
- * Bounded (3 rounds x 3s) and fully background — client latency unaffected.
+ * Persistent (up to 40 rounds x 5s — retries until the function freezes)
+ * and fully background — client latency unaffected. Floods can outlast a
+ * 3-round repair and strand a verified write off-tip FOREVER (nothing else
+ * re-pushes that instance's memory), so the repair must outlast floods.
  * Never throws.
  */
 function schedulePostVerifyRepair(userId: string, pinnedRev: number): void {
   const repair = async (): Promise<unknown> => {
     try {
       let rev = pinnedRev
-      for (let round = 0; round < 3; round++) {
-        await sleepMs(3000)
+      for (let round = 0; round < 40; round++) {
+        await sleepMs(5000)
         const idx = await fetchFreshIndex()
         if (!idx) continue
         const cur = idx.accounts[userId]
@@ -2225,6 +2228,21 @@ export async function syncAccountManifestToTelegram(
       // (Skipped when WE are the repair — chained after()s don't extend
       // serverless lifetime, so repairs must not schedule repairs.)
       if (opts?.scheduleRepair !== false) schedulePostVerifyRepair(userId, sent.messageId)
+      // INLINE GRACE (contended writes only): rivals were active (we needed
+      // attempt 1+), so a stale-fork overwrite may already be in flight.
+      // Wait 4s, re-check the tip, and re-merge inline if we lost — one
+      // synchronous recovery shot before responding. Quiet writes skip this
+      // (the persistent background repair covers their tiny race window).
+      if (attempt > 0 && opts?.scheduleRepair !== false) {
+        await sleepMs(4000)
+        const tip = await fetchFreshIndex()
+        const tipEntry = tip?.accounts[userId]
+        if (tip && tipEntry && tipEntry.messageId !== sent.messageId) {
+          console.warn(`[store] grace round for ${userId}: lost tip during verify — re-merging inline`)
+          const recovered = await syncAccountManifestToTelegram(userId)
+          if (recovered) return recovered
+        }
+      }
       return entry
     }
     console.warn(`[store] sync pin race/unverified for ${userId} (attempt ${attempt + 1}) — re-merging`)
@@ -2457,6 +2475,8 @@ const lastSyncEndAt = new Map<string, number>()
 const lastDurableRev = new Map<string, number>()
 /** Canonical content sha of what this instance last pinned per account. */
 const lastPinnedSha = new Map<string, string>()
+/** Consecutive debounced-sync failures per account (bounds auto-retries). */
+const accountSyncRetries = new Map<string, number>()
 
 /**
  * Sync with a hard global deadline. Layered Telegram waits can stack past
@@ -2496,6 +2516,21 @@ function runAccountSyncNow(userId: string): Promise<boolean> {
         ok = false
       }
     } while (accountSyncDirty.has(userId))
+    // Failure backstop (warm instances): a delayed re-run. API callers get
+    // durable:false and retry idempotently (primary path); this catches
+    // debounced-path failures (flood at +1s) without client involvement.
+    // Bounded at 3 (fresh budget per new write, reset above).
+    if (!ok) {
+      const retries = (accountSyncRetries.get(userId) ?? 0) + 1
+      accountSyncRetries.set(userId, retries)
+      if (retries <= 3) {
+        setTimeout(() => {
+          void runAccountSyncNow(userId)
+        }, 15000)
+      }
+    } else {
+      accountSyncRetries.delete(userId)
+    }
     lastSyncEndAt.set(userId, Date.now())
     return ok
   })().finally(() => {
@@ -2534,6 +2569,8 @@ export async function flushAccountSync(userId: string): Promise<boolean> {
 }
 
 export function scheduleAccountSync(userId: string): void {
+  // New write = fresh retry budget for the failure backstop below.
+  accountSyncRetries.delete(userId)
   // If we're not yet in V4 mode, probe the pinned account index ONCE before
   // deciding — never blindly fall back to the V3 push (see ensureV4Probed).
   if (!v4ModeActive) {

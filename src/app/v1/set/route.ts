@@ -42,12 +42,21 @@ export async function POST(req: NextRequest) {
 
   // If value already came typed (JSON), keep it; else coerce from string.
   const isRawString = typeof body.value === 'string'
-  const result = await setKey(user, {
-    key,
-    collection,
-    source: 'api',
-    json: isRawString ? coerceValue(body.value as string).value : body.value,
-  })
+  try {
+    const result = await setKey(user, {
+      key,
+      collection,
+      source: 'api',
+      json: isRawString ? coerceValue(body.value as string).value : body.value,
+    })
 
-  return ok({ key: result.key, value: result.value, type: result.valueType, collection: result.collection, durable: result.durable === true })
+    return ok({ key: result.key, value: result.value, type: result.valueType, collection: result.collection, durable: result.durable === true })
+  } catch (err) {
+    // Legible 500s: surface the crash reason so failures are diagnosable
+    // from the response alone (no log access in this environment).
+    const msg = err instanceof Error ? err.message : String(err)
+    const stackTop = err instanceof Error ? (err.stack?.split('\n').slice(1, 3).join(' <- ') ?? '') : ''
+    console.error(`[v1/set] crash for ${collection}/${key}:`, err)
+    return fail(`set failed: ${msg}${stackTop ? ` (${stackTop.slice(0, 200)})` : ''}`, 500)
+  }
 }
