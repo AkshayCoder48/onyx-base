@@ -6,7 +6,7 @@ import {
   authenticate,
   isValidEmail,
 } from '@/lib/auth'
-import { createUser, findUserByDbId, findUserByEmail } from '@/lib/data-store'
+import { createUser, deleteUserByDbId, findUserByDbId, findUserByEmail, flushAccountSync } from '@/lib/data-store'
 import { logAction } from '@/lib/kv'
 import { sendEventMessage } from '@/lib/telegram'
 import { verifyEmail } from '@/lib/email-verify'
@@ -150,6 +150,29 @@ export async function POST(req: NextRequest) {
     `account created via ${source}${email ? ` (${email})` : ''}`,
     source,
   )
+
+  // ── Durability gate: atomic register ──
+  // The user must reach the Telegram account manifest, or they exist only
+  // on THIS instance (logins on any other instance flap). Await one V4
+  // per-account sync (merge-based: a local-only user always survives the
+  // merge). On failure roll the local user back and answer 503 so the
+  // caller retries cleanly — never a fake success.
+  let identitySynced = false
+  try {
+    identitySynced = await Promise.race([
+      flushAccountSync(dbUser.userId),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 50000)),
+    ])
+  } catch (err) {
+    console.error('[auth/register] identity sync failed:', err)
+  }
+  if (!identitySynced) {
+    deleteUserByDbId(dbUser.id)
+    return fail(
+      'Account could not be saved to the Telegram backup (network/flood). Nothing was created — please retry in a minute.',
+      503,
+    )
+  }
 
   // Mirror the signup event to the Telegram backup channel.
   void sendEventMessage({

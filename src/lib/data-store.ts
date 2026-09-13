@@ -680,6 +680,22 @@ export function createUser(opts: {
   return { user, apiKey, apiKeyRecord: apiKey }
 }
 
+/**
+ * Remove a user and all of their API keys (rollback for a failed atomic
+ * register — the user never reached Telegram, so no sync is needed).
+ * Returns whether a user was removed.
+ */
+export function deleteUserByDbId(dbUserId: string): boolean {
+  const idx = store.users.findIndex((u) => u.id === dbUserId)
+  if (idx === -1) return false
+  store.users.splice(idx, 1)
+  for (let i = store.apiKeys.length - 1; i >= 0; i--) {
+    if (store.apiKeys[i].userId === dbUserId) store.apiKeys.splice(i, 1)
+  }
+  saveToDisk()
+  return true
+}
+
 export function findUserByDbId(dbUserId: string): UserRecord | undefined {
   return store.users.find((u) => u.id === dbUserId)
 }
