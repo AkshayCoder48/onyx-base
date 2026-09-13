@@ -39,6 +39,7 @@ import {
   fetchAccountManifest,
   sendLargeValueDocument,
   manifestContentSha,
+  notePacingThrottle,
   throttleYieldMs,
   SYSTEM_ACCOUNT_ID,
   type AccountIndex,
@@ -2229,6 +2230,19 @@ export async function syncAccountManifestToTelegram(
     // one record) hashes differently and takes the full pin path.
     if (existing && revUnchanged && manifestContentSha(local) === lastPinnedSha.get(userId)) {
       return existing
+    }
+    // COOPERATIVE INDEX PACING: Telegram throttles same-index writes to
+    // ~1/30s GLOBALLY per chat (proven live: a 30s-interval external ticker
+    // alone saturates it and 429s everything else). If the tip is younger
+    // than that, yield with a precise backoff instead of colliding — our
+    // keys ride the next successful merge. This bounds index writes by
+    // construction no matter how many writers hammer. (The short-circuit
+    // above already returned for no-change syncs, so reaching here means we
+    // have real bytes to land.)
+    const paceAgeMs = Date.now() - Date.parse(idx.exportedAt || '')
+    if (Number.isFinite(paceAgeMs) && paceAgeMs < 35000) {
+      notePacingThrottle(Math.ceil((35000 - paceAgeMs) / 1000))
+      return null
     }
     let base: AccountManifest | null = null
     if (existing && !revUnchanged) {

@@ -206,10 +206,19 @@ export function DatabaseView() {
     if (!deleteTarget) return
     setDeleting(true)
     try {
-      const res = await api<{ deleted?: boolean; durable?: boolean }>(
-        `/api/dashboard/records/${encodeURIComponent(deleteTarget.key)}?collection=${encodeURIComponent(deleteTarget.collection)}`,
-        { method: 'DELETE' },
-      )
+      const url = `/api/dashboard/records/${encodeURIComponent(deleteTarget.key)}?collection=${encodeURIComponent(deleteTarget.collection)}`
+      let res = await api<{ deleted?: boolean; durable?: boolean }>(url, { method: 'DELETE' })
+      // Pacing yields are transient (~1/35s global writes) — re-try the
+      // delete a few times (each attempt also spreads the tombstone to the
+      // instance it lands on) before reporting sync-pending.
+      for (let i = 0; res.durable === false && i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 12000))
+        try {
+          res = await api<{ deleted?: boolean; durable?: boolean }>(url, { method: 'DELETE' })
+        } catch {
+          break
+        }
+      }
       if (res.durable === false) {
         toast.warning(`Deleted ${deleteTarget.key} locally — sync pending`, {
           description: 'The delete will propagate to the Telegram backup automatically.',

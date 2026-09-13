@@ -71,10 +71,25 @@ export function RecordDialog({ open, onOpenChange, record }: Props) {
     }
     setSaving(true)
     try {
-      const res = await api<{ record?: { durable?: boolean } }>('/api/dashboard/records', {
+      const payload = JSON.stringify({ key: key.trim(), value: buildValue(), collection })
+      let res = await api<{ record?: { durable?: boolean } }>('/api/dashboard/records', {
         method: 'POST',
-        body: JSON.stringify({ key: key.trim(), value: buildValue(), collection }),
+        body: payload,
       })
+      // Pacing yields (durable:false) are transient by construction (index
+      // writes are globally paced ~1/35s) — silently re-try the idempotent
+      // upsert a few times before telling the user it's still pending.
+      for (let i = 0; res.record?.durable === false && i < 3; i++) {
+        await new Promise((r) => setTimeout(r, 12000))
+        try {
+          res = await api<{ record?: { durable?: boolean } }>('/api/dashboard/records', {
+            method: 'POST',
+            body: payload,
+          })
+        } catch {
+          break
+        }
+      }
       if (res.record?.durable === false) {
         toast.warning('Saved locally — Telegram sync pending', {
           description: 'The record is stored on this server but not yet backed up. It will sync automatically.',

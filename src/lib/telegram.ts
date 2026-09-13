@@ -210,6 +210,20 @@ export function throttleYieldMs(): number {
   return remaining > 0 ? remaining : 0
 }
 
+/**
+ * Record a SELF-IMPOSED pacing throttle (cooperative index pacing yielded
+ * because the tip is younger than the global write interval). Same shape
+ * as a Telegram throttle so clients back off uniformly — it IS a throttle,
+ * just one we chose instead of one Telegram forced on us.
+ */
+export function notePacingThrottle(retryAfterSecs: number): void {
+  lastThrottle = {
+    retryAfterSecs: Math.max(1, Math.min(retryAfterSecs, 120)),
+    observedAt: Date.now(),
+    path: '(cooperative pacing)',
+  }
+}
+
 async function breakerFetch(url: string, init?: RequestInit): Promise<Response> {
   if (Date.now() < breakerOpenUntil) return fakeFloodResponse()
   try {
