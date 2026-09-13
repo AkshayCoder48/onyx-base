@@ -115,7 +115,7 @@ function RailItem({ item, active, onClick }: { item: NavItem; active: boolean; o
           : 'text-[#8a7768] hover:text-[#1c1512] hover:bg-white/60 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.6)]',
       )}
     >
-      <Icon className="size-[22px]" strokeWidth={active ? 2.2 : 2} />
+      <Icon className="size-[22px]" />
     </button>
   )
 }
