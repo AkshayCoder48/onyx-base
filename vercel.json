@@ -8,7 +8,7 @@
     "env": {
       "DATABASE_URL": "file:/tmp/onyxbase.db",
       "NEXT_PUBLIC_APP_NAME": "Onyx Base",
-      "NEXT_PUBLIC_APP_URL": "https://onyxbase.vercel.app"
+      "NEXT_PUBLIC_APP_URL": "https://onyxbase-chi.vercel.app"
     }
   }
 }
