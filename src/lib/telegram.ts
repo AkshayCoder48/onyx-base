@@ -122,6 +122,85 @@ function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 5000)
   return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer))
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** Extract Telegram's flood-wait (`retry_after`, seconds) from a Bot API body. */
+function retryAfterSeconds(data: unknown): number | null {
+  if (typeof data === 'object' && data !== null) {
+    const d = data as { parameters?: { retry_after?: unknown }; description?: unknown }
+    const ra = d.parameters?.retry_after
+    if (typeof ra === 'number' && ra > 0) return Math.min(ra, 30)
+    if (typeof d.description === 'string') {
+      const m = d.description.match(/retry after (\d+)/i)
+      if (m) return Math.min(parseInt(m[1], 10), 30)
+    }
+  }
+  return null
+}
+
+interface BotJsonResponse {
+  ok: boolean
+  description?: string
+  result?: any
+}
+
+/**
+ * GET JSON from the Bot API with ONE flood-aware retry: on 429, wait out
+ * Telegram's cooldown (capped at 30s) and retry once. Returns the parsed
+ * body, or null on transport failure. Write bursts self-serialize through
+ * this instead of failing outright.
+ */
+async function getBotJson(url: string): Promise<BotJsonResponse | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url)
+      const data = (await res.json().catch(() => null)) as BotJsonResponse | null
+      if (!data) return null
+      if (data.ok) return data
+      const wait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
+      if (wait > 0 && attempt === 0) {
+        await sleep(wait * 1000)
+        continue
+      }
+      return data
+    } catch {
+      if (attempt === 0) continue
+      return null
+    }
+  }
+  return null
+}
+
+/**
+ * POST JSON to the Bot API with ONE flood-aware retry (same contract as
+ * getBotJson). Used by pin/edit flows.
+ */
+async function postBotJson(url: string, body: unknown): Promise<BotJsonResponse | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = (await res.json().catch(() => null)) as BotJsonResponse | null
+      if (!data) return null
+      if (data.ok) return data
+      const wait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
+      if (wait > 0 && attempt === 0) {
+        await sleep(wait * 1000)
+        continue
+      }
+      return data
+    } catch {
+      if (attempt === 0) continue
+      return null
+    }
+  }
+  return null
+}
+}
+
 /**
  * Fire-and-forget wrapper: runs an async function on the next tick without
  * any chance of an unhandled rejection crashing the process. All Telegram
@@ -691,9 +770,8 @@ export async function fetchAccountIndex(
   if (!isTelegramConfigured(chatId, botTokenOverride)) return null
   const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
   try {
-    const chatRes = await fetchWithTimeout(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)
-    const chat = (await chatRes.json()) as GetChatResult
-    if (!chat.ok || !chat.result) return null
+    const chat = (await getBotJson(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)) as GetChatResult | null
+    if (!chat || !chat.ok || !chat.result) return null
     const pinned = chat.result.pinned_message
     if (!pinned) return null
     // The index is a TEXT message (small). If the pin is a document, it's a
@@ -727,49 +805,77 @@ export async function pinAccountIndex(
   const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
   const text = `${ACCOUNT_INDEX_MARKER}\n${JSON.stringify(index)}`
   try {
-    const chatRes = await fetchWithTimeout(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)
-    const chat = (await chatRes.json()) as GetChatResult
-    const pinned = chat.result?.pinned_message
+    const chat = (await getBotJson(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)) as GetChatResult | null
+    const pinned = chat?.result?.pinned_message
     const pinnedText = pinned?.text ?? null
     const pinnedIsOurIndex = !!pinned && !!pinnedText && pinnedText.startsWith(ACCOUNT_INDEX_MARKER)
     if (pinnedIsOurIndex && pinned) {
-      const editRes = await fetchWithTimeout(`${apiBase}/editMessageText`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chat_id: chatId,
-          message_id: pinned.message_id,
-          text,
-          parse_mode: 'HTML',
-          disable_web_page_preview: true,
-        }),
+      const editData = await postBotJson(`${apiBase}/editMessageText`, {
+        chat_id: chatId,
+        message_id: pinned.message_id,
+        text,
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
       })
-      const editData = (await editRes.json()) as { ok: boolean }
-      if (editData.ok) return pinned.message_id
+      if (editData?.ok) return pinned.message_id
     }
-    const sendRes = await fetchWithTimeout(`${apiBase}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+    const sendData = await postBotJson(`${apiBase}/sendMessage`, {
+      chat_id: chatId,
+      text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
     })
-    const sendData = (await sendRes.json()) as { ok: boolean; description?: string; result?: { message_id: number } }
-    if (!sendData.ok || !sendData.result) {
-      console.error('[telegram] pinAccountIndex sendMessage failed:', sendData.description)
+    if (!sendData?.ok || !sendData.result) {
+      console.error('[telegram] pinAccountIndex sendMessage failed:', sendData?.description)
       return null
     }
-    const newMessageId = sendData.result.message_id
-    const pinRes = await fetchWithTimeout(`${apiBase}/pinChatMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, message_id: newMessageId, disable_notification: true }),
+    const newMessageId = (sendData.result as { message_id: number }).message_id
+    const pinData = await postBotJson(`${apiBase}/pinChatMessage`, {
+      chat_id: chatId,
+      message_id: newMessageId,
+      disable_notification: true,
     })
-    const pinData = (await pinRes.json()) as { ok: boolean; description?: string }
-    if (!pinData.ok) console.warn('[telegram] pinAccountIndex pinChatMessage failed:', pinData.description)
+    if (!pinData?.ok) console.warn('[telegram] pinAccountIndex pinChatMessage failed:', pinData?.description)
     return newMessageId
   } catch (err) {
     console.error('[telegram] pinAccountIndex error:', err)
     return null
   }
+}
+
+/**
+ * POST a multipart form (sendDocument) with ONE flood-aware retry: on 429,
+ * wait out Telegram's cooldown (capped at 30s) and rebuild + resend once
+ * (a consumed FormData can't be resent, hence the builder callback).
+ */
+async function sendDocumentWithRetry(
+  apiBase: string,
+  buildForm: () => FormData,
+): Promise<{ message_id: number; document?: { file_id: string } } | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      // Raw fetch (no 5s timeout) — multi-MB uploads need time.
+      const sendRes = await fetch(`${apiBase}/sendDocument`, { method: 'POST', body: buildForm() })
+      const sendData = (await sendRes.json().catch(() => null)) as {
+        ok: boolean
+        description?: string
+        result?: { message_id: number; document?: { file_id: string } }
+      } | null
+      if (!sendData) return null
+      if (sendData.ok && sendData.result?.document) return sendData.result
+      const wait = sendRes.status === 429 ? (retryAfterSeconds(sendData) ?? 5) : 0
+      if (wait > 0 && attempt === 0) {
+        await sleep(wait * 1000)
+        continue
+      }
+      console.error('[telegram] sendDocument failed:', sendData.description)
+      return null
+    } catch (err) {
+      console.error('[telegram] sendDocument error:', err)
+      return null
+    }
+  }
+  return null
 }
 
 /**
@@ -807,26 +913,21 @@ export async function sendAccountManifest(
         /* swallow — stale message will be orphaned, not fatal */
       }
     }
-    const blob = new Blob([Buffer.from(json, 'utf-8')], { type: 'application/json' })
     const fileName = `onyxbase-account-${manifest.userId}.json`
-    const form = new FormData()
-    form.append('chat_id', chatId)
-    form.append('document', blob, fileName)
-    form.append('caption', caption.slice(0, 1024))
-    form.append('disable_notification', 'true')
-    const sendRes = await fetch(`${apiBase}/sendDocument`, { method: 'POST', body: form })
-    const sendData = (await sendRes.json()) as {
-      ok: boolean
-      description?: string
-      result?: { message_id: number; document?: { file_id: string } }
+    const buildForm = () => {
+      const blob = new Blob([Buffer.from(json, 'utf-8')], { type: 'application/json' })
+      const form = new FormData()
+      form.append('chat_id', chatId)
+      form.append('document', blob, fileName)
+      form.append('caption', caption.slice(0, 1024))
+      form.append('disable_notification', 'true')
+      return form
     }
-    if (!sendData.ok || !sendData.result || !sendData.result.document) {
-      console.error('[telegram] sendAccountManifest sendDocument failed:', sendData.description)
-      return null
-    }
+    const result = await sendDocumentWithRetry(apiBase, buildForm)
+    if (!result || !result.document) return null
     return {
-      messageId: sendData.result.message_id,
-      fileId: sendData.result.document.file_id,
+      messageId: result.message_id,
+      fileId: result.document.file_id,
       bytes,
     }
   } catch (err) {
@@ -853,26 +954,20 @@ export async function sendLargeValueDocument(
   const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
   const bytes = Buffer.byteLength(valueJson, 'utf-8')
   try {
-    const blob = new Blob([Buffer.from(valueJson, 'utf-8')], { type: 'application/json' })
-    const form = new FormData()
-    form.append('chat_id', chatId)
-    form.append('document', blob, `onyxbase-value-${Date.now()}.json`)
-    form.append('caption', `CLOUDKV_LARGE_VALUE\n${label}`.slice(0, 1024))
-    form.append('disable_notification', 'true')
-    // Raw fetch (no 5s timeout) — multi-MB uploads need time.
-    const sendRes = await fetch(`${apiBase}/sendDocument`, { method: 'POST', body: form })
-    const sendData = (await sendRes.json()) as {
-      ok: boolean
-      description?: string
-      result?: { message_id: number; document?: { file_id: string } }
+    const buildForm = () => {
+      const blob = new Blob([Buffer.from(valueJson, 'utf-8')], { type: 'application/json' })
+      const form = new FormData()
+      form.append('chat_id', chatId)
+      form.append('document', blob, `onyxbase-value-${Date.now()}.json`)
+      form.append('caption', `CLOUDKV_LARGE_VALUE\n${label}`.slice(0, 1024))
+      form.append('disable_notification', 'true')
+      return form
     }
-    if (!sendData.ok || !sendData.result || !sendData.result.document) {
-      console.error('[telegram] sendLargeValueDocument sendDocument failed:', sendData.description)
-      return null
-    }
+    const result = await sendDocumentWithRetry(apiBase, buildForm)
+    if (!result || !result.document) return null
     return {
-      messageId: sendData.result.message_id,
-      fileId: sendData.result.document.file_id,
+      messageId: result.message_id,
+      fileId: result.document.file_id,
       bytes,
     }
   } catch (err) {

@@ -2078,9 +2078,11 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
     const pinnedId = await pinAccountIndex(idx)
     if (!pinnedId) return null
     // Verify we still hold the pin — another instance may have pinned
-    // after our fetch (lost race → re-merge + re-pin, nothing dropped
+    // after our fetch (proven loss → re-merge + re-pin; nothing is dropped
     // because our data is in our uploaded doc AND our local store, and the
-    // next merge picks it up from local).
+    // next merge picks it up from local). An UNREADABLE verify (flood /
+    // network) is ACCEPTED, not retried: merge is the real safety net, and
+    // spinning extra calls into a 429 storm only deepens it.
     let verify: AccountIndex | null = null
     try {
       verify = await fetchAccountIndex()
@@ -2088,7 +2090,7 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
       verify = null
     }
     const current = verify?.accounts[userId]
-    if (current && current.messageId === sent.messageId) {
+    if (!verify || (current && current.messageId === sent.messageId)) {
       if (existing && existing.messageId !== sent.messageId) {
         void deleteTelegramMessage(existing.messageId).catch(() => false)
       }
@@ -2300,12 +2302,22 @@ function ensureV4Probed(): Promise<void> {
  * requested mid-flight can never be silently swallowed by the dedupe.
  * Resolves true when the final push pinned durable state, false otherwise.
  */
+/**
+ * Last sync start/end per account (ms). Lets the after-response flush skip
+ * when a full sync already ran entirely AFTER the scheduling write (its data
+ * is included) — without this, every API write pays 2-3 full syncs
+ * (1 awaited + after-hooks), tripling Telegram traffic into 429 storms.
+ */
+const lastSyncStartAt = new Map<string, number>()
+const lastSyncEndAt = new Map<string, number>()
+
 function runAccountSyncNow(userId: string): Promise<boolean> {
   const existing = accountSyncInFlight.get(userId)
   if (existing) {
     accountSyncDirty.add(userId)
     return existing as Promise<boolean>
   }
+  lastSyncStartAt.set(userId, Date.now())
   const p = (async () => {
     let ok = false
     do {
@@ -2317,6 +2329,7 @@ function runAccountSyncNow(userId: string): Promise<boolean> {
         ok = false
       }
     } while (accountSyncDirty.has(userId))
+    lastSyncEndAt.set(userId, Date.now())
     return ok
   })().finally(() => {
     accountSyncInFlight.delete(userId)
@@ -2351,6 +2364,7 @@ export function scheduleAccountSync(userId: string): void {
     })
     return
   }
+  const scheduledAt = Date.now()
   const existing = accountSyncTimers.get(userId)
   if (existing) clearTimeout(existing)
   const timer = setTimeout(() => {
@@ -2358,8 +2372,16 @@ export function scheduleAccountSync(userId: string): void {
     void runAccountSyncNow(userId)
   }, 1000)
   accountSyncTimers.set(userId, timer)
-  // Serverless freeze guard — flush before this function gets frozen.
-  keepAliveUntilSyncFlushed(() => flushAccountSync(userId))
+  // Serverless freeze guard — flush before this function gets frozen, unless
+  // a full sync already ran entirely after this write (skip is safe: same
+  // instance memory, so the later sync necessarily included this write).
+  keepAliveUntilSyncFlushed(async () => {
+    const start = lastSyncStartAt.get(userId) ?? 0
+    const end = lastSyncEndAt.get(userId) ?? 0
+    if (start > scheduledAt && end > scheduledAt) return true
+    await flushAccountSync(userId)
+    return true
+  })
 }
 
 /**
@@ -2449,27 +2471,9 @@ export function upsertRecord(
     existing.updatedAt = now
     saveToDisk()
     scheduleAccountSyncForDbUser(dbUserId)
-
-    // Edit the existing Telegram backup message.
-    const payload: TelegramPayload = {
-      owner: publicUserId,
-      collection: opts.collection,
-      key: opts.key,
-      value: JSON.parse(opts.value),
-      valueType: opts.valueType,
-      updatedAt: Math.floor(Date.now() / 1000),
-      op: 'SET',
-    }
-    if (existing.telegramMessageId) {
-      void editKvMessage(existing.telegramMessageId, payload, chatId, botToken, botApiBaseUrl)
-    } else {
-      void sendKvMessage(payload, chatId, botToken, botApiBaseUrl).then((msgId) => {
-        if (msgId) {
-          existing.telegramMessageId = msgId
-          saveToDisk()
-        }
-      })
-    }
+    // NOTE: no per-key Telegram message is sent here anymore. Nothing ever
+    // reads per-key messages back (manifests are the durable truth), and each
+    // one cost a Bot API call toward flood limits. Durability = manifest sync.
     return { record: existing, created: false }
   }
 
@@ -2487,22 +2491,7 @@ export function upsertRecord(
   store.records.push(record)
   saveToDisk()
   scheduleAccountSyncForDbUser(dbUserId)
-  const payload: TelegramPayload = {
-    owner: publicUserId,
-    collection: opts.collection,
-    key: opts.key,
-    value: JSON.parse(opts.value),
-    valueType: opts.valueType,
-    updatedAt: Math.floor(Date.now() / 1000),
-    op: 'SET',
-  }
-  void sendKvMessage(payload, chatId, botToken, botApiBaseUrl).then((msgId) => {
-    if (msgId) {
-      record.telegramMessageId = msgId
-      saveToDisk()
-    }
-  })
-
+  // NOTE: no per-key Telegram message (see above) — durability = manifest sync.
   return { record, created: true }
 }
 
