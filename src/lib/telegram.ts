@@ -124,15 +124,20 @@ function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 5000)
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** Extract Telegram's flood-wait (`retry_after`, seconds) from a Bot API body. */
+/**
+ * Extract Telegram's flood-wait (`retry_after`, seconds) from a Bot API body.
+ * Capped at 10s: longer floods must FAIL FAST (honest durable:false, client
+ * retries later) instead of sleeping out a 60s+ cooldown inside a serverless
+ * function that will be killed (and a client that will have timed out).
+ */
 function retryAfterSeconds(data: unknown): number | null {
   if (typeof data === 'object' && data !== null) {
     const d = data as { parameters?: { retry_after?: unknown }; description?: unknown }
     const ra = d.parameters?.retry_after
-    if (typeof ra === 'number' && ra > 0) return Math.min(ra, 30)
+    if (typeof ra === 'number' && ra > 0) return Math.min(ra, 10)
     if (typeof d.description === 'string') {
       const m = d.description.match(/retry after (\d+)/i)
-      if (m) return Math.min(parseInt(m[1], 10), 30)
+      if (m) return Math.min(parseInt(m[1], 10), 10)
     }
   }
   return null
@@ -159,7 +164,9 @@ async function getBotJson(url: string): Promise<BotJsonResponse | null> {
       if (data.ok) return data
       const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
       // Jitter UP so instances racing the same flood don't retry in lockstep.
-      const wait = baseWait > 0 ? Math.min(baseWait * (1 + Math.random()), 30) : 0
+      // Hard-capped: layered retries multiply, so no single wait may exceed
+      // a few seconds — sustained floods fail fast to the caller instead.
+      const wait = baseWait > 0 ? Math.min(baseWait * (1 + Math.random()), 4) : 0
       if (wait > 0 && attempt === 0) {
         await sleep(wait * 1000)
         continue
@@ -190,7 +197,9 @@ async function postBotJson(url: string, body: unknown): Promise<BotJsonResponse 
       if (data.ok) return data
       const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
       // Jitter UP so instances racing the same flood don't retry in lockstep.
-      const wait = baseWait > 0 ? Math.min(baseWait * (1 + Math.random()), 30) : 0
+      // Hard-capped: layered retries multiply, so no single wait may exceed
+      // a few seconds — sustained floods fail fast to the caller instead.
+      const wait = baseWait > 0 ? Math.min(baseWait * (1 + Math.random()), 4) : 0
       if (wait > 0 && attempt === 0) {
         await sleep(wait * 1000)
         continue
@@ -854,8 +863,9 @@ export async function pinAccountIndex(
 
 /**
  * POST a multipart form (sendDocument) with ONE flood-aware retry: on 429,
- * wait out Telegram's cooldown (capped at 30s) and rebuild + resend once
- * (a consumed FormData can't be resent, hence the builder callback).
+ * wait out Telegram's cooldown (capped at 10s by retryAfterSeconds) and
+ * rebuild + resend once (a consumed FormData can't be resent, hence the
+ * builder callback). Longer floods fail fast to the caller.
  */
 async function sendDocumentWithRetry(
   apiBase: string,
@@ -1265,7 +1275,7 @@ export async function getFileDownloadUrl(
       }
       const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
       if (baseWait > 0 && attempt === 0) {
-        await sleep(Math.min(baseWait * (1 + Math.random()), 30) * 1000)
+        await sleep(Math.min(baseWait * (1 + Math.random()), 4) * 1000)
         continue
       }
       console.error('[telegram] getFile failed:', data.description)

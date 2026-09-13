@@ -2032,22 +2032,15 @@ function sleepWithJitter(baseMs: number): Promise<void> {
  * index) or sustained flood (the subsequent pin then fails honestly, so the
  * write reports durable:false instead of a false ok).
  */
-async function fetchFreshIndexWithRetry(): Promise<AccountIndex> {
-  for (let i = 0; i < 3; i++) {
-    try {
-      const idx = await fetchAccountIndex()
-      if (idx) return idx
-    } catch {
-      // retry below
-    }
-    if (i < 2) await sleepWithJitter(800 * (i + 1))
-  }
-  return {
-    cloudkv: true as const,
-    kind: 'account-index' as const,
-    version: 4 as const,
-    exportedAt: new Date().toISOString(),
-    accounts: {},
+async function fetchFreshIndex(): Promise<AccountIndex | null> {
+  // SINGLE attempt, fail fast. Layered retries multiply worst-case latency
+  // into minutes (flood death spiral) — the sync level owns the ONE paced
+  // retry. NULL means unreadable (caller fails the attempt); NEVER synthesize
+  // an empty index (that would clobber durable state with local-only).
+  try {
+    return await fetchAccountIndex()
+  } catch {
+    return null
   }
 }
 
@@ -2056,17 +2049,13 @@ async function fetchFreshIndexWithRetry(): Promise<AccountIndex> {
  * safe to retry). Null-after-retries aborts the sync (anti-clobber: we
  * never pin a local-only merge over unreadable durable state).
  */
-async function fetchBaseWithRetry(fileId: string): Promise<AccountManifest | null> {
-  for (let i = 0; i < 3; i++) {
-    try {
-      const base = await fetchAccountManifest(fileId)
-      if (base) return base
-    } catch {
-      // retry below
-    }
-    if (i < 2) await sleepWithJitter(800 * (i + 1))
+async function fetchBase(fileId: string): Promise<AccountManifest | null> {
+  // SINGLE attempt, fail fast (see fetchFreshIndex).
+  try {
+    return await fetchAccountManifest(fileId)
+  } catch {
+    return null
   }
-  return null
 }
 
 /**
@@ -2089,7 +2078,8 @@ function schedulePostVerifyRepair(userId: string, pinnedRev: number): void {
       let rev = pinnedRev
       for (let round = 0; round < 3; round++) {
         await sleepMs(3000)
-        const idx = await fetchFreshIndexWithRetry()
+        const idx = await fetchFreshIndex()
+        if (!idx) continue
         const cur = idx.accounts[userId]
         // Still the tip — nobody overwrote us. Done.
         if (cur && cur.messageId === rev) return null
@@ -2128,15 +2118,26 @@ export async function syncAccountManifestToTelegram(
   // local-only manifest over durable state (the old last-pin-wins clobber
   // that wiped other instances' keys). Flood failures RETRY with backoff
   // (bounded) instead of instantly failing into memory-only mode.
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     // Rebuild local EVERY attempt: attempt N restores merged_N into memory,
     // so rebuilding makes local grow monotonically — keys learned from a
     // rival's base are never dropped by a later attempt's merge.
     const local = buildAccountManifest(userId)
     if (!local) return null
-    // Fresh index every attempt (bypass the per-instance cache — another
-    // instance may have pinned newer since we last looked).
-    const idx = await fetchFreshIndexWithRetry()
+    // ONE paced retry: the single inter-attempt wait lives HERE (not
+    // scattered per-op). Attempt 0 tries immediately; attempt 1 waits out
+    // the flood/contention first. Two attempts max — sustained floods fail
+    // fast (honest durable:false) and the CLIENT retries after the flood
+    // clears, instead of grinding 429s into a minutes-long death spiral.
+    if (attempt > 0) await sleepWithJitter(5000)
+    // Fresh index every attempt — another instance may have pinned newer
+    // since we last looked. NULL (unreadable) aborts the attempt: proceeding
+    // with an assumed-empty index would clobber durable state.
+    const idx = await fetchFreshIndex()
+    if (!idx) {
+      console.warn(`[store] sync index unreadable for ${userId} (attempt ${attempt + 1}) — retrying`)
+      continue
+    }
     const existing = idx.accounts[userId]
     // FAST PATH: index still points at the rev we last pinned/restored, so
     // no other instance wrote since — durable base ⊆ local state, skip the
@@ -2149,7 +2150,7 @@ export async function syncAccountManifestToTelegram(
     // which Telegram's same-message edit limits love) instead of stampeding
     // into 429s. Quiet writes (cold tip) and our own tip proceed undelayed;
     // the final attempt never yields (bounded wait).
-    if (existing && !revUnchanged && attempt < 3) {
+    if (existing && !revUnchanged && attempt < 1) {
       const tipAgeMs = Date.now() - Date.parse(existing.updatedAt ?? '')
       if (Number.isFinite(tipAgeMs) && tipAgeMs < 12000) {
         console.warn(
@@ -2161,7 +2162,7 @@ export async function syncAccountManifestToTelegram(
     }
     let base: AccountManifest | null = null
     if (existing && !revUnchanged) {
-      base = await fetchBaseWithRetry(existing.fileId)
+      base = await fetchBase(existing.fileId)
       if (!base) {
         console.error(`[store] sync aborted for ${userId}: durable base unreadable (not clobbering)`)
         return null
@@ -2175,9 +2176,7 @@ export async function syncAccountManifestToTelegram(
     // merge — our local state still holds the write, nothing is lost.
     const sent = await sendAccountManifest(merged)
     if (!sent) {
-      // Flood failures need ROOM to clear — hammering extends Telegram 429s.
-      console.warn(`[store] sync upload failed for ${userId} (attempt ${attempt + 1}) — backing off`)
-      await sleepWithJitter(2000 * (attempt + 1))
+      console.warn(`[store] sync upload failed for ${userId} (attempt ${attempt + 1}) — retrying`)
       continue
     }
     const recordCount = (merged.records ?? []).length
@@ -2193,19 +2192,15 @@ export async function syncAccountManifestToTelegram(
     idx.exportedAt = new Date().toISOString()
     const pinnedId = await pinAccountIndex(idx)
     if (!pinnedId) {
-      // Flood failures need ROOM to clear — hammering extends Telegram 429s.
-      console.warn(`[store] sync pin failed for ${userId} (attempt ${attempt + 1}) — backing off`)
-      await sleepWithJitter(2000 * (attempt + 1))
+      console.warn(`[store] sync pin failed for ${userId} (attempt ${attempt + 1}) — retrying`)
       continue
     }
     // Verify we still hold the pin — another instance may have pinned
-    // after our fetch. MUST be a FRESH read: the cached variant (2s TTL)
-    // can MISS a rival's pin and false-verify. ONLY an explicit match is
-    // success: an UNREADABLE verify (flood/network) must NOT be accepted
-    // (that turned lost races into false-durable writes) — it consumes an
-    // attempt and re-merges.
-    const verify = await fetchFreshIndexWithRetry()
-    const current = verify.accounts[userId]
+    // after our fetch. FRESH read; ONLY an explicit match is success. An
+    // UNREADABLE verify (flood) is NOT accepted (that turned lost races
+    // into false-durable writes) — it fails the attempt.
+    const verify = await fetchFreshIndex()
+    const current = verify?.accounts[userId]
     if (verify && current && current.messageId === sent.messageId) {
       // NOTE: superseded docs are intentionally NOT deleted. Deleting them
       // racy-breaks concurrent readers mid-download (fetch index → victim
@@ -2223,9 +2218,8 @@ export async function syncAccountManifestToTelegram(
       return entry
     }
     console.warn(`[store] sync pin race/unverified for ${userId} (attempt ${attempt + 1}) — re-merging`)
-    await sleepWithJitter(1500 * (attempt + 1))
   }
-  console.error(`[store] sync failed for ${userId} after 4 attempts`)
+  console.error(`[store] sync failed for ${userId} after 2 attempts — write stays memory-only (client should retry)`)
   return null
 }
 
