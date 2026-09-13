@@ -16,7 +16,7 @@ export async function DELETE(
 
   const { key } = await params
   const collection = req.nextUrl.searchParams.get('collection') || 'default'
-  const removed = await deleteKey(user, key, collection, 'dashboard')
-  if (!removed) return fail('Record not found.', 404)
-  return ok({ deleted: true })
+  const result = await deleteKey(user, key, collection, 'dashboard')
+  if (!result.removed) return fail('Record not found.', 404)
+  return ok({ deleted: true, durable: result.durable })
 }

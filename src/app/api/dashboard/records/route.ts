@@ -1,12 +1,14 @@
 import { NextRequest } from 'next/server'
 import { authenticate, ok, fail } from '@/lib/auth'
-import { listKeys, setKey, deleteKey } from '@/lib/kv'
+import { listKeysWithRehydrate, setKey, deleteKey } from '@/lib/kv'
 
 export const runtime = 'nodejs'
 
 /**
  * GET /api/dashboard/records?collection=&q=
  * Returns all records for the authenticated developer, optionally filtered.
+ * Uses the rehydrating list so a cold/sprayed instance still shows the
+ * durable truth instead of its own empty memory.
  */
 export async function GET(req: NextRequest) {
   const user = await authenticate(req.headers.get('authorization'))
@@ -14,7 +16,7 @@ export async function GET(req: NextRequest) {
 
   const collection = req.nextUrl.searchParams.get('collection') || undefined
   const q = req.nextUrl.searchParams.get('q')?.toLowerCase() || ''
-  let records = await listKeys(user, collection)
+  let records = await listKeysWithRehydrate(user, collection)
   if (q) {
     records = records.filter((r) => r.key.toLowerCase().includes(q) || JSON.stringify(r.value).toLowerCase().includes(q))
   }

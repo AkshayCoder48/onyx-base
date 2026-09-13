@@ -118,10 +118,73 @@ export function getBotApiBackendLabel(botApiBaseUrlOverride?: string): string {
  * api.telegram.org), we abort quickly so the request doesn't hang forever
  * and tie up server resources.
  */
+/**
+ * Flood circuit-breaker. Consecutive Telegram failures (HTTP 429s, network
+ * errors) open the breaker; while open, ALL Bot API calls short-circuit to
+ * a synthetic 429 WITHOUT touching the network, so the flood can actually
+ * decay instead of being sustained by our own retries. Any success closes
+ * it immediately. Per-instance (each instance quiets itself after its own
+ * failures — aggregate load still collapses).
+ *
+ * Without this, a sick bot + retried syncs/repairs/rehydrates form a
+ * self-sustaining flood: every call 429s, every 429 schedules another call,
+ * and nothing ever succeeds. With this, the system goes quiet-and-honest
+ * (fast durable:false) for 120s windows until Telegram recovers.
+ */
+let floodFailures = 0
+let breakerOpenUntil = 0
+const BREAKER_THRESHOLD = 5
+const BREAKER_COOLDOWN_MS = 120_000
+
+export function telegramBreakerStatus(): { open: boolean; failures: number; coolsDownInMs: number } {
+  const open = Date.now() < breakerOpenUntil
+  return { open, failures: floodFailures, coolsDownInMs: open ? breakerOpenUntil - Date.now() : 0 }
+}
+
+function fakeFloodResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      ok: false,
+      description: 'Too Many Requests: retry after 120 (local flood breaker open)',
+      parameters: { retry_after: 120 },
+    }),
+    { status: 429, headers: { 'Content-Type': 'application/json' } },
+  )
+}
+
+async function breakerFetch(url: string, init?: RequestInit): Promise<Response> {
+  if (Date.now() < breakerOpenUntil) return fakeFloodResponse()
+  try {
+    const res = await fetch(url, init)
+    if (res.ok) {
+      floodFailures = 0
+      breakerOpenUntil = 0
+    } else {
+      floodFailures += 1
+      if (floodFailures >= BREAKER_THRESHOLD) {
+        breakerOpenUntil = Date.now() + BREAKER_COOLDOWN_MS
+        console.error(
+          `[telegram] flood breaker OPEN (${floodFailures} consecutive failures) — quiet for 120s`,
+        )
+      }
+    }
+    return res
+  } catch (err) {
+    floodFailures += 1
+    if (floodFailures >= BREAKER_THRESHOLD) {
+      breakerOpenUntil = Date.now() + BREAKER_COOLDOWN_MS
+      console.error(
+        `[telegram] flood breaker OPEN (${floodFailures} consecutive failures) — quiet for 120s`,
+      )
+    }
+    throw err
+  }
+}
+
 function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 5000): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
-  return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer))
+  return breakerFetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer))
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -648,7 +711,7 @@ export async function sendAndPinFullState(
     form.append('caption', caption.slice(0, 1024))
     form.append('disable_notification', 'true')
 
-    const sendRes = await fetch(`${apiBase}/sendDocument`, { method: 'POST', body: form })
+    const sendRes = await breakerFetch(`${apiBase}/sendDocument`, { method: 'POST', body: form })
     const sendData = (await sendRes.json()) as {
       ok: boolean
       description?: string
@@ -880,7 +943,7 @@ async function sendDocumentWithRetry(
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       // Raw fetch (no 5s timeout) — multi-MB uploads need time.
-      const sendRes = await fetch(`${apiBase}/sendDocument`, { method: 'POST', body: buildForm() })
+      const sendRes = await breakerFetch(`${apiBase}/sendDocument`, { method: 'POST', body: buildForm() })
       const sendData = (await sendRes.json().catch(() => null)) as {
         ok: boolean
         description?: string
@@ -1226,7 +1289,7 @@ export async function sendDocumentFile(
     if (payload.caption) form.append('caption', payload.caption.slice(0, 1024))
 
     // No artificial timeout on uploads — large files legitimately take a while.
-    const res = await fetch(`${apiBase}/sendDocument`, {
+    const res = await breakerFetch(`${apiBase}/sendDocument`, {
       method: 'POST',
       body: form,
     })

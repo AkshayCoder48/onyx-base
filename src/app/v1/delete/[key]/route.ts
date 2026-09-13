@@ -22,9 +22,9 @@ export async function DELETE(
   const z = authorize(user, req, { scope: 'delete', collection })
   if (!z.ok) return authorizeFailResponse(z)
 
-  const removed = await deleteKey(user, key, collection, 'api')
-  if (!removed) {
+  const result = await deleteKey(user, key, collection, 'api')
+  if (!result.removed) {
     return fail(`Key "${key}" not found in collection "${collection}".`, 404)
   }
-  return ok({ deleted: true, key, collection })
+  return ok({ deleted: true, key, collection, durable: result.durable })
 }

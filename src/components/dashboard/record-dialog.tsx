@@ -71,11 +71,17 @@ export function RecordDialog({ open, onOpenChange, record }: Props) {
     }
     setSaving(true)
     try {
-      await api('/api/dashboard/records', {
+      const res = await api<{ record?: { durable?: boolean } }>('/api/dashboard/records', {
         method: 'POST',
         body: JSON.stringify({ key: key.trim(), value: buildValue(), collection }),
       })
-      toast.success(record ? 'Record updated' : 'Record created')
+      if (res.record?.durable === false) {
+        toast.warning('Saved locally — Telegram sync pending', {
+          description: 'The record is stored on this server but not yet backed up. It will sync automatically.',
+        })
+      } else {
+        toast.success(record ? 'Record updated' : 'Record created')
+      }
       qc.invalidateQueries({ queryKey: ['records'] })
       qc.invalidateQueries({ queryKey: ['stats'] })
       qc.invalidateQueries({ queryKey: ['logs'] })

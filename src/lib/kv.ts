@@ -249,7 +249,7 @@ export async function deleteKey(
   key: string,
   collection = 'default',
   source = 'api',
-): Promise<boolean> {
+): Promise<{ removed: boolean; durable: boolean }> {
   const chatId = resolveChatId(user.dbUserId)
   const botToken = resolveBotToken(user.dbUserId)
   const botApiBaseUrl = resolveBotApiBaseUrl(user.dbUserId)
@@ -259,17 +259,18 @@ export async function deleteKey(
     if (rehydrated) {
       removed = deleteRecord(user.dbUserId, collection, key, chatId, botToken, botApiBaseUrl)
     }
-    if (!removed) return false
+    if (!removed) return { removed: false, durable: false }
   }
+  let durable = false
   try {
-    const durable = await flushAccountSync(user.userId)
+    durable = await flushAccountSync(user.userId)
     if (!durable) console.error(`[kv] delete sync unconfirmed for ${collection}/${key}`)
   } catch (err) {
     console.error(`[kv] delete sync failed for ${collection}/${key}:`, err)
   }
   await logAction(user, 'delete', key, `collection=${collection}`, source)
   notifyRealtime({ userId: user.userId, event: 'delete', collection, key })
-  return true
+  return { removed: true, durable }
 }
 
 /** List all keys for a collection (or every collection when collection=undefined). */

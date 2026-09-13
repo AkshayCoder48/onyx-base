@@ -206,11 +206,17 @@ export function DatabaseView() {
     if (!deleteTarget) return
     setDeleting(true)
     try {
-      await api(
+      const res = await api<{ deleted?: boolean; durable?: boolean }>(
         `/api/dashboard/records/${encodeURIComponent(deleteTarget.key)}?collection=${encodeURIComponent(deleteTarget.collection)}`,
         { method: 'DELETE' },
       )
-      toast.success(`Deleted ${deleteTarget.key}`)
+      if (res.durable === false) {
+        toast.warning(`Deleted ${deleteTarget.key} locally — sync pending`, {
+          description: 'The delete will propagate to the Telegram backup automatically.',
+        })
+      } else {
+        toast.success(`Deleted ${deleteTarget.key}`)
+      }
       setDeleteTarget(null)
       qc.invalidateQueries({ queryKey: ['records'] })
       qc.invalidateQueries({ queryKey: ['stats'] })
