@@ -236,6 +236,85 @@ export async function getKeyWithRehydrate(
   return rec
 }
 
+export interface ImportInput {
+  key: string
+  collection?: string
+  json: unknown
+}
+
+/**
+ * Bulk import: upsert N records into this instance's memory, then ONE merged
+ * manifest sync (one pin) for all of them. Per-key syncs would throttle
+ * same-chat pins (Telegram serializes + rate-limits pins hard); a single pin
+ * for hundreds of records stays far under throttle limits. Idempotent
+ * (upsert by collection+key) — safe to retry the whole batch when
+ * durable=false.
+ */
+export async function importRecords(
+  user: AuthenticatedUser,
+  records: ImportInput[],
+  source = 'dashboard',
+): Promise<{ imported: number; durable: boolean }> {
+  const chatId = resolveChatId(user.dbUserId)
+  const botToken = resolveBotToken(user.dbUserId)
+  const botApiBaseUrl = resolveBotApiBaseUrl(user.dbUserId)
+  let imported = 0
+  for (const r of records) {
+    const key = String(r.key ?? '').trim()
+    if (!key) continue
+    const collectionName = String(r.collection || 'default')
+    const value = r.json ?? null
+    const valueType = detectValueType(value)
+    upsertRecord(user.dbUserId, user.userId, {
+      collection: collectionName,
+      key,
+      value: JSON.stringify(value),
+      valueType,
+      chatId,
+      botToken,
+      botApiBaseUrl,
+    })
+    imported += 1
+  }
+
+  // Same durability gate as setKey: offload large values, then ONE merged
+  // sync for the whole batch. Hard 55s deadline over the whole gate.
+  let durable = false
+  try {
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const timeout = new Promise<false>((resolve) => {
+      timer = setTimeout(() => {
+        console.error(`[kv] import durability gate deadline (55s) exceeded (${imported} records)`)
+        resolve(false)
+      }, 55000)
+    })
+    const gate = (async () => {
+      for (const r of records) {
+        const key = String(r.key ?? '').trim()
+        if (!key) continue
+        await offloadLargeRecordValue(
+          user.dbUserId,
+          String(r.collection || 'default'),
+          key,
+          chatId,
+          botToken,
+          botApiBaseUrl,
+        )
+      }
+      return await flushAccountSync(user.userId)
+    })()
+    durable = await Promise.race([gate, timeout]).finally(() => {
+      if (timer) clearTimeout(timer)
+      gate.catch(() => {})
+    })
+  } catch (err) {
+    console.error(`[kv] import sync failed (${imported} records):`, err)
+  }
+
+  await logAction(user, 'import', undefined, `${imported} records`, source)
+  return { imported, durable }
+}
+
 /**
  * Delete a key. Returns whether a record was removed.
  * Rehydrate-first: on a local miss the record may still exist durably
