@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { gunzipSync, gzipSync } from 'node:zlib'
 
 /**
  * Onyx Base — Telegram persistence layer.
@@ -1092,7 +1093,6 @@ export async function sendAccountManifest(
   if (!isTelegramConfigured(chatId, botTokenOverride)) return null
   const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
   const json = JSON.stringify(manifest)
-  const bytes = Buffer.byteLength(json, 'utf-8')
   const sha = manifestContentSha(manifest)
   const caption = `${ACCOUNT_MANIFEST_MARKER}\nuserId=${manifest.userId}`
   try {
@@ -1108,9 +1108,16 @@ export async function sendAccountManifest(
         /* swallow — stale message will be orphaned, not fatal */
       }
     }
-    const fileName = `onyxbase-account-${manifest.userId}.json`
+    // GZIP the manifest: 1.5MB JSON -> ~150KB. Big-manifest uploads were
+    // timing out in streaks (Vercel<->Telegram route flakiness hits large
+    // bodies hardest); 10x smaller bodies upload in ~1s instead of ~8s.
+    // Readers detect gzip by magic bytes (back-compat: raw JSON still parses).
+    const fileName = `onyxbase-account-${manifest.userId}.json.gz`
+    let bytes = 0
     const buildForm = () => {
-      const blob = new Blob([Buffer.from(json, 'utf-8')], { type: 'application/json' })
+      const payload = gzipSync(Buffer.from(json, 'utf-8'))
+      bytes = payload.length
+      const blob = new Blob([payload], { type: 'application/gzip' })
       const form = new FormData()
       form.append('chat_id', chatId)
       form.append('document', blob, fileName)
@@ -1193,7 +1200,9 @@ export async function downloadJsonDocument(
       console.error('[telegram] downloadJsonDocument: download failed', fileRes.status)
       return null
     }
-    return await fileRes.text()
+    const buf = Buffer.from(await fileRes.arrayBuffer())
+    const isGzip = buf.length > 2 && buf[0] === 0x1f && buf[1] === 0x8b
+    return (isGzip ? gunzipSync(buf) : buf).toString('utf-8')
   } catch (err) {
     console.error('[telegram] downloadJsonDocument error:', err)
     return null
