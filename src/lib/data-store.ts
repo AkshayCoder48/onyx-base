@@ -2158,8 +2158,9 @@ export async function syncAccountManifestToTelegram(
     // merge — our local state still holds the write, nothing is lost.
     const sent = await sendAccountManifest(merged)
     if (!sent) {
+      // Flood failures need ROOM to clear — hammering extends Telegram 429s.
       console.warn(`[store] sync upload failed for ${userId} (attempt ${attempt + 1}) — backing off`)
-      await sleepWithJitter(1000 * (attempt + 1))
+      await sleepWithJitter(2000 * (attempt + 1))
       continue
     }
     const recordCount = (merged.records ?? []).length
@@ -2175,8 +2176,9 @@ export async function syncAccountManifestToTelegram(
     idx.exportedAt = new Date().toISOString()
     const pinnedId = await pinAccountIndex(idx)
     if (!pinnedId) {
+      // Flood failures need ROOM to clear — hammering extends Telegram 429s.
       console.warn(`[store] sync pin failed for ${userId} (attempt ${attempt + 1}) — backing off`)
-      await sleepWithJitter(1000 * (attempt + 1))
+      await sleepWithJitter(2000 * (attempt + 1))
       continue
     }
     // Verify we still hold the pin — another instance may have pinned
@@ -2204,7 +2206,7 @@ export async function syncAccountManifestToTelegram(
       return entry
     }
     console.warn(`[store] sync pin race/unverified for ${userId} (attempt ${attempt + 1}) — re-merging`)
-    await sleepWithJitter(700 * (attempt + 1))
+    await sleepWithJitter(1500 * (attempt + 1))
   }
   console.error(`[store] sync failed for ${userId} after 3 attempts`)
   return null
