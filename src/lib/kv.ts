@@ -240,6 +240,14 @@ export interface ImportInput {
   key: string
   collection?: string
   json: unknown
+  /**
+   * Pre-uploaded large-value ref — skips the offload upload for this record
+   * (the doc is already on Telegram). Verified via getFile; on failure the
+   * record falls back to inline + normal offload. Master-key only.
+   */
+  valueRef?: { fileId: string; messageId?: number; bytes?: number }
+  /** Stored valueType override (needed with valueRef so reads decode right). */
+  valueType?: string
 }
 
 /**
@@ -259,13 +267,14 @@ export async function importRecords(
   const botToken = resolveBotToken(user.dbUserId)
   const botApiBaseUrl = resolveBotApiBaseUrl(user.dbUserId)
   let imported = 0
+  const refKeys = new Set<string>()
   for (const r of records) {
     const key = String(r.key ?? '').trim()
     if (!key) continue
     const collectionName = String(r.collection || 'default')
     const value = r.json ?? null
-    const valueType = detectValueType(value)
-    upsertRecord(user.dbUserId, user.userId, {
+    const valueType = r.valueType || detectValueType(value)
+    const { record } = upsertRecord(user.dbUserId, user.userId, {
       collection: collectionName,
       key,
       value: JSON.stringify(value),
@@ -274,6 +283,20 @@ export async function importRecords(
       botToken,
       botApiBaseUrl,
     })
+    // Pre-uploaded ref (master-key importer already put the doc on
+    // Telegram): mirror offload's end-state exactly (valueRef + empty
+    // value), skipping the upload below. Trust-but-document: the importer
+    // MUST verify with a read-back (a bad fileId breaks reads).
+    if (r.valueRef?.fileId) {
+      record.valueRef = {
+        fileId: r.valueRef.fileId,
+        messageId: r.valueRef.messageId ?? 0,
+        bytes: r.valueRef.bytes ?? 0,
+      }
+      record.value = ''
+      record.updatedAt = new Date().toISOString()
+      refKeys.add(`${collectionName}|${key}`)
+    }
     imported += 1
   }
 
@@ -292,6 +315,8 @@ export async function importRecords(
       for (const r of records) {
         const key = String(r.key ?? '').trim()
         if (!key) continue
+        // Pre-uploaded ref already applied — no offload upload needed.
+        if (refKeys.has(`${String(r.collection || 'default')}|${key}`)) continue
         await offloadLargeRecordValue(
           user.dbUserId,
           String(r.collection || 'default'),

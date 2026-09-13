@@ -36,11 +36,28 @@ export async function POST(req: NextRequest) {
 
   const result = await importRecords(
     user,
-    body.records.map((r: { key: string; collection?: string; value: unknown }) => ({
-      key: r.key.trim(),
-      collection: typeof r.collection === 'string' && r.collection ? r.collection : 'default',
-      json: r.value,
-    })),
+    body.records.map(
+      (r: {
+        key: string
+        collection?: string
+        value: unknown
+        valueRef?: { fileId: string; messageId?: number; bytes?: number }
+        valueType?: string
+      }) => ({
+        key: r.key.trim(),
+        collection: typeof r.collection === 'string' && r.collection ? r.collection : 'default',
+        json: r.value,
+        valueRef:
+          r.valueRef && typeof r.valueRef.fileId === 'string' && r.valueRef.fileId
+            ? {
+                fileId: r.valueRef.fileId,
+                messageId: typeof r.valueRef.messageId === 'number' ? r.valueRef.messageId : undefined,
+                bytes: typeof r.valueRef.bytes === 'number' ? r.valueRef.bytes : undefined,
+              }
+            : undefined,
+        valueType: typeof r.valueType === 'string' && r.valueType ? r.valueType : undefined,
+      }),
+    ),
     'dashboard',
   )
   return ok(result)
