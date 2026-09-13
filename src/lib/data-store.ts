@@ -2128,7 +2128,7 @@ export async function syncAccountManifestToTelegram(
   // local-only manifest over durable state (the old last-pin-wins clobber
   // that wiped other instances' keys). Flood failures RETRY with backoff
   // (bounded) instead of instantly failing into memory-only mode.
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 4; attempt++) {
     // Rebuild local EVERY attempt: attempt N restores merged_N into memory,
     // so rebuilding makes local grow monotonically — keys learned from a
     // rival's base are never dropped by a later attempt's merge.
@@ -2142,6 +2142,23 @@ export async function syncAccountManifestToTelegram(
     // no other instance wrote since — durable base ⊆ local state, skip the
     // manifest download entirely.
     const revUnchanged = !!existing && existing.messageId === lastDurableRev.get(userId)
+    // HOT-TIP YIELD: a FOREIGN pin landed within the last seconds — that
+    // instance is likely still mid-flight (or its repair is running). Yield
+    // BEFORE adding to the flood: our re-fetch will then merge its finished
+    // state instead of racing it. This serializes contended pins (~1/12s,
+    // which Telegram's same-message edit limits love) instead of stampeding
+    // into 429s. Quiet writes (cold tip) and our own tip proceed undelayed;
+    // the final attempt never yields (bounded wait).
+    if (existing && !revUnchanged && attempt < 3) {
+      const tipAgeMs = Date.now() - Date.parse(existing.updatedAt ?? '')
+      if (Number.isFinite(tipAgeMs) && tipAgeMs < 12000) {
+        console.warn(
+          `[store] sync yielding to hot tip for ${userId} (age ${Math.max(0, Math.round(tipAgeMs))}ms, attempt ${attempt + 1})`,
+        )
+        await sleepWithJitter(2500)
+        continue
+      }
+    }
     let base: AccountManifest | null = null
     if (existing && !revUnchanged) {
       base = await fetchBaseWithRetry(existing.fileId)
@@ -2208,7 +2225,7 @@ export async function syncAccountManifestToTelegram(
     console.warn(`[store] sync pin race/unverified for ${userId} (attempt ${attempt + 1}) — re-merging`)
     await sleepWithJitter(1500 * (attempt + 1))
   }
-  console.error(`[store] sync failed for ${userId} after 3 attempts`)
+  console.error(`[store] sync failed for ${userId} after 4 attempts`)
   return null
 }
 
