@@ -2252,6 +2252,52 @@ export async function syncAccountManifestToTelegram(
         return null
       }
     }
+    // HOT-KEY PACING: if EVERYTHING changed in this sync was already synced
+    // <90s ago (globally, per the base), yield — this is a hot key (e.g. an
+    // external 20s ticker) re-landing trivia. Real writes (any fresh, new,
+    // or deleted key) always proceed. New accounts (no base) always proceed.
+    if (base) {
+      const baseRecs = new Map(
+        (base.records || []).map((r) => [`${r.collection}|${r.key}`, r.updatedAt || '']),
+      )
+      let freshChange = false
+      for (const r of local.records || []) {
+        const b = baseRecs.get(`${r.collection}|${r.key}`)
+        if (b === undefined || (r.updatedAt || '') > b) {
+          if (b === undefined) {
+            freshChange = true
+            break
+          }
+          const ageMs = Date.now() - Date.parse(b)
+          if (!Number.isFinite(ageMs) || ageMs >= 90000) {
+            freshChange = true
+            break
+          }
+        }
+      }
+      // Deletions (in base, missing locally) always count as fresh — rare
+      // and must never be paced away. (Tombstones ride the merge.)
+      if (!freshChange) {
+        const localKeys = new Set((local.records || []).map((r) => `${r.collection}|${r.key}`))
+        for (const k of baseRecs.keys()) {
+          if (!localKeys.has(k)) {
+            freshChange = true
+            break
+          }
+        }
+      }
+      if (!freshChange) {
+        let oldest = 0
+        for (const r of local.records || []) {
+          const b = baseRecs.get(`${r.collection}|${r.key}`)
+          if (b === undefined) continue
+          const ageMs = Date.now() - Date.parse(b)
+          if (Number.isFinite(ageMs)) oldest = Math.max(oldest, ageMs)
+        }
+        notePacingThrottle(Math.max(5, Math.ceil((90000 - oldest) / 1000)))
+        return null
+      }
+    }
     const merged = base ? mergeAccountManifests(local, base) : local
     // Fold the converged state back into THIS instance too (fast cross-
     // instance convergence; merge semantics make this safe).
@@ -2817,6 +2863,10 @@ export async function offloadLargeRecordValue(
   botApiBaseUrl?: string,
 ): Promise<void> {
   try {
+    // Offload is an optimization (keeps manifests small), not a requirement
+    // (inline values ride the manifest fine). Never burn upload calls into a
+    // live throttle — skip and let the value stay inline this round.
+    if (throttleYieldMs() > 0) return
     const rec = findRecord(dbUserId, collection, key)
     if (!rec || rec.valueRef?.fileId) return
     if (Buffer.byteLength(rec.value || '', 'utf-8') <= LARGE_VALUE_THRESHOLD_BYTES) return
