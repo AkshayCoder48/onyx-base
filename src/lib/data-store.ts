@@ -2446,6 +2446,26 @@ const lastSyncEndAt = new Map<string, number>()
  */
 const lastDurableRev = new Map<string, number>()
 
+/**
+ * Sync with a hard global deadline. Layered Telegram waits can stack past
+ * two minutes in a full flood; the client long timed out by then and the
+ * function is burning lifetime. 45s covers try + paced retry in any
+ * survivable flood — past that, fail honestly (durable:false) and let the
+ * client retry after the flood clears. Never throws (null on timeout).
+ */
+function syncWithDeadline(userId: string): Promise<AccountIndexEntry | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<AccountIndexEntry | null>((resolve) => {
+    timer = setTimeout(() => {
+      console.error(`[store] sync deadline (45s) exceeded for ${userId} — failing fast`)
+      resolve(null)
+    }, 45000)
+  })
+  return Promise.race([syncAccountManifestToTelegram(userId), timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
 function runAccountSyncNow(userId: string): Promise<boolean> {
   const existing = accountSyncInFlight.get(userId)
   if (existing) {
@@ -2458,7 +2478,7 @@ function runAccountSyncNow(userId: string): Promise<boolean> {
     do {
       accountSyncDirty.delete(userId)
       try {
-        ok = (await syncAccountManifestToTelegram(userId)) !== null
+        ok = (await syncWithDeadline(userId)) !== null
       } catch (err) {
         console.error(`[store] scheduled account sync failed for ${userId}:`, err)
         ok = false

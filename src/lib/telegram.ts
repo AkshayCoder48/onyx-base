@@ -836,6 +836,11 @@ export async function pinAccountIndex(
       if (editData && /message is not modified/i.test(editData.description ?? '')) {
         return pinned.message_id
       }
+      // Flooded edit: the send+pin fallback would 429 too (same flood) —
+      // fail fast instead of firing 3 more doomed calls into it.
+      if (editData && /too many requests|flood|retry after/i.test(editData.description ?? '')) {
+        return null
+      }
     }
     const sendData = await postBotJson(`${apiBase}/sendMessage`, {
       chat_id: chatId,
