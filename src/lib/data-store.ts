@@ -2096,26 +2096,14 @@ function schedulePostVerifyRepair(userId: string, pinnedRev: number): void {
         console.warn(
           `[store] post-verify repair for ${userId}: tip moved (round ${round + 1}) — re-merging`,
         )
-        const localNow = buildAccountManifest(userId)
-        if (!localNow) return null
-        const base = cur ? await fetchBaseWithRetry(cur.fileId) : null
-        const merged = base ? mergeAccountManifests(localNow, base) : localNow
-        restoreAccountManifest(merged)
-        const sent = await sendAccountManifest(merged)
-        if (!sent) continue
-        idx.accounts[userId] = {
-          userId,
-          messageId: sent.messageId,
-          fileId: sent.fileId,
-          bytes: sent.bytes,
-          recordCount: (merged.records ?? []).length,
-          updatedAt: new Date().toISOString(),
+        // Full VERIFIED sync (fetch-merge-pin-verify with retries). An
+        // open-loop pin here would just join the clobber race against rival
+        // repairs — the verify/retry loop is what makes rounds converge.
+        const entry = await syncAccountManifestToTelegram(userId, { scheduleRepair: false })
+        if (entry) {
+          rev = entry.messageId
+          lastDurableRev.set(userId, rev)
         }
-        idx.exportedAt = new Date().toISOString()
-        const pinnedId = await pinAccountIndex(idx)
-        if (!pinnedId) continue
-        rev = sent.messageId
-        lastDurableRev.set(userId, rev)
       }
     } catch {
       // Background repair must never throw.
@@ -2132,7 +2120,10 @@ function schedulePostVerifyRepair(userId: string, pinnedRev: number): void {
  *
  * Returns the updated index entry, or null on failure.
  */
-export async function syncAccountManifestToTelegram(userId: string): Promise<AccountIndexEntry | null> {
+export async function syncAccountManifestToTelegram(
+  userId: string,
+  opts?: { scheduleRepair?: boolean },
+): Promise<AccountIndexEntry | null> {
   // Fetch-merge-pin with pin-race + flood retry. NEVER upload a partial
   // local-only manifest over durable state (the old last-pin-wins clobber
   // that wiped other instances' keys). Flood failures RETRY with backoff
@@ -2189,16 +2180,13 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
       continue
     }
     // Verify we still hold the pin — another instance may have pinned
-    // after our fetch. ONLY an explicit match is success: an UNREADABLE
-    // verify (flood/network) must NOT be accepted (that turned lost races
-    // into false-durable writes) — it consumes an attempt and re-merges.
-    let verify: AccountIndex | null = null
-    try {
-      verify = await fetchAccountIndex()
-    } catch {
-      verify = null
-    }
-    const current = verify?.accounts[userId]
+    // after our fetch. MUST be a FRESH read: the cached variant (2s TTL)
+    // can MISS a rival's pin and false-verify. ONLY an explicit match is
+    // success: an UNREADABLE verify (flood/network) must NOT be accepted
+    // (that turned lost races into false-durable writes) — it consumes an
+    // attempt and re-merges.
+    const verify = await fetchFreshIndexWithRetry()
+    const current = verify.accounts[userId]
     if (verify && current && current.messageId === sent.messageId) {
       // NOTE: superseded docs are intentionally NOT deleted. Deleting them
       // racy-breaks concurrent readers mid-download (fetch index → victim
@@ -2210,7 +2198,9 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
       // A rival mid-flight on a stale base may pin AFTER our verify (silent
       // last-pin-wins drop). The background repair re-checks the tip and
       // re-merges if we got overwritten — client latency unaffected.
-      schedulePostVerifyRepair(userId, sent.messageId)
+      // (Skipped when WE are the repair — chained after()s don't extend
+      // serverless lifetime, so repairs must not schedule repairs.)
+      if (opts?.scheduleRepair !== false) schedulePostVerifyRepair(userId, sent.messageId)
       return entry
     }
     console.warn(`[store] sync pin race/unverified for ${userId} (attempt ${attempt + 1}) — re-merging`)
