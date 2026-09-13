@@ -2050,10 +2050,47 @@ async function fetchFreshIndex(): Promise<AccountIndex | null> {
  * safe to retry). Null-after-retries aborts the sync (anti-clobber: we
  * never pin a local-only merge over unreadable durable state).
  */
+/**
+ * Manifest download cache, keyed by Telegram fileId. Downloads (getFile +
+ * document fetch) sit in one of Telegram's tightest buckets, and every
+ * sync-retry / repair-round / rehydrate-on-miss re-downloads the SAME rev —
+ * that self-inflicted download flood was failing syncs even when quiet.
+ * Telegram documents are IMMUTABLE, so same fileId = same bytes forever:
+ * the TTL only bounds memory, staleness is impossible.
+ */
+interface CachedManifest {
+  manifest: AccountManifest
+  at: number
+}
+const manifestByFileId = new Map<string, CachedManifest>()
+const MANIFEST_CACHE_TTL_MS = 5 * 60 * 1000
+const MANIFEST_CACHE_MAX = 20
+function manifestCacheGet(fileId: string): AccountManifest | null {
+  const hit = manifestByFileId.get(fileId)
+  if (!hit) return null
+  if (Date.now() - hit.at > MANIFEST_CACHE_TTL_MS) {
+    manifestByFileId.delete(fileId)
+    return null
+  }
+  return hit.manifest
+}
+function manifestCacheSet(fileId: string, manifest: AccountManifest): void {
+  if (manifestByFileId.size >= MANIFEST_CACHE_MAX) {
+    const oldest = manifestByFileId.keys().next()
+    if (!oldest.done) manifestByFileId.delete(oldest.value)
+  }
+  manifestByFileId.set(fileId, { manifest, at: Date.now() })
+}
 async function fetchBase(fileId: string): Promise<AccountManifest | null> {
-  // SINGLE attempt, fail fast (see fetchFreshIndex).
+  // SINGLE attempt, fail fast (see fetchFreshIndex). Cache first: retries,
+  // repairs, and rehydrates routinely re-request the same rev — each cache
+  // hit is 2 Telegram file-bucket calls we don't make.
+  const hit = manifestCacheGet(fileId)
+  if (hit) return hit
   try {
-    return await fetchAccountManifest(fileId)
+    const m = await fetchAccountManifest(fileId)
+    if (m) manifestCacheSet(fileId, m)
+    return m
   } catch {
     return null
   }
@@ -2221,6 +2258,9 @@ export async function syncAccountManifestToTelegram(
       accountIndexCache = idx
       lastDurableRev.set(userId, sent.messageId)
       lastPinnedSha.set(userId, sent.sha)
+      // Cache what we just pinned (we already hold it): imminent repairs /
+      // rehydrates / retries re-request this exact rev.
+      manifestCacheSet(sent.fileId, merged)
       v4ModeActive = true
       // A rival mid-flight on a stale base may pin AFTER our verify (silent
       // last-pin-wins drop). The background repair re-checks the tip and
@@ -2325,10 +2365,13 @@ export async function rehydrateAccountFromTelegram(userId: string): Promise<{
   const entry = idx.accounts[userId]
   if (!entry) return { attempted: false, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0 }
   try {
-    const manifest = await fetchAccountManifest(entry.fileId)
+    const manifest = await fetchBase(entry.fileId)
     if (!manifest) return { attempted: true, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0, error: 'download failed' }
     const r = restoreAccountManifest(manifest)
     lastDurableRev.set(userId, entry.messageId)
+    // Restored bytes == tip bytes: record the content hash so a subsequent
+    // sync with unchanged memory short-circuits instead of re-pinning.
+    lastPinnedSha.set(userId, manifestContentSha(manifest))
     if (r.users || r.apiKeys || r.records || r.logs || r.files) {
       console.log(`[store] V4 rehydrated account ${userId}: +${r.users} user, +${r.apiKeys} keys, +${r.records} records, +${r.logs} logs, +${r.files} files`)
     }
