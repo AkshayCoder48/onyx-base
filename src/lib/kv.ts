@@ -132,10 +132,29 @@ export async function setKey(
   // Durability gate: offload large values, then await the merged manifest
   // sync. On failure we still answer ok (the value IS readable from this
   // instance and the debounced scheduler retries the sync) but flag it.
+  // Hard 55s deadline over the WHOLE gate (offload + sync): offload sits
+  // outside the sync deadline and the two could stack past the client's
+  // 60s timeout (orphaned work may still land the pin — bonus, the
+  // client's idempotent retry is the real backstop).
   let durable = false
   try {
-    await offloadLargeRecordValue(user.dbUserId, collectionName, record.key, chatId, botToken, botApiBaseUrl)
-    durable = await flushAccountSync(user.userId)
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const timeout = new Promise<false>((resolve) => {
+      timer = setTimeout(() => {
+        console.error(`[kv] durability gate deadline (55s) exceeded for ${collectionName}/${record.key}`)
+        resolve(false)
+      }, 55000)
+    })
+    const gate = (async () => {
+      await offloadLargeRecordValue(user.dbUserId, collectionName, record.key, chatId, botToken, botApiBaseUrl)
+      return await flushAccountSync(user.userId)
+    })()
+    durable = await Promise.race([gate, timeout]).finally(() => {
+      if (timer) clearTimeout(timer)
+      // Swallow late rejections from the orphaned gate (it may still fail
+      // after we answered — must never surface as unhandled).
+      gate.catch(() => {})
+    })
   } catch (err) {
     console.error(`[kv] durable sync failed for ${collectionName}/${record.key}:`, err)
   }
