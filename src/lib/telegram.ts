@@ -164,6 +164,38 @@ function fakeFloodResponse(): Response {
   )
 }
 
+/**
+ * Most recent HTTP 429 from Telegram observed on THIS instance (with
+ * Telegram's own retry_after). Exposed to API responses so programmatic
+ * clients (rge-hub) can back off precisely instead of hammering through a
+ * throttle and escalating it into a ban. Stale after 10 minutes.
+ */
+let lastThrottle: { retryAfterSecs: number; observedAt: number; path: string } | null = null
+
+async function recordThrottle(url: string, res: Response): Promise<void> {
+  try {
+    const data = (await res.json()) as { parameters?: { retry_after?: number } }
+    const secs = Number(data?.parameters?.retry_after)
+    lastThrottle = {
+      retryAfterSecs: Number.isFinite(secs) && secs > 0 ? Math.min(secs, 3600) : 60,
+      observedAt: Date.now(),
+      path: new URL(url).pathname,
+    }
+  } catch {
+    try {
+      lastThrottle = { retryAfterSecs: 60, observedAt: Date.now(), path: new URL(url).pathname }
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export function lastThrottleInfo(): { retryAfterSecs: number; observedAt: number; path: string } | null {
+  if (!lastThrottle) return null
+  if (Date.now() - lastThrottle.observedAt > 10 * 60_000) return null
+  return lastThrottle
+}
+
 async function breakerFetch(url: string, init?: RequestInit): Promise<Response> {
   if (Date.now() < breakerOpenUntil) return fakeFloodResponse()
   try {
@@ -175,6 +207,7 @@ async function breakerFetch(url: string, init?: RequestInit): Promise<Response> 
     } else {
       floodFailures += 1
       lastBreakerError = `HTTP ${res.status} on ${new URL(url).pathname}`
+      if (res.status === 429) void recordThrottle(url, res.clone())
       if (floodFailures >= BREAKER_THRESHOLD) {
         breakerOpenUntil = Date.now() + BREAKER_COOLDOWN_MS
         console.error(

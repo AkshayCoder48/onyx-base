@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import { authenticateOrRespond, authorize, authorizeFailResponse, coerceValue, fail, ok } from '@/lib/auth'
+import { lastThrottleInfo } from '@/lib/telegram'
 import { setKey } from '@/lib/kv'
 
 export const runtime = 'nodejs'
@@ -50,7 +51,19 @@ export async function POST(req: NextRequest) {
       json: isRawString ? coerceValue(body.value as string).value : body.value,
     })
 
-    return ok({ key: result.key, value: result.value, type: result.valueType, collection: result.collection, durable: result.durable === true })
+    const durable = result.durable === true
+    // On failure, hand the client Telegram's own throttle (if observed on
+    // this instance) so programmatic clients back off precisely instead of
+    // hammering through it and escalating it into a ban.
+    const throttle = durable ? undefined : (lastThrottleInfo() ?? undefined)
+    return ok({
+      key: result.key,
+      value: result.value,
+      type: result.valueType,
+      collection: result.collection,
+      durable,
+      ...(throttle ? { throttle } : {}),
+    })
   } catch (err) {
     // Legible 500s: surface the crash reason so failures are diagnosable
     // from the response alone (no log access in this environment).
