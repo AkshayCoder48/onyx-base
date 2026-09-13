@@ -742,7 +742,10 @@ export async function findUserByEmailWithRehydrate(email: string): Promise<UserR
   const fast = findUserByEmail(email)
   if (fast) return fast
   try {
-    const idx = await getAccountIndex()
+    // FRESH (uncached) index: the scan already pays N manifest fetches, so
+    // one getChat is nothing — and a cached index would miss accounts
+    // created after this instance warmed (login 401 for new users).
+    const idx = await fetchFreshIndex()
     if (!idx) return undefined
     for (const entry of Object.values(idx.accounts)) {
       await rehydrateAccountFromTelegram(entry.userId)
@@ -1547,6 +1550,8 @@ export async function rehydrateFromTelegram(chatId?: string, botToken?: string, 
 
 /** In-memory cache of the V4 account index (survives across requests). */
 let accountIndexCache: AccountIndex | null = null
+let accountIndexCacheAt = 0
+const ACCOUNT_INDEX_CACHE_TTL_MS = 60_000
 
 /** True once we've confirmed the pinned message is a V4 index (set by fetchAccountIndex). */
 let v4ModeActive = false
@@ -1863,10 +1868,17 @@ function restoreAccountManifest(m: AccountManifest): {
  * fall back to the V3 path).
  */
 export async function getAccountIndex(): Promise<AccountIndex | null> {
-  if (accountIndexCache) return accountIndexCache
+  // TTL'd: an unbounded cache blinds warm instances to new accounts
+  // FOREVER (login 401s for users registered after the instance warmed —
+  // observed live). 60s keeps non-critical readers cheap yet near-fresh;
+  // auth slow-paths bypass the cache entirely (fetchFreshIndex).
+  if (accountIndexCache && Date.now() - accountIndexCacheAt < ACCOUNT_INDEX_CACHE_TTL_MS) {
+    return accountIndexCache
+  }
   const idx = await fetchAccountIndex()
   if (idx) {
     accountIndexCache = idx
+    accountIndexCacheAt = Date.now()
     v4ModeActive = true
   }
   return idx
@@ -2095,7 +2107,7 @@ function sleepWithJitter(baseMs: number): Promise<void> {
  * index) or sustained flood (the subsequent pin then fails honestly, so the
  * write reports durable:false instead of a false ok).
  */
-async function fetchFreshIndex(): Promise<AccountIndex | null> {
+export async function fetchFreshIndex(): Promise<AccountIndex | null> {
   // Normally a SINGLE attempt, fail fast: layered retries multiply
   // worst-case latency into minutes (flood death spiral) — the sync level
   // owns the ONE paced retry. NULL means unreadable (caller fails the
@@ -2415,6 +2427,7 @@ export async function syncAccountManifestToTelegram(
       // doc deleted → rehydrate fails → spurious 404s). Chat history is
       // free and unbounded; old manifests are harmless backups.
       accountIndexCache = idx
+      accountIndexCacheAt = Date.now()
       lastDurableRev.set(userId, sent.messageId)
       lastPinnedSha.set(userId, sent.sha)
       // Cache what we just pinned (we already hold it): imminent repairs /
@@ -2520,6 +2533,7 @@ export async function rehydrateAccountFromTelegram(userId: string): Promise<{
   }
   if (!idx) return { attempted: false, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0 }
   accountIndexCache = idx
+  accountIndexCacheAt = Date.now()
   v4ModeActive = true
   const entry = idx.accounts[userId]
   if (!entry) return { attempted: false, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0 }
@@ -2561,6 +2575,7 @@ export async function migrateV3ToV4(): Promise<{
   const existing = await fetchAccountIndex()
   if (existing) {
     accountIndexCache = existing
+    accountIndexCacheAt = Date.now()
     v4ModeActive = true
     return { migrated: false, accounts: Object.keys(existing.accounts).length }
   }
@@ -2622,6 +2637,7 @@ export async function migrateV3ToV4(): Promise<{
     return { migrated: false, accounts: migratedCount, error: 'index pin failed' }
   }
   accountIndexCache = newIndex
+  accountIndexCacheAt = Date.now()
   v4ModeActive = true
   console.log(`[store] V3→V4 migration complete: ${migratedCount} account manifest(s) uploaded, index pinned. V3 document left in chat as backup.`)
   return { migrated: true, accounts: migratedCount }

@@ -17,7 +17,7 @@ import {
   findUserByApiKey,
   rehydrateFromTelegram,
   rehydrateAccountFromTelegram,
-  getAccountIndex,
+  fetchFreshIndex,
   findAdminKey,
   isAdminKey,
   getOrCreateAdminUser,
@@ -335,7 +335,7 @@ export async function authenticate(
   // the actual cause instead of a misleading "Unauthorized".
   let rehydrateError: Error | null = null
   try {
-    const idx = await getAccountIndex()
+    const idx = await fetchFreshIndex()
     if (idx) {
       // V4: iterate accounts, fetch each manifest, retry the key lookup after each.
       let searchedAny = false
