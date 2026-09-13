@@ -199,7 +199,6 @@ async function postBotJson(url: string, body: unknown): Promise<BotJsonResponse 
   }
   return null
 }
-}
 
 /**
  * Fire-and-forget wrapper: runs an async function on the next tick without
