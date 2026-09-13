@@ -2096,10 +2096,23 @@ function sleepWithJitter(baseMs: number): Promise<void> {
  * write reports durable:false instead of a false ok).
  */
 async function fetchFreshIndex(): Promise<AccountIndex | null> {
-  // SINGLE attempt, fail fast. Layered retries multiply worst-case latency
-  // into minutes (flood death spiral) — the sync level owns the ONE paced
-  // retry. NULL means unreadable (caller fails the attempt); NEVER synthesize
-  // an empty index (that would clobber durable state with local-only).
+  // Normally a SINGLE attempt, fail fast: layered retries multiply
+  // worst-case latency into minutes (flood death spiral) — the sync level
+  // owns the ONE paced retry. NULL means unreadable (caller fails the
+  // attempt); NEVER synthesize an empty index (that would clobber durable
+  // state with local-only).
+  // ONE blip-retry: transient network aborts (Vercel↔Telegram route
+  // trouble, observed live as minutes of "index unreadable" with a healthy
+  // pin) must not fail an otherwise-good sync. A single extra READ is
+  // flood-safe (reads are Telegram's lenient bucket; writes still fail
+  // fast and surface). NOT a loop — exactly one second chance.
+  try {
+    const first = await fetchAccountIndex()
+    if (first) return first
+  } catch {
+    // Fall through to the blip-retry below.
+  }
+  await sleepMs(2000)
   try {
     return await fetchAccountIndex()
   } catch {
@@ -2391,7 +2404,7 @@ export async function syncAccountManifestToTelegram(
     // (explicit match still required, just not on the first try).
     let verify = await fetchFreshIndex()
     let current = verify?.accounts[userId]
-    for (let v = 0; v < 2 && !(verify && current && current.messageId === sent.messageId); v++) {
+    for (let v = 0; v < 4 && !(verify && current && current.messageId === sent.messageId); v++) {
       await sleepMs(3000)
       verify = await fetchFreshIndex()
       current = verify?.accounts[userId]
