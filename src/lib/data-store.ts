@@ -2070,6 +2070,53 @@ async function fetchBaseWithRetry(fileId: string): Promise<AccountManifest | nul
 }
 
 /**
+ * Post-verify convergence repair (runs post-response via after()).
+ *
+ * Closes the last-pin-wins hole the attempt loop cannot see: our pin
+ * VERIFIED (we are the tip), but a rival instance mid-flight on a STALE base
+ * pins AFTER our verify and silently drops our keys. The loser of that race
+ * must re-check — so seconds after every verified pin we re-fetch the tip
+ * and, if someone overwrote us, re-merge our in-memory state over their base
+ * and re-pin. Merges are unions, so overlapping repairs converge
+ * monotonically instead of fighting.
+ *
+ * Bounded (3 rounds x 3s) and fully background — client latency unaffected.
+ * Never throws.
+ */
+function schedulePostVerifyRepair(userId: string, pinnedRev: number): void {
+  const repair = async (): Promise<unknown> => {
+    try {
+      let rev = pinnedRev
+      for (let round = 0; round < 3; round++) {
+        await sleepMs(3000)
+        const idx = await fetchFreshIndexWithRetry()
+        const cur = idx.accounts[userId]
+        // Still the tip — nobody overwrote us. Done.
+        if (cur && cur.messageId === rev) return null
+        console.warn(
+          `[store] post-verify repair for ${userId}: tip moved (round ${round + 1}) — re-merging`,
+        )
+        const localNow = buildAccountManifest(userId)
+        if (!localNow) return null
+        const base = cur ? await fetchBaseWithRetry(cur.fileId) : null
+        const merged = base ? mergeAccountManifests(localNow, base) : localNow
+        restoreAccountManifest(merged)
+        const sent = await sendAccountManifest(merged)
+        if (!sent) continue
+        const entry = await pinAccountIndex(idx, userId, sent.messageId, sent.fileId, merged)
+        if (!entry) continue
+        rev = entry.messageId
+        lastDurableRev.set(userId, rev)
+      }
+    } catch {
+      // Background repair must never throw.
+    }
+    return null
+  }
+  keepAliveUntilSyncFlushed(repair)
+}
+
+/**
  * Sync ONE account's manifest to Telegram + update the pinned index. Used after
  * a write that affects only one account (the common case). Debounced per-account
  * via scheduleAccountSync.
@@ -2077,13 +2124,16 @@ async function fetchBaseWithRetry(fileId: string): Promise<AccountManifest | nul
  * Returns the updated index entry, or null on failure.
  */
 export async function syncAccountManifestToTelegram(userId: string): Promise<AccountIndexEntry | null> {
-  const local = buildAccountManifest(userId)
-  if (!local) return null
   // Fetch-merge-pin with pin-race + flood retry. NEVER upload a partial
   // local-only manifest over durable state (the old last-pin-wins clobber
   // that wiped other instances' keys). Flood failures RETRY with backoff
   // (bounded) instead of instantly failing into memory-only mode.
   for (let attempt = 0; attempt < 3; attempt++) {
+    // Rebuild local EVERY attempt: attempt N restores merged_N into memory,
+    // so rebuilding makes local grow monotonically — keys learned from a
+    // rival's base are never dropped by a later attempt's merge.
+    const local = buildAccountManifest(userId)
+    if (!local) return null
     // Fresh index every attempt (bypass the per-instance cache — another
     // instance may have pinned newer since we last looked).
     const idx = await fetchFreshIndexWithRetry()
@@ -2148,6 +2198,10 @@ export async function syncAccountManifestToTelegram(userId: string): Promise<Acc
       accountIndexCache = idx
       lastDurableRev.set(userId, sent.messageId)
       v4ModeActive = true
+      // A rival mid-flight on a stale base may pin AFTER our verify (silent
+      // last-pin-wins drop). The background repair re-checks the tip and
+      // re-merges if we got overwritten — client latency unaffected.
+      schedulePostVerifyRepair(userId, sent.messageId)
       return entry
     }
     console.warn(`[store] sync pin race/unverified for ${userId} (attempt ${attempt + 1}) — re-merging`)
