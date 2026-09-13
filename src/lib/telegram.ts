@@ -136,9 +136,21 @@ let breakerOpenUntil = 0
 const BREAKER_THRESHOLD = 5
 const BREAKER_COOLDOWN_MS = 120_000
 
-export function telegramBreakerStatus(): { open: boolean; failures: number; coolsDownInMs: number } {
+let lastBreakerError: string | null = null
+
+export function telegramBreakerStatus(): {
+  open: boolean
+  failures: number
+  coolsDownInMs: number
+  lastError: string | null
+} {
   const open = Date.now() < breakerOpenUntil
-  return { open, failures: floodFailures, coolsDownInMs: open ? breakerOpenUntil - Date.now() : 0 }
+  return {
+    open,
+    failures: floodFailures,
+    coolsDownInMs: open ? breakerOpenUntil - Date.now() : 0,
+    lastError: lastBreakerError,
+  }
 }
 
 function fakeFloodResponse(): Response {
@@ -159,22 +171,25 @@ async function breakerFetch(url: string, init?: RequestInit): Promise<Response> 
     if (res.ok) {
       floodFailures = 0
       breakerOpenUntil = 0
+      lastBreakerError = null
     } else {
       floodFailures += 1
+      lastBreakerError = `HTTP ${res.status} on ${new URL(url).pathname}`
       if (floodFailures >= BREAKER_THRESHOLD) {
         breakerOpenUntil = Date.now() + BREAKER_COOLDOWN_MS
         console.error(
-          `[telegram] flood breaker OPEN (${floodFailures} consecutive failures) — quiet for 120s`,
+          `[telegram] flood breaker OPEN (${floodFailures} consecutive failures, last: ${lastBreakerError}) — quiet for 120s`,
         )
       }
     }
     return res
   } catch (err) {
     floodFailures += 1
+    lastBreakerError = `network: ${err instanceof Error ? err.message : String(err)}`.slice(0, 120)
     if (floodFailures >= BREAKER_THRESHOLD) {
       breakerOpenUntil = Date.now() + BREAKER_COOLDOWN_MS
       console.error(
-        `[telegram] flood breaker OPEN (${floodFailures} consecutive failures) — quiet for 120s`,
+        `[telegram] flood breaker OPEN (${floodFailures} consecutive failures, last: ${lastBreakerError}) — quiet for 120s`,
       )
     }
     throw err
