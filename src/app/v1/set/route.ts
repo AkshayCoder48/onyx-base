@@ -49,5 +49,5 @@ export async function POST(req: NextRequest) {
     json: isRawString ? coerceValue(body.value as string).value : body.value,
   })
 
-  return ok({ key: result.key, value: result.value, type: result.valueType, collection: result.collection })
+  return ok({ key: result.key, value: result.value, type: result.valueType, collection: result.collection, durable: result.durable === true })
 }

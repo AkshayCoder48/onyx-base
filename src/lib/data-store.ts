@@ -37,6 +37,8 @@ import {
   pinAccountIndex,
   sendAccountManifest,
   fetchAccountManifest,
+  sendLargeValueDocument,
+  deleteTelegramMessage,
   SYSTEM_ACCOUNT_ID,
   type AccountIndex,
   type AccountIndexEntry,
@@ -141,7 +143,36 @@ export interface RecordEntry {
   telegramMessageId: number | null
   createdAt: string
   updatedAt: string
+  /**
+   * Large-value offload pointer. Values over LARGE_VALUE_THRESHOLD_BYTES are
+   * stored as a Telegram document (the manifest itself must stay small —
+   * cloud Bot API caps uploads at 50MB / downloads at 20MB) and resolved on
+   * read. When set, `value` is '' and the real value lives at fileId.
+   */
+  valueRef?: { fileId: string; messageId: number; bytes: number } | null
 }
+
+/**
+ * Delete tombstone — the ONLY thing that makes deletes stick under
+ * multi-instance merge sync. Without tombstones, instance A's manifest
+ * (which never saw the delete) would resurrect instance B's deleted
+ * record on the next merge/rehydrate. Pruned after TOMBSTONE_TTL_MS.
+ */
+export interface RecordTombstone {
+  userId: string
+  kind: 'record' | 'file'
+  /** Record collection, or '' for files. */
+  collection: string
+  /** Record key, or file id for files. */
+  key: string
+  /** ISO timestamp of the delete. Records/files with updatedAt older than
+   * this are shadowed (dropped); same-or-newer wins (covers delete→recreate
+   * within the same millisecond). */
+  deletedAt: string
+}
+
+/** Tombstones older than this are pruned (7 days — far beyond any sync lag). */
+export const TOMBSTONE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 export interface LogEntry {
   id: string
@@ -288,6 +319,8 @@ interface StoreShape {
   collectionNames: CollectionNameRecord[]
   /** Admin keys (`onyxbase_*`) — grant cross-user read access via /admin. */
   adminKeys: AdminKeyRecord[]
+  /** Delete tombstones — see RecordTombstone. Persisted + synced. */
+  recordTombstones: RecordTombstone[]
 }
 
 interface CollectionNameRecord {
@@ -358,7 +391,7 @@ const isServerlessRuntime =
 const DATA_DIR = isServerlessRuntime ? '/tmp' : path.join(process.cwd(), 'db')
 const STORE_PATH = path.join(DATA_DIR, 'cloudkv.json')
 
-const EMPTY_STORE: StoreShape = { users: [], apiKeys: [], records: [], logs: [], telegramConfigs: [], shareTokens: [], files: [], collectionNames: [], adminKeys: [] }
+const EMPTY_STORE: StoreShape = { users: [], apiKeys: [], records: [], logs: [], telegramConfigs: [], shareTokens: [], files: [], collectionNames: [], adminKeys: [], recordTombstones: [] }
 
 function loadFromDisk(): StoreShape {
   try {
@@ -374,6 +407,7 @@ function loadFromDisk(): StoreShape {
       files: parsed.files ?? [],
       collectionNames: parsed.collectionNames ?? [],
       adminKeys: parsed.adminKeys ?? [],
+      recordTombstones: parsed.recordTombstones ?? [],
     }
   } catch {
     return { ...EMPTY_STORE }
@@ -394,6 +428,7 @@ function saveToDisk() {
       files: store.files,
       collectionNames: store.collectionNames,
       adminKeys: store.adminKeys,
+      recordTombstones: store.recordTombstones,
     }
     // Atomic write: write to a temp file in the same directory, then rename.
     // `rename` is atomic on POSIX, so a crash mid-write can never leave a
@@ -453,6 +488,7 @@ function ensureShape(loaded: Partial<StoreShape>): StoreShape {
     })),
     collectionNames: loaded.collectionNames ?? [],
     adminKeys: loaded.adminKeys ?? [],
+    recordTombstones: loaded.recordTombstones ?? [],
   }
 }
 
@@ -491,6 +527,7 @@ function backfillInPlace(existing: StoreShape): StoreShape {
   }
   if (!Array.isArray(existing.collectionNames)) existing.collectionNames = []
   if (!Array.isArray(existing.adminKeys)) existing.adminKeys = []
+  if (!Array.isArray(existing.recordTombstones)) existing.recordTombstones = []
   return existing
 }
 
@@ -1474,6 +1511,7 @@ export function buildAccountManifest(userId: string): AccountManifest | null {
       collectionNames: [],
       telegramConfigs: [],
       adminKeys: store.adminKeys,
+      tombstones: store.recordTombstones.filter((t) => t.userId === ADMIN_DB_USER_ID),
     }
   }
   // Regular user account: match by public userId (usr_xxx).
@@ -1493,12 +1531,20 @@ export function buildAccountManifest(userId: string): AccountManifest | null {
     shareTokens: store.shareTokens.filter((t) => t.userId === user.id),
     collectionNames: store.collectionNames.filter((c) => c.userId === user.id),
     telegramConfigs: store.telegramConfigs.filter((t) => t.userId === user.id),
+    tombstones: store.recordTombstones.filter((t) => t.userId === user.id),
   }
 }
 
 /**
- * Restore a single V4 account manifest into the local store. Idempotent —
- * existing matching items are left untouched. Used by rehydrateAccountFromTelegram.
+ * Restore a single V4 account manifest into the local store — MERGE
+ * semantics (the old add-only restore could neither update stale values nor
+ * apply deletes, so instances diverged permanently):
+ * - tombstones union in first; anything they shadow is dropped, never added.
+ * - records/files: missing ones are added; remote-NEWER ones overwrite local.
+ * - apiKeys/shareTokens/adminKeys: missing added; revoked=OR; lastUsedAt=max.
+ * - user: remote-newer wins; passwordHash backfilled from either side.
+ * Idempotent. Saves to disk when anything changed. Returns ADD counts
+ * (updates/shadows also persist but aren't counted as restored).
  */
 function restoreAccountManifest(m: AccountManifest): {
   users: number
@@ -1512,73 +1558,143 @@ function restoreAccountManifest(m: AccountManifest): {
   let recordsRestored = 0
   let logsRestored = 0
   let filesRestored = 0
+  let dirty = false
+
+  // 0. Tombstones first — they govern everything below.
+  const remoteTombs = asArray<RecordTombstone>(m.tombstones).filter(
+    (t) => t && t.userId && t.key && (t.kind === 'record' || t.kind === 'file'),
+  )
+  if (remoteTombs.length > 0) {
+    const before = JSON.stringify(store.recordTombstones)
+    store.recordTombstones = mergeTombstoneLists(store.recordTombstones, remoteTombs)
+    if (JSON.stringify(store.recordTombstones) !== before) dirty = true
+  }
+  const tombById = tombMap(store.recordTombstones)
+  const shadowed = (
+    userId: string, kind: 'record' | 'file', collection: string, key: string, updatedAt: string,
+  ): boolean => {
+    const del = tombById.get(`${userId}|${kind}|${collection || ''}|${key}`)
+    return del !== undefined && msOf(updatedAt) < del
+  }
 
   // User (skip for __system__).
   if (m.userId !== SYSTEM_ACCOUNT_ID && m.user) {
     const u = m.user as UserRecord
-    if (u.id && u.userId && !store.users.some((x) => x.id === u.id || x.userId === u.userId)) {
-      store.users.push({
-        id: u.id,
-        userId: u.userId,
-        name: u.name ?? null,
-        email: u.email ?? null,
-        passwordHash: u.passwordHash ?? null,
-        plan: u.plan ?? 'unlimited',
-        createdAt: u.createdAt ?? new Date().toISOString(),
-        updatedAt: u.updatedAt ?? u.createdAt ?? new Date().toISOString(),
-      })
-      usersRestored++
-    } else if (u.passwordHash) {
-      const local = store.users.find((x) => x.id === u.id || x.userId === u.userId)
-      if (local && !local.passwordHash) {
+    const local = u.id && u.userId ? store.users.find((x) => x.id === u.id || x.userId === u.userId) : undefined
+    if (!local) {
+      if (u.id && u.userId) {
+        store.users.push({
+          id: u.id,
+          userId: u.userId,
+          name: u.name ?? null,
+          email: u.email ?? null,
+          passwordHash: u.passwordHash ?? null,
+          plan: u.plan ?? 'unlimited',
+          createdAt: u.createdAt ?? new Date().toISOString(),
+          updatedAt: u.updatedAt ?? u.createdAt ?? new Date().toISOString(),
+        })
+        usersRestored++
+        dirty = true
+      }
+    } else {
+      if (u.passwordHash && !local.passwordHash) {
         local.passwordHash = u.passwordHash
-        local.updatedAt = new Date().toISOString()
+        dirty = true
+      }
+      if (msOf(u.updatedAt) > msOf(local.updatedAt)) {
+        local.name = u.name ?? local.name
+        local.email = u.email ?? local.email
+        local.plan = u.plan ?? local.plan
+        if (u.passwordHash) local.passwordHash = u.passwordHash
+        local.updatedAt = u.updatedAt
+        dirty = true
       }
     }
   }
 
-  // API keys.
-  for (const k of (m.apiKeys ?? []) as ApiKeyRecord[]) {
+  // API keys: add missing + revoked-OR + lastUsedAt-max.
+  for (const k of asArray<ApiKeyRecord>(m.apiKeys)) {
     if (!k.id || !k.key || !k.userId) continue
-    if (store.apiKeys.some((x) => x.id === k.id || x.key === k.key)) continue
-    store.apiKeys.push({
-      id: k.id,
-      key: k.key,
-      name: k.name ?? 'restored',
-      userId: k.userId,
-      createdAt: k.createdAt ?? new Date().toISOString(),
-      lastUsedAt: k.lastUsedAt ?? null,
-      revoked: k.revoked ?? false,
-      scopes: Array.isArray(k.scopes) ? k.scopes.filter((s) => ALL_API_KEY_SCOPES.includes(s)) : [],
-      expiresAt: k.expiresAt ?? null,
-      collectionAllowList: Array.isArray(k.collectionAllowList) ? k.collectionAllowList : [],
-      tableAllowList: Array.isArray(k.tableAllowList) ? k.tableAllowList : [],
-      rateLimitPerMin: k.rateLimitPerMin ?? null,
-      rateLimitMbPerDay: k.rateLimitMbPerDay ?? null,
-    })
-    keysRestored++
+    const local = store.apiKeys.find((x) => x.id === k.id || x.key === k.key)
+    if (!local) {
+      store.apiKeys.push({
+        id: k.id,
+        key: k.key,
+        name: k.name ?? 'restored',
+        userId: k.userId,
+        createdAt: k.createdAt ?? new Date().toISOString(),
+        lastUsedAt: k.lastUsedAt ?? null,
+        revoked: k.revoked ?? false,
+        scopes: Array.isArray(k.scopes) ? k.scopes.filter((s) => ALL_API_KEY_SCOPES.includes(s)) : [],
+        expiresAt: k.expiresAt ?? null,
+        collectionAllowList: Array.isArray(k.collectionAllowList) ? k.collectionAllowList : [],
+        tableAllowList: Array.isArray(k.tableAllowList) ? k.tableAllowList : [],
+        rateLimitPerMin: k.rateLimitPerMin ?? null,
+        rateLimitMbPerDay: k.rateLimitMbPerDay ?? null,
+      })
+      keysRestored++
+      dirty = true
+    } else {
+      if (k.revoked && !local.revoked) {
+        local.revoked = true
+        dirty = true
+      }
+      const mx = maxIso(local.lastUsedAt, k.lastUsedAt)
+      if (mx !== local.lastUsedAt) {
+        local.lastUsedAt = mx
+        dirty = true
+      }
+    }
   }
 
-  // Records.
-  for (const r of (m.records ?? []) as RecordEntry[]) {
+  // Records: add missing (unless tombstoned), overwrite when remote is newer.
+  for (const r of asArray<RecordEntry>(m.records)) {
     if (!r || !r.userId || !r.collection || !r.key) continue
-    if (store.records.some((x) => x.userId === r.userId && x.collection === r.collection && x.key === r.key)) continue
-    store.records.push({
-      id: r.id || (r.userId + ':' + r.collection + ':' + r.key),
-      userId: r.userId,
-      collection: r.collection,
-      key: r.key,
-      value: r.value ?? '',
-      valueType: r.valueType ?? 'string',
-      telegramMessageId: r.telegramMessageId ?? null,
-      createdAt: r.createdAt ?? new Date().toISOString(),
-      updatedAt: r.updatedAt ?? r.createdAt ?? new Date().toISOString(),
-    })
-    recordsRestored++
+    const li = store.records.findIndex(
+      (x) => x.userId === r.userId && x.collection === r.collection && x.key === r.key,
+    )
+    if (li === -1) {
+      if (shadowed(r.userId, 'record', r.collection, r.key, r.updatedAt)) continue
+      store.records.push({
+        id: r.id || (r.userId + ':' + r.collection + ':' + r.key),
+        userId: r.userId,
+        collection: r.collection,
+        key: r.key,
+        value: r.value ?? '',
+        valueType: r.valueType ?? 'string',
+        telegramMessageId: r.telegramMessageId ?? null,
+        valueRef: r.valueRef ?? null,
+        createdAt: r.createdAt ?? new Date().toISOString(),
+        updatedAt: r.updatedAt ?? r.createdAt ?? new Date().toISOString(),
+      })
+      recordsRestored++
+      dirty = true
+    } else if (msOf(r.updatedAt) > msOf(store.records[li].updatedAt)) {
+      if (shadowed(r.userId, 'record', r.collection, r.key, r.updatedAt)) {
+        store.records.splice(li, 1)
+        dirty = true
+        continue
+      }
+      const local = store.records[li]
+      local.value = r.value ?? ''
+      local.valueType = r.valueType ?? local.valueType
+      local.valueRef = r.valueRef ?? null
+      local.telegramMessageId = r.telegramMessageId ?? local.telegramMessageId
+      local.updatedAt = r.updatedAt
+      dirty = true
+    }
+  }
+  // Local records shadowed by tombstones go even when absent remotely.
+  {
+    const before = store.records.length
+    store.records = store.records.filter(
+      (x) => !shadowed(x.userId, 'record', x.collection, x.key, x.updatedAt),
+    )
+    if (store.records.length !== before) dirty = true
   }
 
-  // Logs.
-  for (const l of (m.logs ?? []) as LogEntry[]) {
+  // Logs: append-only union by id.
+  for (const l of asArray<LogEntry>(m.logs)) {
     if (!l || !l.id) continue
     if (store.logs.some((x) => x.id === l.id)) continue
     store.logs.push({
@@ -1592,56 +1708,90 @@ function restoreAccountManifest(m: AccountManifest): {
       createdAt: l.createdAt ?? new Date().toISOString(),
     })
     logsRestored++
+    dirty = true
   }
 
-  // Files.
-  for (const f of (m.files ?? []) as FileRecord[]) {
+  // Files: add missing (unless tombstoned), overwrite when remote is newer
+  // (keeping the higher download counter).
+  for (const f of asArray<FileRecord>(m.files)) {
     if (!f || !f.id) continue
-    if (store.files.some((x) => x.id === f.id)) continue
-    store.files.push(f)
-    filesRestored++
+    const li = store.files.findIndex((x) => x.id === f.id)
+    if (li === -1) {
+      if (shadowed(f.userId, 'file', '', f.id, f.updatedAt)) continue
+      store.files.push(f)
+      filesRestored++
+      dirty = true
+    } else if (msOf(f.updatedAt) > msOf(store.files[li].updatedAt)) {
+      if (shadowed(f.userId, 'file', '', f.id, f.updatedAt)) {
+        store.files.splice(li, 1)
+        dirty = true
+        continue
+      }
+      const downloads = Math.max(store.files[li].downloads ?? 0, f.downloads ?? 0)
+      store.files[li] = { ...f, downloads }
+      dirty = true
+    }
+  }
+  {
+    const before = store.files.length
+    store.files = store.files.filter((x) => !shadowed(x.userId, 'file', '', x.id, x.updatedAt))
+    if (store.files.length !== before) dirty = true
   }
 
-  // Share tokens.
-  for (const t of (m.shareTokens ?? []) as ShareTokenRecord[]) {
+  // Share tokens: add missing + revoked-OR.
+  for (const t of asArray<ShareTokenRecord>(m.shareTokens)) {
     if (!t || !t.id) continue
-    if (store.shareTokens.some((x) => x.id === t.id)) continue
-    store.shareTokens.push(t)
-  }
-
-  // Collection names.
-  for (const c of (m.collectionNames ?? []) as CollectionNameRecord[]) {
-    if (!c || !c.userId || !c.name) continue
-    if (store.collectionNames.some((x) => x.userId === c.userId && x.name === c.name)) continue
-    store.collectionNames.push({ userId: c.userId, name: c.name, createdAt: c.createdAt ?? new Date().toISOString() })
-  }
-
-  // Telegram configs.
-  for (const tc of (m.telegramConfigs ?? []) as TelegramConfigRecord[]) {
-    if (!tc || !tc.userId) continue
-    if (store.telegramConfigs.some((x) => x.userId === tc.userId)) continue
-    store.telegramConfigs.push(tc)
-  }
-
-  // Admin keys (only on __system__ manifest).
-  if (m.userId === SYSTEM_ACCOUNT_ID && Array.isArray(m.adminKeys)) {
-    for (const ak of m.adminKeys as AdminKeyRecord[]) {
-      if (!ak || !ak.key) continue
-      if (store.adminKeys.some((x) => x.key === ak.key)) continue
-      store.adminKeys.push({
-        id: ak.id ?? ('admin_' + ak.key.slice(-8)),
-        key: ak.key,
-        label: ak.label ?? 'restored',
-        createdAt: ak.createdAt ?? new Date().toISOString(),
-        createdBy: ak.createdBy ?? 'restored',
-        promotedFromUserId: ak.promotedFromUserId ?? null,
-        promotedFromUserEmail: ak.promotedFromUserEmail ?? null,
-        revoked: ak.revoked ?? false,
-      })
+    const local = store.shareTokens.find((x) => x.id === t.id)
+    if (!local) {
+      store.shareTokens.push(t)
+      dirty = true
+    } else if (t.revoked && !local.revoked) {
+      local.revoked = true
+      dirty = true
     }
   }
 
-  if (usersRestored || keysRestored || recordsRestored || logsRestored || filesRestored) saveToDisk()
+  // Collection names.
+  for (const c of asArray<CollectionNameRecord>(m.collectionNames)) {
+    if (!c || !c.userId || !c.name) continue
+    if (store.collectionNames.some((x) => x.userId === c.userId && x.name === c.name)) continue
+    store.collectionNames.push({ userId: c.userId, name: c.name, createdAt: c.createdAt ?? new Date().toISOString() })
+    dirty = true
+  }
+
+  // Telegram configs.
+  for (const tc of asArray<TelegramConfigRecord>(m.telegramConfigs)) {
+    if (!tc || !tc.userId) continue
+    if (store.telegramConfigs.some((x) => x.userId === tc.userId)) continue
+    store.telegramConfigs.push(tc)
+    dirty = true
+  }
+
+  // Admin keys (only on __system__ manifest): add missing + revoked-OR.
+  if (m.userId === SYSTEM_ACCOUNT_ID && Array.isArray(m.adminKeys)) {
+    for (const ak of m.adminKeys as AdminKeyRecord[]) {
+      if (!ak || !ak.key) continue
+      const local = store.adminKeys.find((x) => x.key === ak.key)
+      if (!local) {
+        store.adminKeys.push({
+          id: ak.id ?? ('admin_' + ak.key.slice(-8)),
+          key: ak.key,
+          label: ak.label ?? 'restored',
+          createdAt: ak.createdAt ?? new Date().toISOString(),
+          createdBy: ak.createdBy ?? 'restored',
+          promotedFromUserId: ak.promotedFromUserId ?? null,
+          promotedFromUserEmail: ak.promotedFromUserEmail ?? null,
+          revoked: ak.revoked ?? false,
+        })
+        dirty = true
+      } else if (ak.revoked && !local.revoked) {
+        local.revoked = true
+        dirty = true
+      }
+    }
+  }
+
+  if (dirty) saveToDisk()
   return { users: usersRestored, apiKeys: keysRestored, records: recordsRestored, logs: logsRestored, files: filesRestored }
 }
 
@@ -1660,6 +1810,210 @@ export async function getAccountIndex(): Promise<AccountIndex | null> {
   return idx
 }
 
+// ─── Merge sync (the multi-instance durability fix) ──────────────────────────
+//
+// THE BUG THIS FIXES: every sync used to upload ONLY the syncing instance's
+// local records and pin them as the whole durable truth. With N warm
+// serverless instances, each sync ERASED the other instances' keys from
+// Telegram (last-pin-wins clobber); when instances recycled minutes later,
+// everything not in the final pin was gone forever. Symptoms: parallel
+// writes invisible to later reads, total "evaporation" within minutes,
+// deletes that don't stick, LIST/GET/export disagreeing.
+//
+// THE FIX: fetch-merge-pin. Every sync fetches the latest durable manifest,
+// merges it with local state (union, latest-updatedAt-wins, tombstones for
+// deletes), uploads the MERGED manifest, pins, then verifies the pin.
+// Concurrent syncs can still race the pin — the verify step detects a lost
+// race and re-merges + re-pins (bounded retries), so no write is silently
+// dropped. Merge is idempotent, so duplicate syncs are harmless.
+
+function msOf(iso: string | null | undefined): number {
+  const t = Date.parse(iso || '')
+  return Number.isFinite(t) ? t : 0
+}
+
+function maxIso(a: string | null | undefined, b: string | null | undefined): string | null {
+  if (!a) return b ?? null
+  if (!b) return a
+  return msOf(b) > msOf(a) ? b : a
+}
+
+function mergeTombstoneLists(
+  a: RecordTombstone[],
+  b: RecordTombstone[],
+): RecordTombstone[] {
+  const cutoff = Date.now() - TOMBSTONE_TTL_MS
+  const map = new Map<string, RecordTombstone>()
+  for (const t of [...a, ...b]) {
+    if (!t || !t.userId || !t.key || (t.kind !== 'record' && t.kind !== 'file')) continue
+    if (msOf(t.deletedAt) < cutoff) continue
+    const k = `${t.userId}|${t.kind}|${t.collection || ''}|${t.key}`
+    const prev = map.get(k)
+    if (!prev || msOf(t.deletedAt) > msOf(prev.deletedAt)) map.set(k, { ...t })
+  }
+  return [...map.values()]
+}
+
+function tombMap(tombs: RecordTombstone[]): Map<string, number> {
+  const m = new Map<string, number>()
+  for (const t of tombs) {
+    m.set(`${t.userId}|${t.kind}|${t.collection || ''}|${t.key}`, msOf(t.deletedAt))
+  }
+  return m
+}
+
+function asArray<T>(v: unknown): T[] {
+  return Array.isArray(v) ? (v as T[]) : []
+}
+
+/**
+ * Merge two account manifests (LOCAL ∪ REMOTE) into one converged manifest.
+ * - records/files: latest-updatedAt-wins per identity, tombstone-shadowed
+ *   items dropped.
+ * - tombstones: union, latest-deletedAt-wins, >7d pruned.
+ * - logs: union by id (append-only).
+ * - apiKeys/shareTokens/adminKeys: union by id; revoked=OR (a revoke anywhere
+ *   sticks everywhere); lastUsedAt=max; other fields prefer LOCAL on ties.
+ * - user: latest-updatedAt-wins, passwordHash backfilled from either side.
+ * - collectionNames/telegramConfigs: union by identity.
+ */
+export function mergeAccountManifests(local: AccountManifest, remote: AccountManifest): AccountManifest {
+  const tombs = mergeTombstoneLists(
+    asArray<RecordTombstone>(local.tombstones),
+    asArray<RecordTombstone>(remote.tombstones),
+  )
+  const tombById = tombMap(tombs)
+  const shadowed = (
+    userId: string, kind: 'record' | 'file', collection: string, key: string, updatedAt: string,
+  ): boolean => {
+    const del = tombById.get(`${userId}|${kind}|${collection || ''}|${key}`)
+    return del !== undefined && msOf(updatedAt) < del
+  }
+
+  // Records: latest wins (local second + >= → local wins exact ties).
+  const recMap = new Map<string, RecordEntry>()
+  for (const r of [...asArray<RecordEntry>(remote.records), ...asArray<RecordEntry>(local.records)]) {
+    if (!r || !r.userId || !r.collection || !r.key) continue
+    const k = `${r.userId}|${r.collection}|${r.key}`
+    const prev = recMap.get(k)
+    if (!prev || msOf(r.updatedAt) >= msOf(prev.updatedAt)) recMap.set(k, { ...r })
+  }
+  const records = [...recMap.values()].filter(
+    (r) => !shadowed(r.userId, 'record', r.collection, r.key, r.updatedAt),
+  )
+
+  // Files: same latest-wins + tombstone shadowing (tomb key = file id).
+  const fileMap = new Map<string, FileRecord>()
+  for (const f of [...asArray<FileRecord>(remote.files), ...asArray<FileRecord>(local.files)]) {
+    if (!f || !f.id) continue
+    const prev = fileMap.get(f.id)
+    if (!prev || msOf(f.updatedAt) >= msOf(prev.updatedAt)) fileMap.set(f.id, { ...f })
+  }
+  const files = [...fileMap.values()].filter(
+    (f) => !shadowed(f.userId, 'file', '', f.id, f.updatedAt),
+  )
+
+  // API keys: union + revoked-OR + lastUsedAt-max.
+  const keyMap = new Map<string, ApiKeyRecord>()
+  for (const k of [...asArray<ApiKeyRecord>(remote.apiKeys), ...asArray<ApiKeyRecord>(local.apiKeys)]) {
+    if (!k || !k.id || !k.key || !k.userId) continue
+    const prev = keyMap.get(k.id)
+    if (!prev) {
+      keyMap.set(k.id, { ...k })
+    } else {
+      keyMap.set(k.id, {
+        ...prev,
+        ...k,
+        revoked: prev.revoked || k.revoked,
+        lastUsedAt: maxIso(prev.lastUsedAt, k.lastUsedAt),
+      })
+    }
+  }
+
+  // Share tokens: same revoked-OR treatment.
+  const shareMap = new Map<string, ShareTokenRecord>()
+  for (const t of [...asArray<ShareTokenRecord>(remote.shareTokens), ...asArray<ShareTokenRecord>(local.shareTokens)]) {
+    if (!t || !t.id) continue
+    const prev = shareMap.get(t.id)
+    if (!prev) {
+      shareMap.set(t.id, { ...t })
+    } else {
+      shareMap.set(t.id, {
+        ...prev,
+        ...t,
+        revoked: prev.revoked || t.revoked,
+        lastUsedAt: maxIso(prev.lastUsedAt, t.lastUsedAt),
+      })
+    }
+  }
+
+  // Admin keys: union + revoked-OR.
+  const adminMap = new Map<string, AdminKeyRecord>()
+  for (const ak of [...asArray<AdminKeyRecord>(remote.adminKeys), ...asArray<AdminKeyRecord>(local.adminKeys)]) {
+    if (!ak || !ak.key) continue
+    const id = ak.id ?? ak.key
+    const prev = adminMap.get(id)
+    if (!prev) {
+      adminMap.set(id, { ...ak })
+    } else {
+      adminMap.set(id, { ...prev, ...ak, revoked: prev.revoked || ak.revoked })
+    }
+  }
+
+  // Logs: append-only union by id.
+  const logMap = new Map<string, LogEntry>()
+  for (const l of [...asArray<LogEntry>(remote.logs), ...asArray<LogEntry>(local.logs)]) {
+    if (!l || !l.id) continue
+    if (!logMap.has(l.id)) logMap.set(l.id, { ...l })
+  }
+
+  // Collection names: union by (userId, name).
+  const cnMap = new Map<string, CollectionNameRecord>()
+  for (const c of [...asArray<CollectionNameRecord>(remote.collectionNames), ...asArray<CollectionNameRecord>(local.collectionNames)]) {
+    if (!c || !c.userId || !c.name) continue
+    const k = `${c.userId}|${c.name}`
+    if (!cnMap.has(k)) cnMap.set(k, { ...c })
+  }
+
+  // Telegram configs: union by userId (prefer local on conflict).
+  const tcMap = new Map<string, TelegramConfigRecord>()
+  for (const tc of [...asArray<TelegramConfigRecord>(remote.telegramConfigs), ...asArray<TelegramConfigRecord>(local.telegramConfigs)]) {
+    if (!tc || !tc.userId) continue
+    if (!tcMap.has(tc.userId)) tcMap.set(tc.userId, { ...tc })
+    else if ((local.telegramConfigs as TelegramConfigRecord[]).some((x) => x.userId === tc.userId)) {
+      tcMap.set(tc.userId, { ...(local.telegramConfigs as TelegramConfigRecord[]).find((x) => x.userId === tc.userId)! })
+    }
+  }
+
+  // User: latest-updatedAt-wins + passwordHash backfill.
+  const lu = (local.user ?? null) as UserRecord | null
+  const ru = (remote.user ?? null) as UserRecord | null
+  let user: unknown | null = lu ?? ru
+  if (lu && ru) {
+    const winner = msOf(ru.updatedAt) > msOf(lu.updatedAt) ? { ...ru } : { ...lu }
+    if (!winner.passwordHash) winner.passwordHash = lu.passwordHash ?? ru.passwordHash ?? null
+    user = winner
+  }
+
+  return {
+    cloudkv: true,
+    kind: 'account-manifest',
+    version: 4,
+    userId: local.userId,
+    exportedAt: new Date().toISOString(),
+    user,
+    apiKeys: [...keyMap.values()],
+    records,
+    logs: [...logMap.values()],
+    files,
+    shareTokens: [...shareMap.values()],
+    collectionNames: [...cnMap.values()],
+    telegramConfigs: [...tcMap.values()],
+    adminKeys: local.userId === SYSTEM_ACCOUNT_ID || remote.userId === SYSTEM_ACCOUNT_ID ? [...adminMap.values()] : [],
+    tombstones: tombs,
+  }
+}
+
 /**
  * Sync ONE account's manifest to Telegram + update the pinned index. Used after
  * a write that affects only one account (the common case). Debounced per-account
@@ -1668,33 +2022,84 @@ export async function getAccountIndex(): Promise<AccountIndex | null> {
  * Returns the updated index entry, or null on failure.
  */
 export async function syncAccountManifestToTelegram(userId: string): Promise<AccountIndexEntry | null> {
-  const manifest = buildAccountManifest(userId)
-  if (!manifest) return null
-  const idx = (await getAccountIndex()) ?? {
-    cloudkv: true as const,
-    kind: 'account-index' as const,
-    version: 4 as const,
-    exportedAt: new Date().toISOString(),
-    accounts: {},
+  const local = buildAccountManifest(userId)
+  if (!local) return null
+  // Fetch-merge-pin with pin-race retry. NEVER upload a partial local-only
+  // manifest over durable state (the old last-pin-wins clobber that wiped
+  // other instances' keys). On base-fetch failure we ABORT (safer than
+  // clobbering) and let the next write/debounced sync retry.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let idx: AccountIndex
+    try {
+      // Fresh index every attempt (bypass the per-instance cache — another
+      // instance may have pinned newer since we last looked).
+      idx = (await fetchAccountIndex()) ?? {
+        cloudkv: true as const,
+        kind: 'account-index' as const,
+        version: 4 as const,
+        exportedAt: new Date().toISOString(),
+        accounts: {},
+      }
+    } catch {
+      return null
+    }
+    const existing = idx.accounts[userId]
+    let base: AccountManifest | null = null
+    if (existing) {
+      try {
+        base = await fetchAccountManifest(existing.fileId)
+      } catch {
+        base = null
+      }
+      if (!base) {
+        console.error(`[store] sync aborted for ${userId}: durable base unreadable (not clobbering)`)
+        return null
+      }
+    }
+    const merged = base ? mergeAccountManifests(local, base) : local
+    // Fold the converged state back into THIS instance too (fast cross-
+    // instance convergence; merge semantics make this safe).
+    restoreAccountManifest(merged)
+    // Upload FIRST, delete the superseded doc only AFTER the new pin
+    // verifies (deleting before upload risks total loss on failure).
+    const sent = await sendAccountManifest(merged)
+    if (!sent) return null
+    const recordCount = (merged.records ?? []).length
+    const entry: AccountIndexEntry = {
+      userId,
+      messageId: sent.messageId,
+      fileId: sent.fileId,
+      bytes: sent.bytes,
+      recordCount,
+      updatedAt: new Date().toISOString(),
+    }
+    idx.accounts[userId] = entry
+    idx.exportedAt = new Date().toISOString()
+    const pinnedId = await pinAccountIndex(idx)
+    if (!pinnedId) return null
+    // Verify we still hold the pin — another instance may have pinned
+    // after our fetch (lost race → re-merge + re-pin, nothing dropped
+    // because our data is in our uploaded doc AND our local store, and the
+    // next merge picks it up from local).
+    let verify: AccountIndex | null = null
+    try {
+      verify = await fetchAccountIndex()
+    } catch {
+      verify = null
+    }
+    const current = verify?.accounts[userId]
+    if (current && current.messageId === sent.messageId) {
+      if (existing && existing.messageId !== sent.messageId) {
+        void deleteTelegramMessage(existing.messageId).catch(() => false)
+      }
+      accountIndexCache = idx
+      v4ModeActive = true
+      return entry
+    }
+    console.warn(`[store] sync pin race for ${userId} (attempt ${attempt + 1}) — re-merging`)
   }
-  const existing = idx.accounts[userId]
-  const sent = await sendAccountManifest(manifest, existing?.messageId)
-  if (!sent) return null
-  const recordCount = (manifest.records ?? []).length
-  const entry: AccountIndexEntry = {
-    userId,
-    messageId: sent.messageId,
-    fileId: sent.fileId,
-    bytes: sent.bytes,
-    recordCount,
-    updatedAt: new Date().toISOString(),
-  }
-  idx.accounts[userId] = entry
-  idx.exportedAt = new Date().toISOString()
-  await pinAccountIndex(idx)
-  accountIndexCache = idx
-  v4ModeActive = true
-  return entry
+  console.error(`[store] sync failed for ${userId} after 3 pin races`)
+  return null
 }
 
 // ─── Lazy record rehydrate-on-miss (read-your-writes across instances) ───────
@@ -1749,8 +2154,17 @@ export async function rehydrateAccountFromTelegram(userId: string): Promise<{
   files: number
   error?: string
 }> {
-  const idx = await getAccountIndex()
+  // Fresh index (bypass the per-instance cache): rehydrating from a stale
+  // cached index would restore an OLD manifest and miss just-written keys.
+  let idx: AccountIndex | null = null
+  try {
+    idx = await fetchAccountIndex()
+  } catch {
+    idx = null
+  }
   if (!idx) return { attempted: false, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0 }
+  accountIndexCache = idx
+  v4ModeActive = true
   const entry = idx.accounts[userId]
   if (!entry) return { attempted: false, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0 }
   try {
@@ -1884,22 +2298,26 @@ function ensureV4Probed(): Promise<void> {
  * caller's state change is recorded via the dirty set and the in-flight loop
  * re-pushes the LATEST state after the current upload settles — a flush
  * requested mid-flight can never be silently swallowed by the dedupe.
+ * Resolves true when the final push pinned durable state, false otherwise.
  */
-function runAccountSyncNow(userId: string): Promise<unknown> {
+function runAccountSyncNow(userId: string): Promise<boolean> {
   const existing = accountSyncInFlight.get(userId)
   if (existing) {
     accountSyncDirty.add(userId)
-    return existing
+    return existing as Promise<boolean>
   }
   const p = (async () => {
+    let ok = false
     do {
       accountSyncDirty.delete(userId)
       try {
-        await syncAccountManifestToTelegram(userId)
+        ok = (await syncAccountManifestToTelegram(userId)) !== null
       } catch (err) {
         console.error(`[store] scheduled account sync failed for ${userId}:`, err)
+        ok = false
       }
     } while (accountSyncDirty.has(userId))
+    return ok
   })().finally(() => {
     accountSyncInFlight.delete(userId)
   })
@@ -1907,14 +2325,17 @@ function runAccountSyncNow(userId: string): Promise<unknown> {
   return p
 }
 
-/** Await any pending (debounced or in-flight) account sync. */
-export async function flushAccountSync(userId: string): Promise<void> {
+/**
+ * Await any pending (debounced or in-flight) account sync. Resolves true
+ * when durable state was pinned. API mutations await this before responding.
+ */
+export async function flushAccountSync(userId: string): Promise<boolean> {
   const t = accountSyncTimers.get(userId)
   if (t) {
     clearTimeout(t)
     accountSyncTimers.delete(userId)
   }
-  await runAccountSyncNow(userId)
+  return runAccountSyncNow(userId)
 }
 
 export function scheduleAccountSync(userId: string): void {
@@ -2016,6 +2437,13 @@ export function upsertRecord(
   const botApiBaseUrl = opts.botApiBaseUrl
 
   if (existing) {
+    // Small-over-large: the old offloaded document is orphaned — drop the
+    // ref and delete the doc (best-effort). Large-over-anything is handled
+    // by offloadLargeRecordValue (awaited by API writes before sync).
+    if (existing.valueRef?.messageId) {
+      void deleteKvMessage(existing.valueRef.messageId, chatId, botToken, botApiBaseUrl)
+      existing.valueRef = null
+    }
     existing.value = opts.value
     existing.valueType = opts.valueType
     existing.updatedAt = now
@@ -2078,6 +2506,48 @@ export function upsertRecord(
   return { record, created: true }
 }
 
+/**
+ * Serialized values bigger than this live in their own Telegram document
+ * (with only a file_id ref in the record + manifest). The manifest itself
+ * must stay far under the cloud Bot API's 50MB upload / 20MB download caps
+ * no matter how many multi-MB chunk values an account holds.
+ */
+export const LARGE_VALUE_THRESHOLD_BYTES = 200 * 1024
+
+/**
+ * Offload a record's value to its own Telegram document when it exceeds
+ * LARGE_VALUE_THRESHOLD_BYTES. Awaited by API writes BEFORE the manifest
+ * sync, so the manifest (which carries only the tiny ref) stays small and
+ * the value is confirmed durable. No-op for small/missing/already-ref
+ * records. Never throws (failure just leaves the value inline — the
+ * manifest upload may then fail on size, which the sync reports).
+ */
+export async function offloadLargeRecordValue(
+  dbUserId: string,
+  collection: string,
+  key: string,
+  chatId?: string,
+  botToken?: string,
+  botApiBaseUrl?: string,
+): Promise<void> {
+  try {
+    const rec = findRecord(dbUserId, collection, key)
+    if (!rec || rec.valueRef?.fileId) return
+    if (Buffer.byteLength(rec.value || '', 'utf-8') <= LARGE_VALUE_THRESHOLD_BYTES) return
+    const sent = await sendLargeValueDocument(rec.value, `${collection}/${key}`, chatId, botToken, botApiBaseUrl)
+    if (!sent) {
+      console.error(`[store] large-value offload failed for ${collection}/${key}`)
+      return
+    }
+    rec.valueRef = { fileId: sent.fileId, messageId: sent.messageId, bytes: sent.bytes }
+    rec.value = ''
+    rec.updatedAt = new Date().toISOString()
+    saveToDisk()
+  } catch (err) {
+    console.error(`[store] large-value offload error for ${collection}/${key}:`, err)
+  }
+}
+
 export function deleteRecord(
   dbUserId: string,
   collection: string,
@@ -2091,12 +2561,37 @@ export function deleteRecord(
   )
   if (idx === -1) return null
   const [removed] = store.records.splice(idx, 1)
+  // Tombstone FIRST (before save/sync) — this is what stops the delete from
+  // being resurrected by another instance's manifest on merge/rehydrate.
+  addTombstone(dbUserId, 'record', collection, key)
   saveToDisk()
   scheduleAccountSyncForDbUser(dbUserId)
   if (removed.telegramMessageId) {
     void deleteKvMessage(removed.telegramMessageId, chatId, botToken, botApiBaseUrl)
   }
+  if (removed.valueRef?.messageId) {
+    void deleteKvMessage(removed.valueRef.messageId, chatId, botToken, botApiBaseUrl)
+  }
   return removed
+}
+
+/**
+ * Record a delete tombstone (upsert by identity — latest deletedAt wins).
+ * Prunes tombstones older than TOMBSTONE_TTL_MS on the way.
+ */
+export function addTombstone(
+  dbUserId: string,
+  kind: 'record' | 'file',
+  collection: string,
+  key: string,
+): void {
+  const now = new Date().toISOString()
+  const cutoff = Date.now() - TOMBSTONE_TTL_MS
+  store.recordTombstones = store.recordTombstones.filter((t) => {
+    if (Date.parse(t.deletedAt || '') < cutoff) return false
+    return !(t.userId === dbUserId && t.kind === kind && t.collection === collection && t.key === key)
+  })
+  store.recordTombstones.push({ userId: dbUserId, kind, collection, key, deletedAt: now })
 }
 
 export function listRecords(
@@ -2230,6 +2725,8 @@ export function deleteCollection(dbUserId: string, name: string, chatId?: string
   )
   for (const r of toRemove) {
     if (r.telegramMessageId) void deleteKvMessage(r.telegramMessageId, chatId, botToken, botApiBaseUrl)
+    if (r.valueRef?.messageId) void deleteKvMessage(r.valueRef.messageId, chatId, botToken, botApiBaseUrl)
+    addTombstone(dbUserId, 'record', name, r.key)
   }
   store.records = store.records.filter((r) => !(r.userId === dbUserId && r.collection === name))
   removeCollectionName(dbUserId, name)
@@ -2817,6 +3314,7 @@ export function deleteFileRecord(dbUserId: string, id: string): FileRecord | nul
   const idx = store.files.findIndex((f) => f.id === id && f.userId === dbUserId)
   if (idx === -1) return null
   const [removed] = store.files.splice(idx, 1)
+  addTombstone(dbUserId, 'file', '', removed.id)
   saveToDisk()
   scheduleAccountSyncForDbUser(dbUserId)
   if (removed.telegramMessageId) {

@@ -12,8 +12,10 @@
  * chat — fully self-hosted storage. When omitted, the server env defaults are
  * used. The bot token is NEVER exposed to the client after it is saved.
  *
- * If Telegram is unreachable we never block the write — we log and continue so
- * the platform stays usable during network issues.
+ * Durability contract (v4 merge sync): /v1 mutations AWAIT the merged manifest
+ * pin before responding (see kv.setKey/deleteKey + syncAccountManifestToTelegram),
+ * so an `ok` response means the data survived the instance. Only the
+ * human-speed dashboard paths still use debounced background sync.
  */
 
 const ENV_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || ''
@@ -666,6 +668,13 @@ export interface AccountManifest {
   telegramConfigs: unknown[]
   /** Present only on the __system__ manifest. */
   adminKeys?: unknown[]
+  /**
+   * Delete tombstones (`RecordTombstone[]`). Without these, a merge-based
+   * multi-instance sync would resurrect deleted records/files. Absent on
+   * manifests written before tombstones existed — readers must treat
+   * undefined as [].
+   */
+  tombstones?: unknown[]
 }
 
 /**
@@ -827,6 +836,107 @@ export async function sendAccountManifest(
 }
 
 /**
+ * Upload one LARGE KV value as its own Telegram document (awaited by the
+ * caller — unlike the fire-and-forget per-key text messages, large values
+ * MUST be confirmed durable because the manifest only keeps the file_id
+ * reference). Returns message/file ids, or null on failure.
+ */
+export async function sendLargeValueDocument(
+  valueJson: string,
+  label: string,
+  chatIdOverride?: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<{ messageId: number; fileId: string; bytes: number } | null> {
+  const chatId = chatIdOverride ?? ENV_CHAT_ID
+  if (!isTelegramConfigured(chatId, botTokenOverride)) return null
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
+  const bytes = Buffer.byteLength(valueJson, 'utf-8')
+  try {
+    const blob = new Blob([Buffer.from(valueJson, 'utf-8')], { type: 'application/json' })
+    const form = new FormData()
+    form.append('chat_id', chatId)
+    form.append('document', blob, `onyxbase-value-${Date.now()}.json`)
+    form.append('caption', `CLOUDKV_LARGE_VALUE\n${label}`.slice(0, 1024))
+    form.append('disable_notification', 'true')
+    // Raw fetch (no 5s timeout) — multi-MB uploads need time.
+    const sendRes = await fetch(`${apiBase}/sendDocument`, { method: 'POST', body: form })
+    const sendData = (await sendRes.json()) as {
+      ok: boolean
+      description?: string
+      result?: { message_id: number; document?: { file_id: string } }
+    }
+    if (!sendData.ok || !sendData.result || !sendData.result.document) {
+      console.error('[telegram] sendLargeValueDocument sendDocument failed:', sendData.description)
+      return null
+    }
+    return {
+      messageId: sendData.result.message_id,
+      fileId: sendData.result.document.file_id,
+      bytes,
+    }
+  } catch (err) {
+    console.error('[telegram] sendLargeValueDocument error:', err)
+    return null
+  }
+}
+
+/**
+ * Download a JSON document by file_id (manifests, large values) and return
+ * its raw text, or null on failure. Shared by fetchAccountManifest and
+ * large-value ref resolution.
+ */
+export async function downloadJsonDocument(
+  fileId: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<string | null> {
+  try {
+    const dl = await getFileDownloadUrl(fileId, botTokenOverride, botApiBaseUrlOverride)
+    if (!dl) {
+      console.error('[telegram] downloadJsonDocument: getFile failed for', fileId)
+      return null
+    }
+    const fileRes = await fetchWithTimeout(dl.url)
+    if (!fileRes.ok) {
+      console.error('[telegram] downloadJsonDocument: download failed', fileRes.status)
+      return null
+    }
+    return await fileRes.text()
+  } catch (err) {
+    console.error('[telegram] downloadJsonDocument error:', err)
+    return null
+  }
+}
+
+/**
+ * Delete any Telegram message by id (manifest docs, value docs, KV messages).
+ * Best-effort — returns false instead of throwing. Used for superseded-doc
+ * cleanup AFTER the replacement is pinned (never before).
+ */
+export async function deleteTelegramMessage(
+  messageId: number,
+  chatIdOverride?: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<boolean> {
+  const chatId = chatIdOverride ?? ENV_CHAT_ID
+  if (!isTelegramConfigured(chatId, botTokenOverride)) return false
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
+  try {
+    const res = await fetchWithTimeout(`${apiBase}/deleteMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+    })
+    const data = (await res.json()) as { ok: boolean }
+    return data.ok === true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Fetch + parse a single account's manifest document by its message_id +
  * file_id (both tracked in the pinned index). Returns null if the message is
  * gone or the download fails.
@@ -840,17 +950,8 @@ export async function fetchAccountManifest(
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   if (!isTelegramConfigured(chatId, botTokenOverride)) return null
   try {
-    const dl = await getFileDownloadUrl(fileId, botTokenOverride, botApiBaseUrlOverride)
-    if (!dl) {
-      console.error('[telegram] fetchAccountManifest: getFile failed for', fileId)
-      return null
-    }
-    const fileRes = await fetchWithTimeout(dl.url)
-    if (!fileRes.ok) {
-      console.error('[telegram] fetchAccountManifest: download failed', fileRes.status)
-      return null
-    }
-    const text = await fileRes.text()
+    const text = await downloadJsonDocument(fileId, botTokenOverride, botApiBaseUrlOverride)
+    if (text === null) return null
     const parsed = JSON.parse(text) as AccountManifest
     if (parsed.cloudkv !== true || parsed.kind !== 'account-manifest' || parsed.version !== 4) return null
     return parsed

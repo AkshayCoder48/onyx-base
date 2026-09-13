@@ -22,7 +22,10 @@ import {
   resolveBotToken,
   resolveBotApiBaseUrl,
   maybeRehydrateAccount,
+  flushAccountSync,
+  offloadLargeRecordValue,
 } from '@/lib/data-store'
+import { downloadJsonDocument } from '@/lib/telegram'
 import { notifyRealtime } from '@/lib/realtime'
 
 export interface SetOptions {
@@ -43,6 +46,9 @@ export interface RecordView {
   collection: string
   updatedAt: string
   createdAt: string
+  /** True when the write was confirmed in the durable Telegram mirror before
+   * responding. Only set on setKey results. */
+  durable?: boolean
 }
 
 function toView(r: {
@@ -52,7 +58,21 @@ function toView(r: {
   collection: string
   updatedAt: string
   createdAt: string
+  valueRef?: { fileId: string; messageId: number; bytes: number } | null
 }): RecordView {
+  // Large-value refs resolve only on single-key GET (getKey). List/export
+  // show a placeholder — resolving N multi-MB documents per listing would
+  // be ruinous, and no list consumer needs inline chunk bytes.
+  if (r.valueRef?.fileId) {
+    return {
+      key: r.key,
+      value: `[large value — ${r.valueRef.bytes} bytes, fetch via GET]`,
+      valueType: r.valueType,
+      collection: r.collection,
+      updatedAt: r.updatedAt,
+      createdAt: r.createdAt,
+    }
+  }
   let parsed: unknown = r.value
   try {
     parsed = JSON.parse(r.value)
@@ -69,7 +89,13 @@ function toView(r: {
   }
 }
 
-/** Set (upsert) a key. Returns the resulting record view. */
+/**
+ * Set (upsert) a key. DURABLE before responding: large values are offloaded
+ * to their own Telegram document, then the merged account manifest is
+ * pinned — only then do we answer. This is what makes writes survive
+ * serverless instance recycling (the old fire-and-forget sync evaporated).
+ * Returns the resulting record view (+ `durable` flag).
+ */
 export async function setKey(
   user: AuthenticatedUser,
   opts: SetOptions,
@@ -103,12 +129,33 @@ export async function setKey(
     botApiBaseUrl,
   })
 
+  // Durability gate: offload large values, then await the merged manifest
+  // sync. On failure we still answer ok (the value IS readable from this
+  // instance and the debounced scheduler retries the sync) but flag it.
+  let durable = false
+  try {
+    await offloadLargeRecordValue(user.dbUserId, collectionName, record.key, chatId, botToken, botApiBaseUrl)
+    durable = await flushAccountSync(user.userId)
+  } catch (err) {
+    console.error(`[kv] durable sync failed for ${collectionName}/${record.key}:`, err)
+  }
+
   await logAction(user, 'set', record.key, `collection=${collectionName}`, opts.source)
   notifyRealtime({ userId: user.userId, event: 'set', collection: collectionName, key: record.key })
-  return toView(record)
+  // Echo the ORIGINAL value (the stored record may now hold only a
+  // large-value ref + '' — toView(record) would return a placeholder).
+  return {
+    key: record.key,
+    value,
+    valueType,
+    collection: record.collection,
+    updatedAt: record.updatedAt,
+    createdAt: record.createdAt,
+    durable,
+  }
 }
 
-/** Get a single key (or null). */
+/** Get a single key (or null). Large-value refs are resolved transparently. */
 export async function getKey(
   user: AuthenticatedUser,
   key: string,
@@ -117,6 +164,34 @@ export async function getKey(
   const rec = findRecord(user.dbUserId, collection, key)
   if (!rec) return null
   await logAction(user, 'get', key, `collection=${collection}`, 'api')
+  if (rec.valueRef?.fileId) {
+    try {
+      const botToken = resolveBotToken(user.dbUserId)
+      const botApiBaseUrl = resolveBotApiBaseUrl(user.dbUserId)
+      const text = await downloadJsonDocument(rec.valueRef.fileId, botToken, botApiBaseUrl)
+      if (text === null) {
+        console.error(`[kv] large-value ref unreadable for ${collection}/${key}`)
+        return null
+      }
+      let parsed: unknown = text
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        /* keep raw */
+      }
+      return {
+        key: rec.key,
+        value: parsed,
+        valueType: rec.valueType,
+        collection: rec.collection,
+        updatedAt: rec.updatedAt,
+        createdAt: rec.createdAt,
+      }
+    } catch (err) {
+      console.error(`[kv] large-value ref resolution failed for ${collection}/${key}:`, err)
+      return null
+    }
+  }
   return toView(rec)
 }
 
@@ -142,7 +217,14 @@ export async function getKeyWithRehydrate(
   return rec
 }
 
-/** Delete a key. Returns whether a record was removed. */
+/**
+ * Delete a key. Returns whether a record was removed.
+ * Rehydrate-first: on a local miss the record may still exist durably
+ * (this cold instance simply hasn't hydrated it yet) — pull the latest
+ * manifest and retry before answering "not found", so deletes don't 404
+ * spuriously. The merged manifest sync is awaited, so a returned delete
+ * is durable (plus a tombstone stops resurrection).
+ */
 export async function deleteKey(
   user: AuthenticatedUser,
   key: string,
@@ -152,8 +234,20 @@ export async function deleteKey(
   const chatId = resolveChatId(user.dbUserId)
   const botToken = resolveBotToken(user.dbUserId)
   const botApiBaseUrl = resolveBotApiBaseUrl(user.dbUserId)
-  const removed = deleteRecord(user.dbUserId, collection, key, chatId, botToken, botApiBaseUrl)
-  if (!removed) return false
+  let removed = deleteRecord(user.dbUserId, collection, key, chatId, botToken, botApiBaseUrl)
+  if (!removed) {
+    const rehydrated = await maybeRehydrateAccount(user.userId)
+    if (rehydrated) {
+      removed = deleteRecord(user.dbUserId, collection, key, chatId, botToken, botApiBaseUrl)
+    }
+    if (!removed) return false
+  }
+  try {
+    const durable = await flushAccountSync(user.userId)
+    if (!durable) console.error(`[kv] delete sync unconfirmed for ${collection}/${key}`)
+  } catch (err) {
+    console.error(`[kv] delete sync failed for ${collection}/${key}:`, err)
+  }
   await logAction(user, 'delete', key, `collection=${collection}`, source)
   notifyRealtime({ userId: user.userId, event: 'delete', collection, key })
   return true
@@ -187,12 +281,20 @@ export async function listKeysWithRehydrate(
   return records
 }
 
-/** Export every record (optionally scoped to a collection) as a JSON object. */
+/**
+ * Export every record (optionally scoped to a collection) as a JSON object.
+ * Rehydrates when the local view is empty (same recovery as list) so a cold
+ * instance doesn't export {} for data that exists durably.
+ */
 export async function exportData(
   user: AuthenticatedUser,
   collection?: string,
 ): Promise<Record<string, unknown>> {
-  const records = await listKeys(user, collection)
+  let records = await listKeys(user, collection)
+  if (records.length === 0) {
+    const rehydrated = await maybeRehydrateAccount(user.userId)
+    if (rehydrated) records = await listKeys(user, collection)
+  }
   const out: Record<string, unknown> = {}
   for (const r of records) {
     const bucket = r.collection === 'default' ? '' : `${r.collection}.`
