@@ -54,9 +54,21 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     // Legible 500s: surface the crash reason so failures are diagnosable
     // from the response alone (no log access in this environment).
-    const msg = err instanceof Error ? err.message : String(err)
-    const stackTop = err instanceof Error ? (err.stack?.split('\n').slice(1, 3).join(' <- ') ?? '') : ''
-    console.error(`[v1/set] crash for ${collection}/${key}:`, err)
-    return fail(`set failed: ${msg}${stackTop ? ` (${stackTop.slice(0, 200)})` : ''}`, 500)
+    // Nested guard: error serialization itself must never throw (exotic
+    // error objects with throwing stack getters would otherwise escape
+    // as an opaque HTML 500).
+    try {
+      const msg = err instanceof Error ? err.message : String(err)
+      let stackTop = ''
+      try {
+        stackTop = err instanceof Error ? (err.stack?.split('\n').slice(1, 3).join(' <- ') ?? '') : ''
+      } catch {
+        stackTop = ''
+      }
+      console.error(`[v1/set] crash for ${collection}/${key}:`, err)
+      return fail(`set failed: ${msg}${stackTop ? ` (${stackTop.slice(0, 200)})` : ''}`, 500)
+    } catch {
+      return fail('set failed (unserializable error)', 500)
+    }
   }
 }
