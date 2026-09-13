@@ -38,6 +38,7 @@ import {
   sendAccountManifest,
   fetchAccountManifest,
   sendLargeValueDocument,
+  manifestContentSha,
   SYSTEM_ACCOUNT_ID,
   type AccountIndex,
   type AccountIndexEntry,
@@ -2160,6 +2161,14 @@ export async function syncAccountManifestToTelegram(
         continue
       }
     }
+    // CONTENT SHORT-CIRCUIT: our pin is the tip AND memory still hashes to
+    // what we pinned — nothing to do. Same-instance concurrent syncs,
+    // duplicate syncs, and idempotent client retries all land here instead
+    // of re-uploading + re-pinning identical bytes. Any real change (even
+    // one record) hashes differently and takes the full pin path.
+    if (existing && revUnchanged && manifestContentSha(local) === lastPinnedSha.get(userId)) {
+      return existing
+    }
     let base: AccountManifest | null = null
     if (existing && !revUnchanged) {
       base = await fetchBase(existing.fileId)
@@ -2208,6 +2217,7 @@ export async function syncAccountManifestToTelegram(
       // free and unbounded; old manifests are harmless backups.
       accountIndexCache = idx
       lastDurableRev.set(userId, sent.messageId)
+      lastPinnedSha.set(userId, sent.sha)
       v4ModeActive = true
       // A rival mid-flight on a stale base may pin AFTER our verify (silent
       // last-pin-wins drop). The background repair re-checks the tip and
@@ -2445,6 +2455,8 @@ const lastSyncEndAt = new Map<string, number>()
  * and the multi-hundred-KB manifest download can be skipped.
  */
 const lastDurableRev = new Map<string, number>()
+/** Canonical content sha of what this instance last pinned per account. */
+const lastPinnedSha = new Map<string, string>()
 
 /**
  * Sync with a hard global deadline. Layered Telegram waits can stack past
@@ -2503,7 +2515,22 @@ export async function flushAccountSync(userId: string): Promise<boolean> {
     clearTimeout(t)
     accountSyncTimers.delete(userId)
   }
-  return runAccountSyncNow(userId)
+  // Direct deadline-bounded sync — NOT the coalescing dirty-waiter.
+  // Concurrent same-instance API writes must RACE (the pin protocol
+  // resolves races: verify + repair + content short-circuit) rather than
+  // SERIALIZE behind each other (that stacked 45s deadlines into
+  // multi-minute hangs). On failure, also schedule a background retry
+  // (the client's idempotent retry is the primary backstop).
+  const entry = await syncWithDeadline(userId)
+  if (!entry) {
+    try {
+      scheduleAccountSync(userId)
+    } catch {
+      /* best effort */
+    }
+    return false
+  }
+  return true
 }
 
 export function scheduleAccountSync(userId: string): void {

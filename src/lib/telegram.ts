@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto'
+
 /**
  * Onyx Base — Telegram persistence layer.
  *
@@ -902,6 +904,29 @@ async function sendDocumentWithRetry(
   return null
 }
 
+/** sha256 hex of a string (canonical-change detection for manifests). */
+export function sha256Hex(s: string): string {
+  return createHash('sha256').update(s, 'utf8').digest('hex')
+}
+
+/**
+ * Canonical content hash of an account manifest: everything EXCEPT the
+ * volatile `exportedAt` timestamp and the append-only audit `logs` (which
+ * grow on every request and must not force re-pins by themselves — log
+ * entries still ride along on the next content pin, seconds later).
+ * Two builds of unchanged memory hash identically (deterministic field +
+ * array order through the store round-trip).
+ */
+export function manifestContentSha(m: AccountManifest): string {
+  const { exportedAt: _exportedAt, logs: _logs, ...rest } = m as AccountManifest & {
+    exportedAt?: unknown
+    logs?: unknown
+  }
+  void _exportedAt
+  void _logs
+  return sha256Hex(JSON.stringify(rest))
+}
+
 /**
  * Send (or replace) a single account's manifest document. Returns the new
  * message_id + file_id, or null on failure. Does NOT touch the pinned index —
@@ -917,12 +942,13 @@ export async function sendAccountManifest(
   chatIdOverride?: string,
   botTokenOverride?: string,
   botApiBaseUrlOverride?: string,
-): Promise<{ messageId: number; fileId: string; bytes: number } | null> {
+): Promise<{ messageId: number; fileId: string; bytes: number; sha: string } | null> {
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   if (!isTelegramConfigured(chatId, botTokenOverride)) return null
   const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
   const json = JSON.stringify(manifest)
   const bytes = Buffer.byteLength(json, 'utf-8')
+  const sha = manifestContentSha(manifest)
   const caption = `${ACCOUNT_MANIFEST_MARKER}\nuserId=${manifest.userId}`
   try {
     // Delete the previous version of this account's manifest (if any).
@@ -953,6 +979,7 @@ export async function sendAccountManifest(
       messageId: result.message_id,
       fileId: result.document.file_id,
       bytes,
+      sha,
     }
   } catch (err) {
     console.error('[telegram] sendAccountManifest error:', err)

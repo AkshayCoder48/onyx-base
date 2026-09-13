@@ -27,6 +27,7 @@ export async function GET(req: NextRequest) {
 
   return ok({
     status: 'ok',
+    commit: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
     user: user.userId,
     storage: {
       engine: 'telegram',
