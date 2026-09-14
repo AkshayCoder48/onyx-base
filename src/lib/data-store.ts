@@ -2286,6 +2286,11 @@ function schedulePostVerifyRepair(userId: string, pinnedRev: number): void {
  *
  * Returns the updated index entry, or null on failure.
  */
+/** Cooperative pacing windows (index: global; account: per-account). */
+const COOP_INDEX_WINDOW_MS = 12000
+const ACCOUNT_WINDOW_MS = 15000
+/** Max pacing wait absorbed in-request; longer waits fail fast (client retries). */
+const MAX_PACING_WAIT_MS = 10000
 export async function syncAccountManifestToTelegram(
   userId: string,
   opts?: { scheduleRepair?: boolean },
@@ -2313,16 +2318,16 @@ export async function syncAccountManifestToTelegram(
     // Fresh index every attempt — another instance may have pinned newer
     // since we last looked. NULL (unreadable) aborts the attempt: proceeding
     // with an assumed-empty index would clobber durable state.
-    const idx = await fetchFreshIndex()
+    let idx = await fetchFreshIndex()
     if (!idx) {
       console.warn(`[store] sync index unreadable for ${userId} (attempt ${attempt + 1}) — retrying`)
       continue
     }
-    const existing = idx.accounts[userId]
+    let existing = idx.accounts[userId]
     // FAST PATH: index still points at the rev we last pinned/restored, so
     // no other instance wrote since — durable base ⊆ local state, skip the
     // manifest download entirely.
-    const revUnchanged = !!existing && existing.messageId === lastDurableRev.get(userId)
+    let revUnchanged = !!existing && existing.messageId === lastDurableRev.get(userId)
     // HOT-TIP YIELD: a FOREIGN pin landed within the last seconds — that
     // instance is likely still mid-flight (or its repair is running). Yield
     // BEFORE adding to the flood: our re-fetch will then merge its finished
@@ -2348,30 +2353,40 @@ export async function syncAccountManifestToTelegram(
     if (existing && revUnchanged && manifestContentSha(local) === lastPinnedSha.get(userId)) {
       return existing
     }
-    // COOPERATIVE INDEX PACING: Telegram throttles same-index writes to
-    // ~1/30s GLOBALLY per chat (proven live: a 30s-interval external ticker
-    // alone saturates it and 429s everything else). If the tip is younger
-    // than that, yield with a precise backoff instead of colliding — our
-    // keys ride the next successful merge. This bounds index writes by
-    // construction no matter how many writers hammer. (The short-circuit
-    // above already returned for no-change syncs, so reaching here means we
-    // have real bytes to land.)
-    const paceAgeMs = Date.now() - Date.parse(idx.exportedAt || '')
-    if (Number.isFinite(paceAgeMs) && paceAgeMs < 35000) {
-      notePacingThrottle(Math.ceil((35000 - paceAgeMs) / 1000))
-      return null
-    }
-    // ACCOUNT PACING: this account synced <45s ago (globally, per the
-    // index) — yield. Unbypassable (index-derived, runs on ALL paths
-    // including sticky fast paths) unlike per-key checks. Bounds each
-    // account to ~1/45s; a 20s ticker yields most rounds, freeing windows
-    // for real writes. New accounts (no entry) always proceed.
-    if (existing?.updatedAt) {
-      const accAgeMs = Date.now() - Date.parse(existing.updatedAt)
-      if (Number.isFinite(accAgeMs) && accAgeMs < 45000) {
-        notePacingThrottle(Math.ceil((45000 - accAgeMs) / 1000))
+    // COOPERATIVE PACING → WAIT (not fail): the index is ONE Telegram
+    // message and rapid same-message edits 429, so pins stay serialized
+    // (index ≥12s apart globally, same account ≥15s apart). But a pacing
+    // window must not FAIL natural bursts (OTP write+flag, chunk
+    // sequences): waits ≤10s are absorbed in-request (one cheap sleep + a
+    // FRESH re-fetch + re-merge — a rival may have pinned while we
+    // waited), and only longer waits fail fast for the client to retry.
+    // (The old 35s/45s fail-fast windows throttled real flows to ~1
+    // write/45s — every OTP flag update and resend died on them.)
+    for (let pw = 0; pw < 2; pw++) {
+      const paceAgeMs = Date.now() - Date.parse(idx.exportedAt || '')
+      const idxRemain = Number.isFinite(paceAgeMs) ? COOP_INDEX_WINDOW_MS - paceAgeMs : 0
+      let accRemain = 0
+      if (existing?.updatedAt) {
+        const accAgeMs = Date.now() - Date.parse(existing.updatedAt)
+        if (Number.isFinite(accAgeMs)) accRemain = ACCOUNT_WINDOW_MS - accAgeMs
+      }
+      const waitMs = Math.max(idxRemain, accRemain, 0)
+      if (waitMs <= 0) break
+      if (pw > 0 || waitMs > MAX_PACING_WAIT_MS) {
+        notePacingThrottle(Math.ceil(waitMs / 1000))
         return null
       }
+      await sleepMs(waitMs + 500 + Math.random() * 500)
+      const ridx = await fetchFreshIndex()
+      if (!ridx) {
+        console.warn(`[store] sync pacing re-fetch unreadable for ${userId} — failing fast`)
+        return null
+      }
+      // Fresh tip (a rival may have pinned during the wait): refresh ALL
+      // derived state — merging against the stale base would clobber.
+      idx = ridx
+      existing = idx.accounts[userId]
+      revUnchanged = !!existing && existing.messageId === lastDurableRev.get(userId)
     }
     let base: AccountManifest | null = null
     if (existing && !revUnchanged) {
