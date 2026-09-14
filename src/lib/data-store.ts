@@ -2919,6 +2919,13 @@ export function upsertRecord(
     chatId?: string
     botToken?: string
     botApiBaseUrl?: string
+    /**
+     * Telemetry writes (email request log): skip scheduling a sync — the
+     * data rides the next content pin instead of forcing its own
+     * upload+pin+verify cycle (every email send used to cost a full pin
+     * post-response, contending with real writes into 20s deadlines).
+     */
+    nosync?: boolean
   },
 ): { record: RecordEntry; created: boolean } {
   const existing = findRecord(dbUserId, opts.collection, opts.key)
@@ -2939,7 +2946,7 @@ export function upsertRecord(
     existing.valueType = opts.valueType
     existing.updatedAt = now
     saveToDisk()
-    scheduleAccountSyncForDbUser(dbUserId)
+    if (!opts.nosync) scheduleAccountSyncForDbUser(dbUserId)
     // NOTE: no per-key Telegram message is sent here anymore. Nothing ever
     // reads per-key messages back (manifests are the durable truth), and each
     // one cost a Bot API call toward flood limits. Durability = manifest sync.
@@ -2959,7 +2966,7 @@ export function upsertRecord(
   }
   store.records.push(record)
   saveToDisk()
-  scheduleAccountSyncForDbUser(dbUserId)
+  if (!opts.nosync) scheduleAccountSyncForDbUser(dbUserId)
   // NOTE: no per-key Telegram message (see above) — durability = manifest sync.
   return { record, created: true }
 }

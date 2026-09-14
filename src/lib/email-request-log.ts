@@ -79,11 +79,13 @@ export function recordEmailRequest(
     merged.push(e)
     if (merged.length >= MAX_PERSISTED) break
   }
+  // nosync: telemetry rides the next content pin — never force its own.
   upsertRecord(dbUserId, publicUserId, {
     collection: COLLECTION,
     key: KEY,
     value: JSON.stringify(merged.slice(0, MAX_PERSISTED)),
     valueType: 'array',
+    nosync: true,
   })
 }
 
