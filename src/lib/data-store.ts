@@ -2412,14 +2412,18 @@ export async function syncAccountManifestToTelegram(
     // after our fetch. FRESH read; ONLY an explicit match is success. An
     // UNREADABLE verify (flood) is NOT accepted (that turned lost races
     // into false-durable writes) — it fails the attempt.
-    // PATIENCE: Telegram's pin propagation lags intermittently (getChat
-    // returns the PRE-pin index for a few seconds after a landed pin).
-    // A single immediate read turned that lag into a false "race" → full
-    // re-upload + re-pin → repair storm. Poll briefly; strictness kept
-    // (explicit match still required, just not on the first try).
+    // LAG-PATIENT, FLOOD/RIVAL-IMPATIENT polling: Telegram's pin
+    // propagation lags intermittently (getChat returns the PRE-pin index
+    // for a few seconds after a landed pin) — so poll on while reads
+    // succeed and show a STALE rev (messageIds increase, so older-than-our-
+    // pin = still converging). A NEWER rev (a rival pinned over us) or an
+    // UNREADABLE index (flood) exits immediately: attempt 2 re-merges over
+    // the rival, or the client retries after the flood. (Too little
+    // patience turns lag into false races → wasted re-uploads → deadline
+    // failures; too much burns the 20s sync budget. 4x2s splits it.)
     let verify = await fetchFreshIndex()
     let current = verify?.accounts[userId]
-    for (let v = 0; v < 1 && !(verify && current && current.messageId === sent.messageId); v++) {
+    for (let v = 0; v < 4 && verify && (!current || current.messageId < sent.messageId); v++) {
       await sleepMs(2000)
       verify = await fetchFreshIndex()
       current = verify?.accounts[userId]
@@ -2765,19 +2769,28 @@ export async function flushAccountSync(userId: string): Promise<boolean> {
   // Direct deadline-bounded sync — NOT the coalescing dirty-waiter.
   // Concurrent same-instance API writes must RACE (the pin protocol
   // resolves races: verify + repair + content short-circuit) rather than
-  // SERIALIZE behind each other (that stacked 45s deadlines into
+  // SERIALIZE behind each other (that stacked 20s deadlines into
   // multi-minute hangs). On failure, also schedule a background retry
   // (the client's idempotent retry is the primary backstop).
-  const entry = await syncWithDeadline(userId)
-  if (!entry) {
-    try {
-      scheduleAccountSync(userId)
-    } catch {
-      /* best effort */
+  lastSyncStartAt.set(userId, Date.now())
+  try {
+    const entry = await syncWithDeadline(userId)
+    if (!entry) {
+      try {
+        scheduleAccountSync(userId)
+      } catch {
+        /* best effort */
+      }
+      return false
     }
-    return false
+    return true
+  } finally {
+    // Feed the after-hook skip-guard (see scheduleAccountSync): this flush
+    // already synced everything written before it, so post-response hooks
+    // from the same write must NOT fire a redundant second sync (wasted
+    // Telegram calls + extra pin-race windows on every API write).
+    lastSyncEndAt.set(userId, Date.now())
   }
-  return true
 }
 
 export function scheduleAccountSync(userId: string): void {
