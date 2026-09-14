@@ -2511,8 +2511,12 @@ export async function maybeRehydrateAccount(publicUserId: string): Promise<boole
   accountRehydrateGuard.set(publicUserId, now)
   try {
     const idx = await fetchAccountIndex()
-    const entry = idx?.accounts[publicUserId]
-    if (idx && entry && entry.messageId === lastDurableRev.get(publicUserId)) return false
+    // Unreadable index (flood): fail open to local state WITHOUT calling
+    // rehydrate (it would just re-fetch the same unreadable index — a
+    // wasted call on every flood read).
+    if (!idx) return false
+    const entry = idx.accounts[publicUserId]
+    if (entry && entry.messageId === lastDurableRev.get(publicUserId)) return false
     const r = await rehydrateAccountFromTelegram(publicUserId)
     return r.attempted && !r.error
   } catch {

@@ -217,23 +217,26 @@ export async function getKey(
 
 /**
  * Get a single key with read-your-writes recovery across serverless
- * instances. On a LOCAL miss, the record may simply live on another instance
- * (or in a newer Telegram manifest snapshot than the one this instance
- * hydrated). Pull the account's latest manifest (rate-guarded) and retry the
- * lookup once before answering 404 — this is what the docs describe as the
- * "lazily, on read" rehydrate, and fixes clients seeing spurious 404s for
- * records they just wrote (e.g. OnyxAgent workspace-sync chunk reads).
+ * instances — refresh-FIRST, not just on miss. A local HIT may be a STALE
+ * version (another instance updated the key and pinned a newer rev):
+ * returning it without checking hides cross-instance updates essentially
+ * forever (proven live: OTP emailed-flags never became visible, so resends
+ * re-mailed instead of answering alreadySent). maybeRehydrateAccount is
+ * rev-aware (~1 getChat when fresh, manifest download only when the pinned
+ * rev advanced) and guard-throttled (1 refresh / 2s / account / instance),
+ * so freshness costs ~0.5s per GET, not a download storm. On a cold
+ * instance the same refresh pulls the manifest before a lookup that would
+ * otherwise 404 — the read-your-writes recovery this always had.
  */
 export async function getKeyWithRehydrate(
   user: AuthenticatedUser,
   key: string,
   collection = 'default',
 ): Promise<RecordView | null> {
-  let rec = await getKey(user, key, collection)
-  if (rec) return rec
-  const rehydrated = await maybeRehydrateAccount(user.userId)
-  if (!rehydrated) return null
-  rec = await getKey(user, key, collection)
+  // Best-effort freshness: skipped by the guard under bursts, fails open
+  // to local state under floods — never throws, never blocks long.
+  await maybeRehydrateAccount(user.userId)
+  const rec = await getKey(user, key, collection)
   return rec
 }
 
