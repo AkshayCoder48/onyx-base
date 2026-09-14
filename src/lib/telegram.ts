@@ -178,7 +178,7 @@ async function recordThrottle(url: string, res: Response): Promise<void> {
     const data = (await res.json()) as { parameters?: { retry_after?: number } }
     const secs = Number(data?.parameters?.retry_after)
     lastThrottle = {
-      retryAfterSecs: Number.isFinite(secs) && secs > 0 ? Math.min(secs, 3600) : 60,
+      retryAfterSecs: Number.isFinite(secs) && secs > 0 ? Math.min(secs, 120) : 60,
       observedAt: Date.now(),
       path: new URL(url).pathname,
     }

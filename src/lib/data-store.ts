@@ -569,7 +569,13 @@ seedExternalAdminKeys()
 // and retries the key lookup.
 const isServerless = isServerlessRuntime
 const localNeedsRehydrate = store.users.length === 0 || store.apiKeys.length === 0
-if (isServerless || localNeedsRehydrate) {
+// Eager cold-boot rehydrate runs LOCALLY ONLY. On serverless every deploy
+// boots N cold instances at once — N simultaneous full rehydrates stampede
+// Telegram into 429s, arming throttle windows that fail all writes for
+// minutes (proven live: every deploy poisoned itself). On-demand recovery
+// (auth-on-miss, refresh-first GET, fetch-merge sync) converges correctly
+// without eager work, so serverless instances boot quiet and hydrate lazily.
+if (!isServerless && localNeedsRehydrate) {
   setImmediate(() => {
     void (async () => {
       // 1. Try V4 migration first (no-op if already migrated). This restores
@@ -601,10 +607,10 @@ if (isServerless || localNeedsRehydrate) {
     })()
   })
 } else {
-  // Local dev with a warm cache: still detect V4 mode so the admin panel's
-  // Storage tab shows the correct status + per-account manifests. This is a
-  // single cheap getChat call (no rehydration, just sets v4Mode + caches the
-  // index). Fire-and-forget.
+  // Local dev with a warm cache, AND all serverless boots: still detect V4
+  // mode so the admin panel's Storage tab shows the correct status +
+  // per-account manifests. This is a single cheap getChat call (no
+  // rehydration, just sets v4Mode + caches the index). Fire-and-forget.
   setImmediate(() => {
     void getAccountIndex().catch(() => {
       /* best-effort — V3 mode remains active */
