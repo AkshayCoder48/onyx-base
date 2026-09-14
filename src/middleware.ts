@@ -75,7 +75,7 @@ export function middleware(req: NextRequest) {
     res.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
     res.headers.set(
       'Access-Control-Allow-Headers',
-      'Authorization, Content-Type, X-Requested-With, Accept, X-Api-Key',
+      'Authorization, Content-Type, X-Requested-With, Accept, X-Api-Key, Idempotency-Key, X-Idempotency-Key',
     )
     res.headers.set('Access-Control-Max-Age', '86400')
     res.headers.set('Access-Control-Allow-Credentials', 'true')
@@ -86,7 +86,7 @@ export function middleware(req: NextRequest) {
   const res = NextResponse.next()
   res.headers.set('Access-Control-Allow-Origin', origin)
   res.headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
-  res.headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Requested-With, Accept, X-Api-Key')
+  res.headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Requested-With, Accept, X-Api-Key, Idempotency-Key, X-Idempotency-Key')
   res.headers.set('Access-Control-Allow-Credentials', 'true')
   res.headers.set('Vary', 'Origin')
   return res

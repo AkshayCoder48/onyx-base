@@ -188,8 +188,19 @@ const SPEC = {
     '/v1/set': {
       post: {
         summary: 'Upsert a key/value (auto-typed)',
+        description:
+          'Optional Idempotency-Key header (also accepted as X-Idempotency-Key): /^[A-Za-z0-9._-]{8,128}$/. A retried request with the same key replays the stored response (Idempotent-Replayed: true) instead of writing again; a concurrent duplicate gets 409 retryable. In-memory, per-instance, 24h TTL.',
+        parameters: [
+          {
+            name: 'Idempotency-Key',
+            in: 'header',
+            required: false,
+            schema: { type: 'string', pattern: '^[A-Za-z0-9._-]{8,128}$' },
+            description: 'Client-generated idempotency token. Same key + same user → replayed response, no duplicate write.',
+          },
+        ],
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { key: { type: 'string' }, value: {}, collection: { type: 'string' } }, required: ['key', 'value'] } } } },
-        responses: { '200': { description: 'Record stored', content: { 'application/json': { schema: { $ref: '#/components/schemas/Record' } } } }, '401': { description: 'Unauthorized' } },
+        responses: { '200': { description: 'Record stored', content: { 'application/json': { schema: { $ref: '#/components/schemas/Record' } } } }, '401': { description: 'Unauthorized' }, '409': { description: 'Idempotency-Key currently being processed (retryable)' } },
       },
     },
     '/v1/get/{key}': {
@@ -215,15 +226,23 @@ const SPEC = {
     '/v1/list': {
       get: {
         summary: 'List keys (compact)',
-        parameters: [{ name: 'collection', in: 'query', schema: { type: 'string' } }],
-        responses: { '200': { description: 'OK' } },
+        parameters: [
+          { name: 'collection', in: 'query', schema: { type: 'string' } },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 1000 }, description: 'Pagination — applied to the sorted key list. Only used when limit or offset is present.' },
+          { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Pagination — number of sorted keys to skip. Only used when limit or offset is present.' },
+        ],
+        responses: { '200': { description: 'OK — when paginated, also includes __pagination { total, limit, offset, hasMore }' } },
       },
     },
     '/v1/export': {
       get: {
         summary: 'Dump {key: value} as JSON',
-        parameters: [{ name: 'collection', in: 'query', schema: { type: 'string' } }],
-        responses: { '200': { description: 'OK' } },
+        parameters: [
+          { name: 'collection', in: 'query', schema: { type: 'string' } },
+          { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1, maximum: 1000 }, description: 'Pagination — applied to the sorted keys. Only used when limit or offset is present.' },
+          { name: 'offset', in: 'query', schema: { type: 'integer', minimum: 0 }, description: 'Pagination — number of sorted keys to skip. Only used when limit or offset is present.' },
+        ],
+        responses: { '200': { description: 'OK — when paginated, data also includes a __pagination { total, limit, offset, hasMore } field' } },
       },
     },
     '/v1/collections': {
@@ -494,23 +513,6 @@ const SPEC = {
       get: { summary: 'Telegram bridge status (masked chat ID, never the bot token)', responses: { '200': { description: 'OK' } } },
       put: { summary: 'Same as POST /api/telegram/connect', responses: { '200': { description: 'OK' } } },
       delete: { summary: 'Revert to server-default Telegram config', responses: { '200': { description: 'OK' } } },
-    },
-    '/api/email-otp/send': {
-      post: {
-        summary: 'DEPRECATED (410) — replaced by POST /api/email/send',
-        deprecated: true,
-        description:
-          'The Email OTP system was retired. This endpoint returns 410 Gone with a machine-readable migration body and processes NOTHING (no credential is used — there is no project-wide fallback). Migration: connect a named credential (POST /api/credentials/connect), generate the 6-digit code in YOUR app, and deliver it via POST /api/email/send with the $OTP$ variable.',
-        responses: { '410': { description: 'Gone — see the migration field in the response body' } },
-      },
-    },
-    '/api/email-otp/verify': {
-      post: {
-        summary: 'DEPRECATED (410) — verify codes in your application',
-        deprecated: true,
-        description: 'OTP verification is now application-level. Returns 410 Gone with a migration body; nothing is processed.',
-        responses: { '410': { description: 'Gone — see the migration field in the response body' } },
-      },
     },
     '/api/dashboard/mcpemail-config': {
       get: { summary: 'LEGACY (deprecated) — read the retired single-config state', responses: { '200': { description: 'Legacy view + deprecation notice' } } },

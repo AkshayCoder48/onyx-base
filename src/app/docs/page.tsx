@@ -306,14 +306,6 @@ const EMAIL_ENDPOINTS: Endpoint[] = [
     description:
       "Point the credential bridge at YOUR OWN bot + chat ({ chatId, label?, botToken? }) — the pair is validated live against Telegram before saving. Your named credentials are mirrored to this private pinned manifest (durable across cold boots). GET /api/telegram/config shows the masked status; DELETE reverts to server defaults. For private work, use your own credentials — never another person's.",
   },
-  {
-    method: "POST",
-    path: "/api/email-otp/send",
-    title: "DEPRECATED — returns 410 with a migration guide",
-    auth: false,
-    description:
-      "The retired Email OTP endpoints (/api/email-otp/send and /api/email-otp/verify) now return 410 Gone with a machine-readable migration body — nothing is processed and no credential is used. Migrate by generating the code in YOUR app and delivering it via POST /api/email/send with the $OTP$ variable.",
-  },
 ];
 
 const SHARE_ENDPOINTS: Endpoint[] = [

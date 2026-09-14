@@ -489,7 +489,6 @@ never a project-wide key.
 | \`GET\` | \`/api/email/status/:requestId\` | Request status (ts, credential name, sent/failed, latency, upstream status) — metadata only. \`GET /api/email/requests\` lists recent. |
 | \`GET\` · \`POST\` | \`/api/email/templates\` | List / save named templates; \`GET\`·\`DELETE /api/email/templates/:name\` for one. |
 | \`POST\` | \`/api/telegram/connect\` | Connect your private Telegram config channel (\`{ chatId, label?, botToken? }\`, validated live). \`GET\`·\`PUT\`·\`DELETE /api/telegram/config\` for status/update/reset. |
-| \`POST\` | \`/api/email-otp/send\` · \`verify\` | **DEPRECATED (410)** — returns a machine-readable migration guide; nothing is processed. |
 
 Rate limits: per platform key · per IP (30/min) · per-credential custom cap
 (≤120/min hard ceiling). Secrets (\`mcpe_*\`, \`kv_live_*\`, bot tokens,

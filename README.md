@@ -263,11 +263,63 @@ Authorization: Bearer kv_live_abc123def456…
 
 | Method | Path | Purpose |
 |:---|:---|:---|
-| `POST` | `/v1/set` | Set / upsert a value. Body: `{ "key", "value", "collection"? }`. Values are auto-typed (string / number / boolean / JSON). |
+| `POST` | `/v1/set` | Set / upsert a value. Body: `{ "key", "value", "collection"? }`. Values are auto-typed (string / number / boolean / JSON). Optional `Idempotency-Key` header — see [Idempotency & pagination](#idempotency--pagination). |
 | `GET` | `/v1/get/:key?collection=default` | Read a value. Returns `{ ok, key, value, type, collection, updatedAt }`. 404 when the key doesn't exist. |
 | `DELETE` | `/v1/delete/:key?collection=default` | Remove a key + its Telegram mirror message. 404 when the key doesn't exist. |
-| `GET` | `/v1/list?collection=default` | List keys in a collection. Returns `{ ok, keys, count, collection }`. |
-| `GET` | `/v1/export?collection=default` | Dump the whole database (or one collection) as a JSON object. Non-default collections are prefixed with the collection name + a dot. |
+| `GET` | `/v1/list?collection=default` | List keys in a collection. Returns `{ ok, keys, count, collection }`. Optional `?limit=&offset=` — see [Idempotency & pagination](#idempotency--pagination). |
+| `GET` | `/v1/export?collection=default` | Dump the whole database (or one collection) as a JSON object. Non-default collections are prefixed with the collection name + a dot. Optional `?limit=&offset=` — see [Idempotency & pagination](#idempotency--pagination). |
+
+### Idempotency & pagination
+
+**Idempotency-Key on `POST /v1/set`.** Send a client-generated
+`Idempotency-Key` header (`X-Idempotency-Key` is accepted as an alias) shaped
+`/^[A-Za-z0-9._-]{8,128}$/` and the server deduplicates retries for you:
+
+- The **first** request with a given key executes the write and caches the
+  completed response (any status < 500) in memory for **24 hours**.
+- A **retry** with the same key (e.g. after a client timeout) returns the
+  cached response verbatim — same status + body, plus an
+  `Idempotent-Replayed: true` header — **the write is not executed again**.
+- A **concurrent** duplicate (same key still executing) gets
+  `409 { "ok": false, "error": "Idempotency-Key is currently being processed", "retryable": true }`.
+- `5xx` responses are never cached — the key is freed so you can retry the
+  write cleanly.
+- The cache is **in-memory and per-instance** (not persisted to Telegram):
+  a retry that lands on a different serverless instance re-executes. The
+  write is an upsert, so re-execution converges to the same state; the
+  registry is namespaced per user and capped (~2000 entries, lazy TTL sweep).
+- Omit the header entirely for the classic behavior — fully backward
+  compatible.
+
+```bash
+curl -X POST https://onyx.example.com/v1/set \
+  -H "Authorization: Bearer kv_live_YOUR_API_KEY" \
+  -H "Idempotency-Key: order-4711-attempt-1" \
+  -H "Content-Type: application/json" \
+  -d '{"key":"orders/4711","value":{"status":"paid"}}'
+# retry with the same Idempotency-Key → same response, Idempotent-Replayed: true
+```
+
+**Pagination on `GET /v1/list` and `GET /v1/export`.** Both accept optional
+`?limit=N&offset=M` query params (`limit` 1–1000, `offset` ≥ 0; `limit`
+defaults to 100 when only `offset` is given):
+
+- When **neither** param is present, the response is the full result —
+  byte-for-byte backward compatible.
+- When **either** param is present, the result is sliced from the
+  **lexicographically sorted** key list, and the response carries a
+  `__pagination` metadata block: `{ total, limit, offset, hasMore }`.
+  For `/v1/list` it sits next to `keys`/`count` (`count` stays the TOTAL key
+  count); for `/v1/export` it sits inside the `data` object (a `__`-prefixed
+  key name is reserved metadata).
+
+```bash
+# Walk a large collection one page at a time
+curl -H "Authorization: Bearer kv_live_YOUR_API_KEY" \
+  "https://onyx.example.com/v1/list?collection=cache&limit=500&offset=1000"
+# → { "ok": true, "keys": [...], "count": 8231,
+#     "__pagination": { "total": 8231, "limit": 500, "offset": 1000, "hasMore": true } }
+```
 
 ### Files
 
@@ -488,8 +540,7 @@ half-rendered) · unknown credential name → `404 credential_not_found` (**fail
 closed** — no project-wide fallback key exists anywhere) · every send returns
 a `request_id` traceable via `GET /api/email/status/:requestId` (metadata
 only) · secrets are redacted from every log line · cross-user credential
-access is blocked (tenant-scoped). Old `/api/email-otp/*` endpoints return
-`410` with a migration guide. Full docs: **`/docs#email`** (anonymous).
+access is blocked (tenant-scoped). Full docs: **`/docs#email`** (anonymous).
 
 <br/>
 ## Authentication & recovery
@@ -798,7 +849,6 @@ Authorization: Bearer kv_live_…
 | `GET` · `DELETE` | `/api/credentials/:name` | View (masked) / disconnect a credential (sends then fail closed) |
 | `POST` | `/api/telegram/connect` | Connect your private Telegram configuration channel (validated live) |
 | `GET` · `PUT` · `DELETE` | `/api/telegram/config` | Telegram bridge status (masked) / update / reset |
-| `POST` | `/api/email-otp/send` · `/api/email-otp/verify` | **DEPRECATED (410)** — retired OTP system; returns a machine-readable migration guide |
 | `GET` | `/llms.txt` | **LLM-friendly single-page spec** — combines every Docs tab into one markdown document (the [llmstxt.org](https://llmstxt.org) convention). No auth. Cached for 1 hour. The dashboard's "Copy for LLMs" button fetches this same text. |
 | `GET` | `/v1/collections` | List collections (with record counts) |
 | `POST` | `/v1/collections` | Create a collection (body: `{"name":"cache"}`) |

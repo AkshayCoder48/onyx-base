@@ -1133,7 +1133,6 @@ curl ${origin}/api/email/status/req_xxxxxxxx \\
             <li>The <strong className="text-foreground">MCPEmail key</strong> is resolved by <code className="font-mono">credential</code> name from your private store and used only for the MCPEmail hop.</li>
             <li>Unknown <code className="font-mono">$VARIABLE$</code> → 400 <code className="font-mono">missing_variable</code> (send aborted, never half-rendered).</li>
             <li>Missing credential → 404 <code className="font-mono">credential_not_found</code>. There is NO project-wide fallback — the system fails closed.</li>
-            <li>Old <code className="font-mono">/api/email-otp/*</code> endpoints return 410 with a migration guide.</li>
           </ul>
         </div>
       </div>
