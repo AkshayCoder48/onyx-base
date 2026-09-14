@@ -132,18 +132,19 @@ export async function setKey(
   // Durability gate: offload large values, then await the merged manifest
   // sync. On failure we still answer ok (the value IS readable from this
   // instance and the debounced scheduler retries the sync) but flag it.
-  // Hard 55s deadline over the WHOLE gate (offload + sync): offload sits
-  // outside the sync deadline and the two could stack past the client's
-  // 60s timeout (orphaned work may still land the pin — bonus, the
-  // client's idempotent retry is the real backstop).
+  // Hard 25s deadline over the WHOLE gate (offload + sync). Transports
+  // fail fast (no in-request 429 sleeps) and the sync is bounded at 20s,
+  // so healthy writes land in ~2-4s and flooded writes fail in ~1-3s; the
+  // deadline is purely a backstop (orphaned work may still land the pin —
+  // bonus, the client's idempotent retry is the real backstop).
   let durable = false
   try {
     let timer: ReturnType<typeof setTimeout> | null = null
     const timeout = new Promise<false>((resolve) => {
       timer = setTimeout(() => {
-        console.error(`[kv] durability gate deadline (55s) exceeded for ${collectionName}/${record.key}`)
+        console.error(`[kv] durability gate deadline (25s) exceeded for ${collectionName}/${record.key}`)
         resolve(false)
-      }, 55000)
+      }, 25000)
     })
     const gate = (async () => {
       await offloadLargeRecordValue(user.dbUserId, collectionName, record.key, chatId, botToken, botApiBaseUrl)
@@ -301,15 +302,15 @@ export async function importRecords(
   }
 
   // Same durability gate as setKey: offload large values, then ONE merged
-  // sync for the whole batch. Hard 55s deadline over the whole gate.
+  // sync for the whole batch. Hard 25s deadline over the whole gate.
   let durable = false
   try {
     let timer: ReturnType<typeof setTimeout> | null = null
     const timeout = new Promise<false>((resolve) => {
       timer = setTimeout(() => {
-        console.error(`[kv] import durability gate deadline (55s) exceeded (${imported} records)`)
+        console.error(`[kv] import durability gate deadline (25s) exceeded (${imported} records)`)
         resolve(false)
-      }, 55000)
+      }, 25000)
     })
     const gate = (async () => {
       for (const r of records) {

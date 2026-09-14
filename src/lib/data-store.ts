@@ -2124,6 +2124,9 @@ export async function fetchFreshIndex(): Promise<AccountIndex | null> {
   } catch {
     // Fall through to the blip-retry below.
   }
+  // Flood-fast: a live throttle/breaker means the retry cannot help —
+  // skip the sleep AND the second call entirely (zero-cost fail).
+  if (throttleYieldMs() > 0) return null
   await sleepMs(2000)
   try {
     return await fetchAccountIndex()
@@ -2306,7 +2309,7 @@ export async function syncAccountManifestToTelegram(
     // the flood/contention first. Two attempts max — sustained floods fail
     // fast (honest durable:false) and the CLIENT retries after the flood
     // clears, instead of grinding 429s into a minutes-long death spiral.
-    if (attempt > 0) await sleepWithJitter(5000)
+    if (attempt > 0) await sleepWithJitter(2000)
     // Fresh index every attempt — another instance may have pinned newer
     // since we last looked. NULL (unreadable) aborts the attempt: proceeding
     // with an assumed-empty index would clobber durable state.
@@ -2416,8 +2419,8 @@ export async function syncAccountManifestToTelegram(
     // (explicit match still required, just not on the first try).
     let verify = await fetchFreshIndex()
     let current = verify?.accounts[userId]
-    for (let v = 0; v < 4 && !(verify && current && current.messageId === sent.messageId); v++) {
-      await sleepMs(3000)
+    for (let v = 0; v < 1 && !(verify && current && current.messageId === sent.messageId); v++) {
+      await sleepMs(2000)
       verify = await fetchFreshIndex()
       current = verify?.accounts[userId]
     }
@@ -2440,21 +2443,10 @@ export async function syncAccountManifestToTelegram(
       // (Skipped when WE are the repair — chained after()s don't extend
       // serverless lifetime, so repairs must not schedule repairs.)
       if (opts?.scheduleRepair !== false) schedulePostVerifyRepair(userId, sent.messageId)
-      // INLINE GRACE (contended writes only): rivals were active (we needed
-      // attempt 1+), so a stale-fork overwrite may already be in flight.
-      // Wait 4s, re-check the tip, and re-merge inline if we lost — one
-      // synchronous recovery shot before responding. Quiet writes skip this
-      // (the persistent background repair covers their tiny race window).
-      if (attempt > 0 && opts?.scheduleRepair !== false) {
-        await sleepMs(4000)
-        const tip = await fetchFreshIndex()
-        const tipEntry = tip?.accounts[userId]
-        if (tip && tipEntry && tipEntry.messageId !== sent.messageId) {
-          console.warn(`[store] grace round for ${userId}: lost tip during verify — re-merging inline`)
-          const recovered = await syncAccountManifestToTelegram(userId)
-          if (recovered) return recovered
-        }
-      }
+      // (Inline grace round REMOVED: the 4s sleep + recursive full sync
+      // inside the request stacked latency and re-entered the pin race it
+      // was trying to fix. The persistent background repair scheduled above
+      // covers lost races post-response — client latency unaffected.)
       return entry
     }
     console.warn(`[store] sync pin race/unverified for ${userId} (attempt ${attempt + 1}) — re-merging`)
@@ -2702,14 +2694,16 @@ const accountSyncRetries = new Map<string, number>()
  * function is burning lifetime. 45s covers try + paced retry in any
  * survivable flood — past that, fail honestly (durable:false) and let the
  * client retry after the flood clears. Never throws (null on timeout).
+ * 20s: transports fail fast (no in-request 429 sleeps), so a healthy sync
+ * finishes in ~2-4s; the deadline is purely a backstop now.
  */
 function syncWithDeadline(userId: string): Promise<AccountIndexEntry | null> {
   let timer: ReturnType<typeof setTimeout> | null = null
   const timeout = new Promise<AccountIndexEntry | null>((resolve) => {
     timer = setTimeout(() => {
-      console.error(`[store] sync deadline (45s) exceeded for ${userId} — failing fast`)
+      console.error(`[store] sync deadline (20s) exceeded for ${userId} — failing fast`)
       resolve(null)
-    }, 45000)
+    }, 20000)
   })
   return Promise.race([syncAccountManifestToTelegram(userId), timeout]).finally(() => {
     if (timer) clearTimeout(timer)
@@ -3194,7 +3188,12 @@ export function addLog(opts: {
     store.logs = store.logs.filter((l) => l.userId !== opts.dbUserId || keep.includes(l.id))
   }
   saveToDisk()
-  scheduleAccountSyncForDbUser(opts.dbUserId)
+  // NOTE: deliberately NO scheduleAccountSync here. Logs ride the next
+  // content pin (they're excluded from the content short-circuit hash, so a
+  // logs-only sync burns Telegram calls just to discover "nothing to do").
+  // Scheduling on every log coupled READS (getKey logs!) to Telegram
+  // traffic — pure flood fuel under read storms. Durability impact: nil
+  // (logs-only state never pinned anyway, then or now).
   return entry
 }
 

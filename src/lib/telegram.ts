@@ -264,30 +264,6 @@ function fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 5000)
   return breakerFetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timer))
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-
-/**
- * Extract Telegram's flood-wait (`retry_after`, seconds) from a Bot API body.
- * Capped at 10s: longer floods must FAIL FAST (honest durable:false, client
- * retries later) instead of sleeping out a 60s+ cooldown inside a serverless
- * function that will be killed (and a client that will have timed out).
- */
-function retryAfterSeconds(data: unknown): number | null {
-  if (typeof data === 'object' && data !== null) {
-    const d = data as { parameters?: { retry_after?: unknown }; description?: unknown }
-    // Local breaker short-circuit: fail INSTANTLY (baseWait 0 → no wait, no
-    // retry). The breaker owns the cooldown; waiting here only burns time.
-    if (typeof d.description === 'string' && d.description.includes('local flood breaker')) return 0
-    const ra = d.parameters?.retry_after
-    if (typeof ra === 'number' && ra > 0) return Math.min(ra, 10)
-    if (typeof d.description === 'string') {
-      const m = d.description.match(/retry after (\d+)/i)
-      if (m) return Math.min(parseInt(m[1], 10), 10)
-    }
-  }
-  return null
-}
-
 interface BotJsonResponse {
   ok: boolean
   description?: string
@@ -295,10 +271,10 @@ interface BotJsonResponse {
 }
 
 /**
- * GET JSON from the Bot API with ONE flood-aware retry: on 429, wait out
- * Telegram's cooldown (capped at 30s) and retry once. Returns the parsed
- * body, or null on transport failure. Write bursts self-serialize through
- * this instead of failing outright.
+ * GET JSON from the Bot API. SINGLE attempt on 429s — fail fast (the
+ * 429 sleep used to live here and layered into minutes-long pileups).
+ * Returns the parsed body, or null on transport failure. Transport blips
+ * still get one immediate retry via the catch below.
  */
 async function getBotJson(url: string): Promise<BotJsonResponse | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -307,16 +283,12 @@ async function getBotJson(url: string): Promise<BotJsonResponse | null> {
       const data = (await res.json().catch(() => null)) as BotJsonResponse | null
       if (!data) return null
       if (data.ok) return data
-      const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
-      // Comply with Telegram's cooldown IN FULL plus margin. Under-waiting
-      // re-violates and EXTENDS the throttle (a 4s wait against retry_after=5
-      // self-sustains forever — proven live). retry_after is already capped
-      // at 10s inside retryAfterSeconds, so no single wait exceeds ~15s.
-      const wait = baseWait > 0 ? baseWait + 3 + Math.random() * 2 : 0
-      if (wait > 0 && attempt === 0) {
-        await sleep(wait * 1000)
-        continue
-      }
+      // FLOOD-SAFE: never sleep out a 429 inside the request. Layered
+      // 429-sleeps (here x sync attempts x verify rounds x repairs) stacked
+      // past two minutes per write — the engine of the death spiral.
+      // breakerFetch->recordThrottle already armed throttleYieldMs, so sync
+      // funnels yield at zero cost; the sync/backstop/client retry owns the
+      // wait. Transport blips still get attempt 2 via the catch below.
       return data
     } catch {
       if (attempt === 0) continue
@@ -327,8 +299,8 @@ async function getBotJson(url: string): Promise<BotJsonResponse | null> {
 }
 
 /**
- * POST JSON to the Bot API with ONE flood-aware retry (same contract as
- * getBotJson). Used by pin/edit flows.
+ * POST JSON to the Bot API (same fail-fast contract as getBotJson).
+ * Used by pin/edit flows.
  */
 async function postBotJson(url: string, body: unknown): Promise<BotJsonResponse | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
@@ -341,16 +313,12 @@ async function postBotJson(url: string, body: unknown): Promise<BotJsonResponse 
       const data = (await res.json().catch(() => null)) as BotJsonResponse | null
       if (!data) return null
       if (data.ok) return data
-      const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
-      // Comply with Telegram's cooldown IN FULL plus margin. Under-waiting
-      // re-violates and EXTENDS the throttle (a 4s wait against retry_after=5
-      // self-sustains forever — proven live). retry_after is already capped
-      // at 10s inside retryAfterSeconds, so no single wait exceeds ~15s.
-      const wait = baseWait > 0 ? baseWait + 3 + Math.random() * 2 : 0
-      if (wait > 0 && attempt === 0) {
-        await sleep(wait * 1000)
-        continue
-      }
+      // FLOOD-SAFE: never sleep out a 429 inside the request. Layered
+      // 429-sleeps (here x sync attempts x verify rounds x repairs) stacked
+      // past two minutes per write — the engine of the death spiral.
+      // breakerFetch->recordThrottle already armed throttleYieldMs, so sync
+      // funnels yield at zero cost; the sync/backstop/client retry owns the
+      // wait. Transport blips still get attempt 2 via the catch below.
       return data
     } catch {
       if (attempt === 0) continue
@@ -1013,10 +981,9 @@ export async function pinAccountIndex(
 }
 
 /**
- * POST a multipart form (sendDocument) with ONE flood-aware retry: on 429,
- * wait out Telegram's cooldown (capped at 10s by retryAfterSeconds) and
- * rebuild + resend once (a consumed FormData can't be resent, hence the
- * builder callback). Longer floods fail fast to the caller.
+ * POST a multipart form (sendDocument). SINGLE attempt — on 429 fail fast
+ * to the caller (no in-request sleep; the throttle window is armed and the
+ * sync/backstop/client retry owns the wait).
  */
 async function sendDocumentWithRetry(
   apiBase: string,
@@ -1033,14 +1000,10 @@ async function sendDocumentWithRetry(
       } | null
       if (!sendData) return null
       if (sendData.ok && sendData.result?.document) return sendData.result
-      const baseWait = sendRes.status === 429 ? (retryAfterSeconds(sendData) ?? 5) : 0
-      // Full cooldown + margin (under-waiting re-violates and extends).
-      const wait = baseWait > 0 ? baseWait + 3 + Math.random() * 2 : 0
-      if (wait > 0 && attempt === 0) {
-        await sleep(wait * 1000)
-        continue
-      }
-      console.error('[telegram] sendDocument failed:', sendData.description)
+      // FLOOD-SAFE: no in-request 429 sleep (see getBotJson) — fail fast,
+      // the throttle window is armed and the caller retries after it.
+      if (sendRes.status === 429) console.warn('[telegram] sendDocument 429 — failing fast (throttle armed)')
+      else console.error('[telegram] sendDocument failed:', sendData.description)
       return null
     } catch (err) {
       console.error('[telegram] sendDocument error:', err)
@@ -1439,8 +1402,8 @@ export async function getFileDownloadUrl(
   const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
   const fileBase = resolveBotApiOrigin(botApiBaseUrlOverride)
 
-  // ONE flood-aware retry: getFile sits on the rehydrate hot path, and a
-  // single 429 there used to fail the whole rehydrate into a spurious 404.
+  // Single attempt on 429s (fail fast — see getBotJson); transport blips
+  // still get attempt 2 via the catch below.
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const res = await fetchWithTimeout(
@@ -1459,12 +1422,7 @@ export async function getFileDownloadUrl(
           fileSize: data.result.file_size ?? null,
         }
       }
-      const baseWait = res.status === 429 ? (retryAfterSeconds(data) ?? 5) : 0
-      if (baseWait > 0 && attempt === 0) {
-        // Full cooldown + margin (under-waiting re-violates and extends).
-        await sleep((baseWait + 3 + Math.random() * 2) * 1000)
-        continue
-      }
+      // FLOOD-SAFE: no in-request 429 sleep (see getBotJson).
       console.error('[telegram] getFile failed:', data.description)
       return null
     } catch (err) {
