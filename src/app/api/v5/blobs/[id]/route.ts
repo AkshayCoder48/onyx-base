@@ -1,13 +1,21 @@
 /**
  * /api/v5/blobs/:id — GET metadata / POST|PATCH finalize|cancel (§13-14, §16).
+ *
+ * Parts-mode blobs (permanent Telegram-backed storage):
+ *  - GET also reports receivedChunks / missingChunks (durable part records)
+ *    so interrupted uploads resume from exactly what already exists.
+ *  - POST {action:'finalize', parts:[{index, fileId, messageId?}]} verifies
+ *    every part reference against Telegram and commits the durable manifest.
+ *  - POST {action:'cancel'} deletes the staged Telegram documents.
  */
 import { NextRequest } from 'next/server'
 import { withV5Handler, V5Error } from '@/lib/v5/handler'
 import { getBlob, finalizeBlob, cancelBlob } from '@/lib/v5/blobs'
+import { getPartsStatus, finalizePartsBlob, cancelPartsBlob } from '@/lib/v5/blob-parts'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-export const maxDuration = 60
+export const maxDuration = 300
 
 type Ctx = { params: Promise<{ id: string }> }
 
@@ -16,7 +24,29 @@ export const GET = withV5Handler({
   auth: 'bearer',
   handler: async (req: NextRequest, ctx, routeCtx?: Ctx) => {
     const { id } = await routeCtx!.params
-    const blob = await getBlob(id)
+    // Parts mode? The row's storage_key marker ('parts') routes us.
+    const row = await getBlob(id)
+    if (row && row.owner === ctx.user!.owner && row.storageKey === 'parts') {
+      const status = await getPartsStatus(ctx.user!.owner, id)
+      const origin = process.env.PUBLIC_BASE_URL || req.nextUrl.origin
+      return ctx.ok({
+        blobId: status.blobId,
+        mode: 'parts',
+        filename: status.filename,
+        mimeType: status.mimeType,
+        size: status.size,
+        checksum: status.checksum,
+        status: status.status,
+        chunkSize: status.chunkSize,
+        totalChunks: status.totalChunks,
+        receivedChunks: status.receivedChunks,
+        missingChunks: status.missingChunks,
+        publicUrl: status.status === 'ready' ? `${origin}/f/${status.blobId}` : undefined,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      })
+    }
+    const blob = row
     if (!blob || blob.owner !== ctx.user!.owner) throw new V5Error('NOT_FOUND', 'Blob not found.', 404)
     const origin = process.env.PUBLIC_BASE_URL || req.nextUrl.origin
     return ctx.ok({
@@ -39,8 +69,35 @@ export const POST = withV5Handler({
   auth: 'bearer',
   handler: async (req: NextRequest, ctx, routeCtx?: Ctx) => {
     const { id } = await routeCtx!.params
-    const body = (await req.json().catch(() => ({}))) as { action?: string }
+    const body = (await req.json().catch(() => ({}))) as {
+      action?: string
+      parts?: Array<{ index: number; fileId: string; messageId?: number }>
+    }
     const action = body.action || 'finalize'
+    const row = await getBlob(id)
+
+    // Parts mode routing (storage_key marker).
+    if (row && row.owner === ctx.user!.owner && row.storageKey === 'parts') {
+      if (action === 'cancel') {
+        const result = await cancelPartsBlob(ctx.user!.owner, id)
+        return ctx.ok({ blobId: result.blobId, status: result.status, deletedDocs: result.deletedDocs })
+      }
+      if (action !== 'finalize') {
+        throw new V5Error('VALIDATION_ERROR', 'action must be "finalize" or "cancel".', 400)
+      }
+      const result = await finalizePartsBlob(ctx.user!.owner, id, body.parts ?? [])
+      return ctx.ok({
+        blobId: result.blobId,
+        status: result.status,
+        url: result.url,
+        alreadyProcessed: result.alreadyProcessed,
+        dedupOf: result.dedupOf,
+        size: result.size,
+        checksum: result.checksum,
+        totalChunks: result.totalChunks,
+      })
+    }
+
     if (action === 'cancel') {
       const blob = await cancelBlob(id, ctx.user!.owner)
       return ctx.ok({ blobId: blob.blobId, status: blob.status })

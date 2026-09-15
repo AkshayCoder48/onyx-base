@@ -90,9 +90,12 @@ const DDL: string[] = [
     is_public INTEGER NOT NULL DEFAULT 0,
     error TEXT,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    parts_json TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS v5_blobs_owner ON v5_blobs(owner, status, created_at DESC)`,
+  // Lightweight column migration for pre-existing databases (parts mode).
+  `ALTER TABLE v5_blobs ADD COLUMN parts_json TEXT`,
   `CREATE TABLE IF NOT EXISTS v5_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     owner TEXT NOT NULL,
@@ -131,7 +134,23 @@ async function init(): Promise<Client> {
       /* pragma best-effort */
     }
   }
-  for (const stmt of DDL) await c.execute(stmt)
+  for (const stmt of DDL) {
+    try {
+      await c.execute(stmt)
+    } catch (err) {
+      // ALTER TABLE migrations are idempotent-by-catch: on a database that
+      // already has the column, SQLite fails with "duplicate column name" —
+      // that specific failure is expected and harmless. Everything else
+      // (CREATE TABLE / INDEX) must never fail silently twice in a row; the
+      // failing statement is logged so schema drift is visible in logs.
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!/duplicate column name/i.test(msg)) {
+        console.warn(
+          JSON.stringify({ t: new Date().toISOString(), operation: 'v5.db.ddl', level: 'warn', error: msg.slice(0, 200) }),
+        )
+      }
+    }
+  }
 
   // Cold-boot recovery ("Telegram = data saver"): when the store is EMPTY and
   // a Telegram snapshot exists, rebuild automatically. bootRestoreIfEmpty()

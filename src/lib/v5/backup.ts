@@ -78,6 +78,9 @@ interface BlobSnapRow {
   is_public: number
   created_at: number
   updated_at: number
+  /** Parts-mode manifest (ordered Telegram part refs) — enables cross-instance
+   *  serving of permanent chunked files after restore. */
+  parts_json?: string | null
   /** Telegram part references captured by the mirror (byte-level recovery). */
   parts?: Array<{ messageId: number; fileId: string; fileName: string; bytes: number }>
 }
@@ -283,7 +286,7 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
       'SELECT owner, collection, key, value, size, created_at, updated_at, deleted_at FROM v5_kv',
     )
     const blobRows = await db.execute(
-      'SELECT id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at FROM v5_blobs ORDER BY created_at ASC',
+      'SELECT id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at, parts_json FROM v5_blobs ORDER BY created_at ASC',
     )
     const acctRows = await db.execute(
       'SELECT id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, idem_register, created_at, updated_at FROM v5_accounts ORDER BY created_at ASC',
@@ -304,6 +307,7 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
         is_public: Number(r.is_public ?? 0),
         created_at: Number(r.created_at ?? 0),
         updated_at: Number(r.updated_at ?? 0),
+        parts_json: r.parts_json === null || r.parts_json === undefined ? null : String(r.parts_json),
       }
       const p = parts?.get(row.id)
       if (p && row.status === 'ready') row.parts = [p]
@@ -572,22 +576,26 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
   if (Array.isArray(payload.blobs) && payload.blobs.length) {
     const stmts = payload.blobs.map(
       (b) =>
-        `INSERT OR IGNORE INTO v5_blobs (id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at) VALUES (` +
+        `INSERT OR IGNORE INTO v5_blobs (id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at, parts_json) VALUES (` +
         `'${sqlEscape(b.id)}', '${sqlEscape(b.owner)}', ${b.filename === null ? 'NULL' : `'${sqlEscape(b.filename)}'`}, ` +
         `${b.mime === null ? 'NULL' : `'${sqlEscape(b.mime)}'`}, ${b.size}, ${b.checksum === null ? 'NULL' : `'${sqlEscape(b.checksum)}'`}, ` +
         `'${sqlEscape(b.status)}', ${b.storage_key === null ? 'NULL' : `'${sqlEscape(b.storage_key)}'`}, ${b.chunks}, ${b.is_public}, ` +
-        `${b.created_at}, ${b.updated_at})`,
+        `${b.created_at}, ${b.updated_at}, ${!b.parts_json ? 'NULL' : `'${sqlEscape(b.parts_json)}'`})`,
     )
     for (let i = 0; i < stmts.length; i += BATCH) {
       const r = await db.batch(stmts.slice(i, i + BATCH).map((s) => ({ sql: s, args: [] })), 'write')
       appliedBlobs += r.filter((x) => Number(x.rowsAffected ?? 0) > 0).length
     }
     // Byte-level recovery: re-stage ready blobs whose parts are referenced.
+    // (Parts-mode blobs are served from their Telegram manifests — no staging.)
     for (const b of payload.blobs) {
       if (b.status !== 'ready' || !b.parts?.length) continue
+      if (b.storage_key === 'parts' || b.parts_json) continue
       try {
         const stagingDir = process.env.V5_BLOB_STAGING_DIR || path.join(process.cwd(), '.data', 'v5-blobs')
-        const target = path.join(stagingDir, b.id)
+        // MUST match stagingPath() in blobs.ts (`${blobId}.bin`) — otherwise a
+        // restored blob 404s at serve time despite the bytes being restaged.
+        const target = path.join(stagingDir, `${b.id}.bin`)
         if (fs.existsSync(target)) continue // local copy already present
         const part = b.parts[0]
         const pdl = await getFileDownloadUrl(part.fileId)

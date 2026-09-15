@@ -15,29 +15,69 @@ export const maxDuration = 300
 /**
  * GET /f/[id] — the public file-to-link proxy.
  *
- * Two access modes:
+ * Three serving paths:
  *
+ *   1. **V5 parts mode (permanent Telegram-backed storage)** — a ready public
+ *      blob whose parts live as Telegram documents is streamed part-by-part
+ *      with full HTTP Range support (206 + Content-Range), ETag and HEAD —
+ *      video seeking, resumable downloads and partial XML previews all work
+ *      against the ONE logical file. Chunking is invisible to the client.
+ *
+ *   2. **V5 single-PUT mode** — a ready public blob is served directly from
+ *      V5 staging (authoritative instant path).
+ *
+ *   3. **V4 Telegram flow** — legacy files keep working unchanged.
+ *
+ * Access modes (paths 2/3):
  *   1. **Permanent public link** — `/f/<fileId>` with no query string.
- *      Works ONLY when the file was uploaded with `public=true`. The
- *      unguessable fileId is the credential. This link never expires.
- *
  *   2. **Signed time-limited link** — `/f/<fileId>?t=<sig>&e=<expiresAt>`.
- *      Minted by `POST /api/files/[id]/link` when the user taps "Get link".
- *      Works for BOTH public and private files. Expires after ~1 hour
- *      (matching Telegram's own getFile URL expiry), after which the user
- *      taps "Get link" again. The signature is HMAC-SHA256 over
- *      `${fileId}:${expiresAt}` — forged tokens are rejected.
  *
- * In BOTH modes the actual Telegram download URL is NEVER exposed to the end
- * user. We resolve it behind the scenes via `getCachedFileDownloadUrl`, which
- * caches the result for ~55 minutes so we don't spam Telegram's `getFile`
- * endpoint on every download. Pass `?inline=1` to render inline in the browser
- * (images, PDFs) instead of forcing a download.
+ * In ALL modes the actual Telegram download URL is NEVER exposed to the end
+ * user. Pass `?inline=1` to render inline in the browser instead of forcing
+ * a download.
  */
+
+async function resolveV5PartsResponse(req: NextRequest, id: string): Promise<Response | null> {
+  try {
+    const { v5Configured } = await import('@/lib/v5/db')
+    if (!v5Configured()) return null
+    const { loadBlobForServe, serveBlobParts } = await import('@/lib/v5/blob-parts')
+    let manifest = await loadBlobForServe(id)
+    if (!manifest) {
+      // Cross-instance freshness (file mode): the blob may have been
+      // finalized on another instance after this one booted. One
+      // rate-limited Telegram snapshot probe + retry before falling through.
+      try {
+        const { ensureFreshness } = await import('@/lib/v5/sync')
+        await ensureFreshness()
+        manifest = await loadBlobForServe(id)
+      } catch {
+        /* fall through */
+      }
+    }
+    if (!manifest || !manifest.isPublic) return null
+    if (manifest.status !== 'ready' || !manifest.parts || manifest.parts.length === 0) return null
+    return serveBlobParts(manifest, {
+      rangeHeader: req.headers.get('range'),
+      ifNoneMatch: req.headers.get('if-none-match'),
+      filename: manifest.filename || id,
+      mimeType: manifest.mimeType || 'application/octet-stream',
+      etag: manifest.checksum,
+      isPublic: manifest.isPublic,
+    })
+  } catch {
+    return null
+  }
+}
+
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
 
-  // ─── V5 fast path ──────────────────────────────────────────────────────────
+  // ─── V5 parts mode: permanent Telegram-backed files (Range-aware) ─────────
+  const partsResponse = await resolveV5PartsResponse(req, id)
+  if (partsResponse) return partsResponse
+
+  // ─── V5 fast path (single-PUT staging blobs) ──────────────────────────────
   // When the V5 engine is configured, a ready public blob with this id is
   // served directly from V5 staging (authoritative instant path). Falls
   // through to the V4 Telegram flow otherwise — V4 URLs keep working.
@@ -145,4 +185,54 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     status: 200,
     headers,
   })
+}
+
+/**
+ * HEAD /f/[id] — headers only (Content-Length, Content-Type, Accept-Ranges,
+ * ETag) without transferring bytes. Used by download managers and players to
+ * probe a file before ranged retrieval.
+ */
+export async function HEAD(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params
+
+  // V5 parts mode: resolve metadata and answer with real headers.
+  try {
+    const { v5Configured } = await import('@/lib/v5/db')
+    if (v5Configured()) {
+      const { loadBlobForServe } = await import('@/lib/v5/blob-parts')
+      let manifest = await loadBlobForServe(id)
+      if (!manifest) {
+        try {
+          const { ensureFreshness } = await import('@/lib/v5/sync')
+          await ensureFreshness()
+          manifest = await loadBlobForServe(id)
+        } catch {
+          /* fall through */
+        }
+      }
+      if (manifest && manifest.isPublic && manifest.status === 'ready' && manifest.parts && manifest.parts.length > 0) {
+        const headers = new Headers()
+        const safeName = encodeURIComponent(manifest.filename || id).replace(/'/g, '%27')
+        headers.set('Content-Type', manifest.mimeType || 'application/octet-stream')
+        headers.set('Content-Disposition', `inline; filename="${safeName}"; filename*=UTF-8''${safeName}`)
+        headers.set('Content-Length', String(manifest.size))
+        headers.set('Accept-Ranges', 'bytes')
+        if (manifest.checksum) headers.set('ETag', `"${manifest.checksum}"`)
+        headers.set('Cache-Control', 'public, max-age=300')
+        return new Response(null, { status: 200, headers })
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+
+  // Everything else: reuse GET semantics cheaply where possible.
+  const probe = new NextRequest(new URL(req.url), { method: 'GET', headers: req.headers, body: null })
+  const res = await GET(probe, { params: Promise.resolve({ id }) })
+  const headers = new Headers()
+  for (const key of ['content-type', 'content-length', 'content-disposition', 'accept-ranges', 'etag', 'cache-control', 'x-file-name']) {
+    const v = res.headers.get(key)
+    if (v) headers.set(key, v)
+  }
+  return new Response(null, { status: res.status, headers })
 }
