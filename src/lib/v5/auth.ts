@@ -270,9 +270,10 @@ export async function v5Login(email: string, password: string): Promise<AccountR
   const row = rows[0] as Record<string, unknown>
   if (!verifyPassword(password, row.password_hash as string | null)) {
     // Password mismatch — but this instance may be STALE (e.g. the password
-    // was just rotated on another instance). One rate-limited freshness
-    // probe + re-verify before failing (mirrors the not-found path).
-    await ensureFreshness()
+    // was just rotated on another instance). One FORCED freshness probe +
+    // re-verify before failing (mirrors the not-found path; wrong-password
+    // attempts are rare and rate-limited, so the forced probe is bounded).
+    await ensureFreshness({ force: true })
     const retry = await lookup()
     if (retry.length > 0) {
       const retryRow = retry[0] as Record<string, unknown>
