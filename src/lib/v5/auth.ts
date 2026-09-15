@@ -313,7 +313,9 @@ export async function v5UpdatePassword(email: string, newPassword: string): Prom
   let rows = await lookup()
   if (rows.length === 0) {
     // Cross-instance freshness before a "no account" verdict (file mode).
-    await ensureFreshness()
+    // FORCED: a just-registered account may not have converged to this
+    // instance yet, and password resets run seconds after registration.
+    await ensureFreshness({ force: true })
     rows = await lookup()
   }
   if (rows.length === 0) {
