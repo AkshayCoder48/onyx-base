@@ -34,6 +34,7 @@ import {
   type AccountIndex,
 } from '@/lib/telegram'
 import { isFileMode, isV5TelegramBackupEnabled, v5db } from './db'
+import { clearKvCache } from './kv'
 
 /** Pinned-index userId under which the V5 snapshot document is registered. */
 export const V5_SNAPSHOT_ACCOUNT = '__v5s__'
@@ -43,6 +44,12 @@ const BIO_MARKER = 'ONYXBASE_V5_SNAPSHOT'
 
 /** Upload a fresh snapshot after this many mirrored writes (queue idle). */
 const SNAPSHOT_EVERY_WRITES = 10
+
+/** Minimum spacing between idle-cadence snapshots (convergence vs API load). */
+const SNAPSHOT_MIN_INTERVAL_MS = 15_000
+
+/** Minimum spacing between auth-triggered snapshots (per instance). */
+const AUTH_SNAPSHOT_MIN_INTERVAL_MS = 5_000
 
 const CAPTION_MARKER = 'ONYXBASE_V5_SNAPSHOT'
 
@@ -103,6 +110,8 @@ export interface SnapshotStatus {
   lastSnapshotKv: number | null
   writesSinceSnapshot: number
   snapshotEveryWrites: number
+  /** ts of the last snapshot this instance APPLIED (restored or uploaded). */
+  lastAppliedSnapshotTs: number | null
 }
 
 interface BackupGlobal {
@@ -111,6 +120,10 @@ interface BackupGlobal {
     lastSnapshotKv: number | null
     writesSince: number
     busy: boolean
+    /** ts of the newest snapshot applied/restored/uploaded by this instance. */
+    lastAppliedTs: number
+    /** rate-limit for auth-triggered snapshots */
+    authSnapshotQueuedAt: number
   }
   /** blobId → latest mirrored part (captured by mirror.ts on send success). */
   __v5BlobParts?: Map<string, { messageId: number; fileId: string; fileName: string; bytes: number }>
@@ -119,8 +132,13 @@ interface BackupGlobal {
 const g = globalThis as unknown as BackupGlobal
 
 function state() {
-  g.__v5Backup ??= { lastSnapshotAt: null, lastSnapshotKv: null, writesSince: 0, busy: false }
+  g.__v5Backup ??= { lastSnapshotAt: null, lastSnapshotKv: null, writesSince: 0, busy: false, lastAppliedTs: 0, authSnapshotQueuedAt: 0 }
   return g.__v5Backup
+}
+
+/** ts of the newest snapshot this instance has applied or produced. */
+export function getLastAppliedSnapshotTs(): number {
+  return state().lastAppliedTs
 }
 
 /** Mirror.ts records each successfully mirrored staged blob part here. */
@@ -145,6 +163,7 @@ export function snapshotStatus(): SnapshotStatus {
     lastSnapshotKv: s.lastSnapshotKv,
     writesSinceSnapshot: s.writesSince,
     snapshotEveryWrites: SNAPSHOT_EVERY_WRITES,
+    lastAppliedSnapshotTs: s.lastAppliedTs || null,
   }
 }
 
@@ -166,7 +185,7 @@ export function isV5BackupConfigured(): boolean {
 //      survives even if the index overflows (new V4 accounts).
 //
 
-interface SnapshotPointer {
+export interface SnapshotPointer {
   f: string
   m: number
   ts?: number
@@ -180,6 +199,7 @@ async function botApi(method: string, body: Record<string, unknown>): Promise<{ 
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(4_000),
     })
     return (await res.json()) as { ok: boolean; result?: unknown; description?: string }
   } catch {
@@ -195,7 +215,7 @@ async function setBioPointer(p: SnapshotPointer): Promise<boolean> {
 }
 
 /** Read the snapshot pointer from the bot's description (fallback path). */
-async function getBioPointer(): Promise<SnapshotPointer | null> {
+export async function getBioPointer(): Promise<SnapshotPointer | null> {
   const r = await botApi('getMyDescription', {})
   const desc = ((r.result as { description?: string } | undefined)?.description ?? '').trim()
   if (!desc.startsWith(BIO_MARKER)) return null
@@ -208,7 +228,7 @@ async function getBioPointer(): Promise<SnapshotPointer | null> {
 }
 
 /** Read the snapshot pointer from the pinned V4 account index (primary path). */
-async function getIndexPointer(): Promise<SnapshotPointer | null> {
+export async function getIndexPointer(): Promise<SnapshotPointer | null> {
   const index = await fetchAccountIndex()
   if (!index) return null
   const entry = (index.accounts as Record<string, unknown>)[V5_SNAPSHOT_ACCOUNT] as
@@ -248,6 +268,15 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
   if (s.busy) return { ok: false, reason: 'snapshot-in-progress' }
   s.busy = true
   try {
+    // Monotonicity guard: apply any NEWER shared snapshot FIRST so this
+    // upload is a superset — a stale instance must never regress the shared
+    // pointer to a snapshot that misses another instance's writes.
+    try {
+      const { probeAndApplyIfNewer } = await import('./sync')
+      await probeAndApplyIfNewer()
+    } catch {
+      /* best-effort — proceed with what this instance has */
+    }
     const db = await v5db()
     const kvRows = await db.execute(
       'SELECT owner, collection, key, value, size, created_at, updated_at, deleted_at FROM v5_kv',
@@ -367,6 +396,7 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
 
     s.lastSnapshotAt = payload.ts
     s.lastSnapshotKv = payload.kv.length
+    s.lastAppliedTs = payload.ts
     s.writesSince = 0
     return {
       ok: true,
@@ -391,7 +421,11 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
 /** Called by the mirror drain when the queue goes idle. */
 export async function maybeSnapshotOnIdle(): Promise<void> {
   const s = state()
-  if (s.writesSince >= SNAPSHOT_EVERY_WRITES) {
+  const dueByWrites = s.writesSince >= SNAPSHOT_EVERY_WRITES
+  // Convergence cadence: with low traffic a single write would otherwise wait
+  // for nine more — cap the wait so other instances converge within ~15s.
+  const dueByAge = s.writesSince >= 1 && Date.now() - (s.lastSnapshotAt ?? 0) >= SNAPSHOT_MIN_INTERVAL_MS
+  if (dueByWrites || dueByAge) {
     s.writesSince = 0
     const res = await uploadV5Snapshot('auto')
     if (!res.ok) {
@@ -400,6 +434,32 @@ export async function maybeSnapshotOnIdle(): Promise<void> {
       )
     }
   }
+}
+
+/**
+ * Immediate async snapshot after account writes (register / login key mint).
+ * Rate-limited to one per AUTH_SNAPSHOT_MIN_INTERVAL_MS per instance so the
+ * shared pointer advances within ~1-2s of a registration — that is what
+ * makes a cross-instance login work seconds after a cross-instance signup.
+ */
+export function queueAuthSnapshot(): void {
+  if (!isV5BackupConfigured()) return
+  const s = state()
+  const now = Date.now()
+  if (now - s.authSnapshotQueuedAt < AUTH_SNAPSHOT_MIN_INTERVAL_MS) return
+  s.authSnapshotQueuedAt = now
+  void (async () => {
+    try {
+      const res = await uploadV5Snapshot('auto')
+      if (!res.ok && res.reason !== 'snapshot-in-progress' && res.reason !== 'backup-not-configured') {
+        console.warn(
+          JSON.stringify({ t: new Date().toISOString(), operation: 'v5.backup.auth-snapshot', level: 'warn', reason: res.reason }),
+        )
+      }
+    } catch {
+      /* best-effort */
+    }
+  })()
 }
 
 // ─── Restore ─────────────────────────────────────────────────────────────────
@@ -444,7 +504,7 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
   const dl = await getFileDownloadUrl(pointer.f)
   step('getFile', { ok: !!dl })
   if (!dl) return { ok: false, reason: 'getFile failed' }
-  const res = await fetch(dl.url)
+  const res = await fetch(dl.url, { signal: AbortSignal.timeout(20_000) })
   const buf = Buffer.from(await res.arrayBuffer())
   step('download', { bytes: buf.length, status: res.status })
   if (!res.ok) return { ok: false, reason: `snapshot download failed (${res.status})` }
@@ -498,8 +558,7 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
 
   let appliedBlobs = 0
   let blobBytesRestaged = 0
-  if (Array.isArray(payload.blobs) && payload.blobs.length) {
-    const stmts = payload.blobs.map(
+  if (Array.isArray(payload.blobs) && payload.blobs.length) {    const stmts = payload.blobs.map(
       (b) =>
         `INSERT INTO v5_blobs (id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at) VALUES (` +
         `'${sqlEscape(b.id)}', '${sqlEscape(b.owner)}', ${b.filename === null ? 'NULL' : `'${sqlEscape(b.filename)}'`}, ` +
@@ -521,7 +580,7 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
         const part = b.parts[0]
         const pdl = await getFileDownloadUrl(part.fileId)
         if (!pdl) continue
-        const pres = await fetch(pdl.url)
+        const pres = await fetch(pdl.url, { signal: AbortSignal.timeout(60_000) })
         if (!pres.ok) continue
         const bytes = Buffer.from(await pres.arrayBuffer())
         fs.mkdirSync(stagingDir, { recursive: true })
@@ -534,6 +593,24 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
     }
   }
 
+  // Rebuild the maintained live counters from the applied table state —
+  // snapshot imports/boot restores would otherwise leave them empty.
+  try {
+    await db.execute({
+      sql: `INSERT INTO v5_counters (owner, name, value, updated_at)
+            SELECT owner, 'kv:' || collection || ':live', COUNT(*), ? FROM v5_kv WHERE deleted_at IS NULL GROUP BY owner, collection
+            ON CONFLICT(owner, name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      args: [Date.now()],
+    })
+  } catch {
+    /* counters are advisory */
+  }
+
+  // The apply wrote rows straight to SQLite — drop the per-key hot cache so
+  // reads observe restored data immediately (never serve a cached miss).
+  clearKvCache()
+
+  state().lastAppliedTs = payload.ts
   step('done', { kv: appliedKv, blobs: appliedBlobs, accounts: appliedAccounts })
   return { ok: true, snapshotTs: payload.ts, via, applied: { kv: appliedKv, blobs: appliedBlobs, accounts: appliedAccounts, blobBytesRestaged } }
 }

@@ -213,3 +213,49 @@ BLOB_NOT_READY, STORAGE_UNAVAILABLE, DATABASE_UNAVAILABLE, UNKNOWN_ERROR.
 
 - Reads p95 < 500 ms; mutations p95 < 1 s; auth ops p95 < 1 s (excl. email);
   upload init p95 < 500 ms. Local SQLite: expect p95 < 50 ms.
+
+## Cross-instance freshness (file mode) — Telegram as the convergence point
+
+`src/lib/v5/sync.ts`. File-mode deployments give every serverless instance its
+own ephemeral SQLite (`file:/tmp/v5.db`); boot-restore hydrates EMPTY stores
+only, so an instance that booted before another instance's writes would serve
+stale data forever (register on A → login routed to B → invalid credentials).
+
+The shared snapshot pointer (bot bio → pinned V4 index fallback) is the
+watermark that converges instances:
+
+1. **Probe loop** — every 20 s per warm instance, ONE cheap pointer read
+   (`getMyDescription`). Newer `ts` than this instance last applied ⇒ download
+   + apply the snapshot (kv upserts are `updated_at`-conditional — local newer
+   writes always win; accounts/blobs insert-if-absent). Remote mode never
+   probes (one shared DB).
+2. **Miss probes** — login lookup miss, register email-uniqueness miss, bearer
+   miss, kv `GET` miss and `/f/[id]` blob miss trigger ONE rate-limited probe
+   (min 2 s spacing per instance, coalesced in-flight) + local retry before
+   reporting NOT_FOUND / AUTH_INVALID_CREDENTIALS. Cross-instance reads
+   self-heal in seconds instead of one loop cadence.
+3. **Auth snapshots** — register / login-key-mint / idempotent-replay call
+   `backup.queueAuthSnapshot()` (≥5 s spacing per instance): an immediate
+   async full-state snapshot so other instances converge ~1-2 s after a
+   registration.
+4. **Idle snapshots** — the mirror drain snapshots after ≥10 mirrored writes
+   OR ≥1 write with the last snapshot ≥15 s old.
+5. **Monotonicity guard** — `uploadV5Snapshot` probes + applies any newer
+   shared snapshot BEFORE reading rows, so an upload is always a superset (a
+   stale instance can never regress the shared pointer).
+
+Restore additionally rebuilds `v5_counters` from table state and drops the
+per-key hot cache (`kv.clearKvCache`), so post-apply reads never serve a
+pre-restore row or a cached negative.
+
+Degradation contract: Telegram unreachable ⇒ probes fail fast (4 s timeout),
+auth/kv stay instant against the local store, and outcomes remain honest
+(invalid credentials / NOT_FOUND) — no hangs, no fake states. Health exposes
+`freshness: {active, lastProbeAt, lastProbeOk, lastAppliedSnapshotTs}`.
+
+Residual window (documented, accepted): same email registered on two
+instances within the ~2 s convergence window can produce a split-brain that
+the next snapshot merge heals on the kv layer; the accounts unique index
+makes it impossible within one instance, and RGE Hub's stable-requestId
+retries make the client side idempotent. For strict multi-instance
+transactionality, use remote mode (`V5_DATABASE_URL=libsql://…`).

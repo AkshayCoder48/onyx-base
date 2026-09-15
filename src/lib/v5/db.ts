@@ -145,6 +145,13 @@ async function init(): Promise<Client> {
           JSON.stringify({ t: new Date().toISOString(), operation: 'v5.db.init', level: 'warn', error: err instanceof Error ? err.message : String(err) }),
         )
       })
+    // Cross-instance freshness (file mode): converge from newer Telegram
+    // snapshots on a background cadence + on-demand miss probes.
+    void import('./sync')
+      .then((m) => m.startFreshnessLoop())
+      .catch(() => {
+        /* loop optional */
+      })
   }
 
   return c

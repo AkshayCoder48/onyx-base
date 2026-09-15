@@ -16,6 +16,8 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { hashPassword, verifyPassword } from '@/lib/password'
 import { v5db, nowMs, num } from './db'
+import { ensureFreshness } from './sync'
+import { queueAuthSnapshot } from './backup'
 
 const SALT = process.env.V5_KEY_SALT || 'onyxbase-v5-default-salt-change-me'
 
@@ -81,12 +83,22 @@ export async function v5AuthBearer(header: string | null): Promise<V5Account | n
   if (!apiKey) return null
   await ensureSeeded()
   const db = await v5db()
-  const rs = await db.execute({
-    sql: `SELECT owner_key, email, name, role FROM v5_accounts WHERE api_key_hash = ? LIMIT 1`,
-    args: [keyHash(apiKey)],
-  })
-  if (rs.rows.length === 0) return null
-  return rowToAccount(rs.rows[0] as Record<string, unknown>)
+  const lookup = async () =>
+    (
+      await db.execute({
+        sql: `SELECT owner_key, email, name, role FROM v5_accounts WHERE api_key_hash = ? LIMIT 1`,
+        args: [keyHash(apiKey)],
+      })
+    ).rows
+  let rows = await lookup()
+  if (rows.length === 0) {
+    // Cross-instance freshness (file mode): this key may have been minted on
+    // another instance after this one booted. One rate-limited probe + retry.
+    await ensureFreshness()
+    rows = await lookup()
+  }
+  if (rows.length === 0) return null
+  return rowToAccount(rows[0] as Record<string, unknown>)
 }
 
 // ─── Account register / login (public endpoints) ─────────────────────────────
@@ -98,94 +110,11 @@ export interface AccountResult {
   email: string
 }
 
-/**
- * Register an account. Idempotency: when idemKey is provided and a previous
- * registration with the same key exists, mint a FRESH api key for that SAME
- * account (keys are re-mintable, never recoverable) and return it.
- */
-export async function v5Register(opts: {
-  name: string
-  email: string
-  password: string
-  idemKey?: string
-}): Promise<AccountResult> {
-  await ensureSeeded()
-  const db = await v5db()
-  const now = nowMs()
-  const emailLower = opts.email.toLowerCase().trim()
-
-  // Idempotent replay: same registration attempt → same account, fresh key.
-  if (opts.idemKey) {
-    const rs = await db.execute({
-      sql: `SELECT id, name, email, password_hash FROM v5_accounts WHERE idem_register = ? LIMIT 1`,
-      args: [opts.idemKey],
-    })
-    if (rs.rows.length > 0) {
-      const row = rs.rows[0] as Record<string, unknown>
-      const fresh = mintApiKey()
-      await db.execute({
-        sql: `INSERT INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, created_at, updated_at)
-              VALUES (?, ?, ?, ?, NULL, ?, ?, 'user', ?, ?)`,
-        args: [
-          `key_${randomUUID().replace(/-/g, '').slice(0, 16)}`,
-          String(row.id),
-          keyHash(fresh),
-          String(row.email ?? ''),
-          row.password_hash as string,
-          String(row.name ?? ''),
-          now,
-          now,
-        ],
-      })
-      return {
-        userId: String(row.id),
-        apiKey: fresh,
-        name: String(row.name ?? ''),
-        email: String(row.email ?? emailLower),
-      }
-    }
-  }
-
-  const existing = await db.execute({
-    sql: `SELECT id FROM v5_accounts WHERE email_lower = ? LIMIT 1`,
-    args: [emailLower],
-  })
-  if (existing.rows.length > 0) {
-    throw Object.assign(new Error('This email is already registered.'), { code: 'EMAIL_TAKEN' })
-  }
-
-  const id = `usr_${randomUUID().replace(/-/g, '').slice(0, 10)}`
-  const apiKey = mintApiKey()
-  const pwh = hashPassword(opts.password)
-  await db.batch(
-    [
-      {
-        sql: `INSERT INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, created_at, updated_at, idem_register)
-              VALUES (?, ?, ?, ?, ?, ?, ?, 'user', ?, ?, ?)`,
-        args: [id, id, keyHash(apiKey), opts.email.trim(), emailLower, pwh, opts.name.trim(), now, now, opts.idemKey ?? null],
-      },
-    ],
-    'write'
-  )
-  return { userId: id, apiKey, name: opts.name.trim(), email: opts.email.trim() }
-}
-
-/** Login: verify credentials → mint a fresh api key for the account. */
-export async function v5Login(email: string, password: string): Promise<AccountResult> {
-  await ensureSeeded()
-  const db = await v5db()
-  const emailLower = email.toLowerCase().trim()
-  const rs = await db.execute({
-    sql: `SELECT id, password_hash, name, email FROM v5_accounts WHERE email_lower = ? LIMIT 1`,
-    args: [emailLower],
-  })
-  if (rs.rows.length === 0) {
-    throw Object.assign(new Error('Invalid email or password.'), { code: 'AUTH_INVALID_CREDENTIALS' })
-  }
-  const row = rs.rows[0] as Record<string, unknown>
-  if (!verifyPassword(password, row.password_hash as string | null)) {
-    throw Object.assign(new Error('Invalid email or password.'), { code: 'AUTH_INVALID_CREDENTIALS' })
-  }
+/** Mint a fresh key for an EXISTING account row (replay / login path). */
+async function mintKeyFor(
+  db: Awaited<ReturnType<typeof v5db>>,
+  row: Record<string, unknown>
+): Promise<AccountResult> {
   const now = nowMs()
   const fresh = mintApiKey()
   await db.execute({
@@ -202,7 +131,141 @@ export async function v5Login(email: string, password: string): Promise<AccountR
       now,
     ],
   })
-  return { userId: String(row.id), apiKey: fresh, name: String(row.name ?? ''), email: String(row.email ?? emailLower) }
+  return {
+    userId: String(row.id),
+    apiKey: fresh,
+    name: String(row.name ?? ''),
+    email: String(row.email ?? ''),
+  }
+}
+
+/** Is this a SQLite UNIQUE-constraint failure? */
+function isUniqueViolation(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return msg.includes('UNIQUE constraint failed')
+}
+
+/**
+ * Register an account. Idempotency: when idemKey is provided and a previous
+ * registration with the same key exists, mint a FRESH api key for that SAME
+ * account (keys are re-mintable, never recoverable) and return it.
+ *
+ * Cross-instance freshness (file mode): before trusting a "new email"
+ * verdict, one rate-limited Telegram snapshot probe reconciles accounts
+ * created on other instances — the register→login-across-instances case.
+ */
+export async function v5Register(opts: {
+  name: string
+  email: string
+  password: string
+  idemKey?: string
+}): Promise<AccountResult> {
+  await ensureSeeded()
+  const db = await v5db()
+  const now = nowMs()
+  const emailLower = opts.email.toLowerCase().trim()
+
+  const replay = async (): Promise<AccountResult | null> => {
+    if (!opts.idemKey) return null
+    const rs = await db.execute({
+      sql: `SELECT id, name, email, password_hash FROM v5_accounts WHERE idem_register = ? LIMIT 1`,
+      args: [opts.idemKey],
+    })
+    if (rs.rows.length === 0) return null
+    return mintKeyFor(db, rs.rows[0] as Record<string, unknown>)
+  }
+
+  // Idempotent replay: same registration attempt → same account, fresh key.
+  const replayed = await replay()
+  if (replayed) {
+    queueAuthSnapshot()
+    return replayed
+  }
+
+  const emailTaken = async (): Promise<boolean> =>
+    (
+      await db.execute({
+        sql: `SELECT id FROM v5_accounts WHERE email_lower = ? LIMIT 1`,
+        args: [emailLower],
+      })
+    ).rows.length > 0
+
+  if (await emailTaken()) {
+    throw Object.assign(new Error('This email is already registered.'), { code: 'EMAIL_TAKEN' })
+  }
+  // Miss → reconcile from the shared snapshot before creating (file mode).
+  await ensureFreshness()
+  if (await emailTaken()) {
+    throw Object.assign(new Error('This email is already registered.'), { code: 'EMAIL_TAKEN' })
+  }
+
+  const id = `usr_${randomUUID().replace(/-/g, '').slice(0, 10)}`
+  const apiKey = mintApiKey()
+  const pwh = hashPassword(opts.password)
+  try {
+    await db.batch(
+      [
+        {
+          sql: `INSERT INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, created_at, updated_at, idem_register)
+              VALUES (?, ?, ?, ?, ?, ?, ?, 'user', ?, ?, ?)`,
+          args: [id, id, keyHash(apiKey), opts.email.trim(), emailLower, pwh, opts.name.trim(), now, now, opts.idemKey ?? null],
+        },
+      ],
+      'write'
+    )
+  } catch (err) {
+    // Unique-index races (concurrent same-email / same-idem registrations):
+    // map to the contract outcomes instead of a raw 500.
+    if (isUniqueViolation(err)) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('idem_register')) {
+        const again = await replay()
+        if (again) {
+          queueAuthSnapshot()
+          return again
+        }
+      }
+      if (msg.includes('email_lower') || (await emailTaken())) {
+        throw Object.assign(new Error('This email is already registered.'), { code: 'EMAIL_TAKEN' })
+      }
+    }
+    throw err
+  }
+  // Advance the shared snapshot so other instances see this account within
+  // ~1-2s (cross-instance login / bearer resolution).
+  queueAuthSnapshot()
+  return { userId: id, apiKey, name: opts.name.trim(), email: opts.email.trim() }
+}
+
+/** Login: verify credentials → mint a fresh api key for the account. */
+export async function v5Login(email: string, password: string): Promise<AccountResult> {
+  await ensureSeeded()
+  const db = await v5db()
+  const emailLower = email.toLowerCase().trim()
+  const lookup = async () =>
+    (
+      await db.execute({
+        sql: `SELECT id, password_hash, name, email FROM v5_accounts WHERE email_lower = ? LIMIT 1`,
+        args: [emailLower],
+      })
+    ).rows
+  let rows = await lookup()
+  if (rows.length === 0) {
+    // Cross-instance freshness: the account may have been registered on
+    // another instance after this one booted. Probe + retry before failing.
+    await ensureFreshness()
+    rows = await lookup()
+  }
+  if (rows.length === 0) {
+    throw Object.assign(new Error('Invalid email or password.'), { code: 'AUTH_INVALID_CREDENTIALS' })
+  }
+  const row = rows[0] as Record<string, unknown>
+  if (!verifyPassword(password, row.password_hash as string | null)) {
+    throw Object.assign(new Error('Invalid email or password.'), { code: 'AUTH_INVALID_CREDENTIALS' })
+  }
+  const result = await mintKeyFor(db, row)
+  queueAuthSnapshot()
+  return result
 }
 
 export { num }

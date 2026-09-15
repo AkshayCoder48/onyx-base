@@ -64,6 +64,12 @@ export function invalidateKey(owner: string, collection: string, key: string): v
   cache.delete(ck(owner, collection, key))
 }
 
+/** Drop the whole hot cache — called after snapshot restores write straight
+ *  to SQLite, so reads never serve a pre-restore row or cached negative. */
+export function clearKvCache(): void {
+  cache.clear()
+}
+
 function rowToKv(row: Record<string, unknown>, collection: string, key: string): KvRow {
   let value: unknown = null
   try {
@@ -79,11 +85,27 @@ export async function kvGet(owner: string, key: string, collection = 'default'):
   const hit = cache.get(k)
   if (hit && hit.expires > Date.now()) return hit.row
   const db = await v5db()
-  const rs = await db.execute({
-    sql: `SELECT value, updated_at FROM v5_kv WHERE owner = ? AND collection = ? AND key = ? AND deleted_at IS NULL LIMIT 1`,
-    args: [owner, collection, key],
-  })
-  const row = rs.rows.length > 0 ? rowToKv(rs.rows[0] as Record<string, unknown>, collection, key) : null
+  const lookup = async () =>
+    (
+      await db.execute({
+        sql: `SELECT value, updated_at FROM v5_kv WHERE owner = ? AND collection = ? AND key = ? AND deleted_at IS NULL LIMIT 1`,
+        args: [owner, collection, key],
+      })
+    ).rows
+  let rows = await lookup()
+  if (rows.length === 0) {
+    // Cross-instance freshness (file mode): the key may live on an instance
+    // that booted after this one wrote it. One rate-limited probe + retry
+    // before caching a negative result.
+    try {
+      const { ensureFreshness } = await import('./sync')
+      await ensureFreshness()
+      rows = await lookup()
+    } catch {
+      /* best-effort */
+    }
+  }
+  const row = rows.length > 0 ? rowToKv(rows[0] as Record<string, unknown>, collection, key) : null
   cache.set(k, { row, expires: Date.now() + CACHE_TTL_MS })
   return row
 }

@@ -45,7 +45,19 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const { v5Configured } = await import('@/lib/v5/db')
     if (v5Configured()) {
       const { getBlob, blobContentStream } = await import('@/lib/v5/blobs')
-      const blob = await getBlob(id)
+      let blob = await getBlob(id)
+      if (!blob) {
+        // Cross-instance freshness (file mode): the blob may have been
+        // finalized on another instance after this one booted. One
+        // rate-limited Telegram snapshot probe + retry before 404ing.
+        try {
+          const { ensureFreshness } = await import('@/lib/v5/sync')
+          await ensureFreshness()
+          blob = await getBlob(id)
+        } catch {
+          /* fall through to V4 */
+        }
+      }
       if (blob && blob.status === 'ready' && blob.isPublic) {
         const headers = new Headers()
         headers.set('Content-Type', blob.mimeType || 'application/octet-stream')

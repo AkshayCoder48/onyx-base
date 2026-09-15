@@ -1,10 +1,11 @@
 /**
- * GET /api/v5/health — engine + backup status (docs/v5-contract.md §19).
+ * GET /api/v5/health — engine + backup + freshness status (docs/v5-contract.md §19).
  */
 import { withV5Handler } from '@/lib/v5/handler'
 import { v5Configured, v5Ping, isFileMode } from '@/lib/v5/db'
 import { blobBackendLabel } from '@/lib/v5/blobs'
 import { snapshotStatus } from '@/lib/v5/backup'
+import { freshnessStatus } from '@/lib/v5/sync'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -24,6 +25,7 @@ export const GET = withV5Handler({
       blobBackend: blobBackendLabel(),
       telegramBackup: process.env.V5_TELEGRAM_BACKUP !== 'false',
       backup: snapshotStatus(),
+      freshness: freshnessStatus(),
     })
   },
 })
