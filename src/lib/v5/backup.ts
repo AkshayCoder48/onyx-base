@@ -106,6 +106,10 @@ interface SnapshotPayloadV1 {
   kv: KvSnapRow[]
   blobs: BlobSnapRow[]
   accounts: AccountSnapRow[]
+  /** Recently-deleted account ids — restore hard-deletes them so a purged
+   *  account can never resurrect from a snapshot an older instance uploads
+   *  (accounts have no deleted_at column; this list is the tombstone). */
+  accountsDel?: Array<{ id: string; ua: number }>
 }
 
 export interface SnapshotStatus {
@@ -201,6 +205,10 @@ export interface SnapshotPointer {
   bf?: string
   bm?: number
   bts?: number
+  /** KV delta doc (bounded recent KV changes — smallest, fastest channel). */
+  df?: string
+  dm?: number
+  dts?: number
 }
 
 async function botApi(method: string, body: Record<string, unknown>): Promise<{ ok: boolean; result?: unknown; description?: string }> {
@@ -220,11 +228,12 @@ async function botApi(method: string, body: Record<string, unknown>): Promise<{ 
 }
 
 /** Write the snapshot pointer into the bot's own description (bio).
- *  Carries the blobs-snapshot pointer fields when present (merged by the
- *  uploaders so neither channel clobbers the other). */
+ *  Carries the blobs-snapshot AND kv-delta pointer fields when present
+ *  (merged by the uploaders so no channel clobbers another). */
 async function setBioPointer(p: SnapshotPointer): Promise<boolean> {
   const parts: string[] = [`"f":"${p.f}"`, `"m":${p.m}`, `"ts":${p.ts ?? 0}`]
   if (p.bf && p.bm) parts.push(`"bf":"${p.bf}"`, `"bm":${p.bm}`, `"bts":${p.bts ?? 0}`)
+  if (p.df && p.dm) parts.push(`"df":"${p.df}"`, `"dm":${p.dm}`, `"dts":${p.dts ?? 0}`)
   const description = `${BIO_MARKER} {${parts.join(',')}}`.slice(0, 512)
   const r = await botApi('setMyDescription', { description })
   return r.ok
@@ -383,6 +392,7 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
             })),
           ),
         )
+        enc.write(`,"accountsDel":${JSON.stringify(recentAccountDeletes())}`)
         enc.write('}')
         enc.end()
       } catch (err) {
@@ -516,12 +526,70 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
 // SUBSET of a later full snapshot.
 
 export interface BlobsSnapshotPayloadV1 {
-  v: 1
+  v: 1 | 2
   kind: 'v5-blobs-snapshot'
   ts: number
   blobs: BlobSnapRow[]
   /** v5_blobmeta rows: {o: owner, k: key, v: JSON value, ua: updated_at}. */
   meta: Array<{ o: string; k: string; v: string; ua: number }>
+  /** v2: blob row tombstones — apply as status='deleted' when newer. */
+  del?: Array<{ id: string; ua: number }>
+  /** v2: recently-deleted v5_blobmeta keys — apply as soft-delete when newer. */
+  metaDel?: Array<{ o: string; k: string; ua: number }>
+}
+
+// ─── Recent account-delete ring (feeds the full snapshot accountsDel list) ───
+
+interface AcctDelGlobal {
+  __v5AcctDel?: Array<{ id: string; ua: number }>
+}
+const ACCT_DEL_WINDOW_MS = 24 * 60 * 60 * 1000
+const ACCT_DEL_MAX = 500
+
+export function noteAccountDelete(accountId: string): void {
+  const g = globalThis as unknown as AcctDelGlobal
+  g.__v5AcctDel ??= []
+  g.__v5AcctDel.push({ id: accountId, ua: Date.now() })
+  if (g.__v5AcctDel.length > ACCT_DEL_MAX) g.__v5AcctDel = g.__v5AcctDel.slice(-ACCT_DEL_MAX)
+}
+
+function recentAccountDeletes(): Array<{ id: string; ua: number }> {
+  const g = globalThis as unknown as AcctDelGlobal
+  const all = g.__v5AcctDel ?? []
+  const cutoff = Date.now() - ACCT_DEL_WINDOW_MS
+  const fresh = all.filter((e) => e.ua >= cutoff)
+  if (fresh.length !== all.length) g.__v5AcctDel = fresh
+  return fresh
+}
+
+// ─── Recent blobmeta delete ring (feeds the blobs-snapshot metaDel list) ─────
+// kvDelete on v5_blobmeta keys (manifests / part records / dedup entries)
+// writes here; uploadBlobsSnapshot drains entries from the last
+// BLOBS_META_DEL_WINDOW_MS so deletes converge cross-instance in ~1-2s
+// instead of waiting for the next full snapshot.
+
+interface BlobsMetaDelGlobal {
+  __v5BlobsMetaDel?: Array<{ o: string; k: string; ua: number }>
+}
+const BLOBS_META_DEL_WINDOW_MS = 20 * 60 * 1000
+const BLOBS_META_DEL_MAX = 2000
+
+export function noteBlobMetaDelete(owner: string, key: string): void {
+  const g = globalThis as unknown as BlobsMetaDelGlobal
+  g.__v5BlobsMetaDel ??= []
+  g.__v5BlobsMetaDel.push({ o: owner, k: key, ua: Date.now() })
+  if (g.__v5BlobsMetaDel.length > BLOBS_META_DEL_MAX) {
+    g.__v5BlobsMetaDel = g.__v5BlobsMetaDel.slice(-BLOBS_META_DEL_MAX)
+  }
+}
+
+function recentBlobMetaDeletes(): Array<{ o: string; k: string; ua: number }> {
+  const g = globalThis as unknown as BlobsMetaDelGlobal
+  const all = g.__v5BlobsMetaDel ?? []
+  const cutoff = Date.now() - BLOBS_META_DEL_WINDOW_MS
+  const fresh = all.filter((e) => e.ua >= cutoff)
+  if (fresh.length !== all.length) g.__v5BlobsMetaDel = fresh
+  return fresh
 }
 
 /** Separate busy flag — KB-sized uploads never queue behind 13MB ones. */
@@ -551,33 +619,42 @@ export async function uploadBlobsSnapshot(reason: 'finalize' | 'init'): Promise<
       "SELECT owner, key, value, updated_at FROM v5_kv WHERE collection = 'v5_blobmeta' AND deleted_at IS NULL",
     )
     const payload: BlobsSnapshotPayloadV1 = {
-      v: 1,
+      v: 2,
       kind: 'v5-blobs-snapshot',
       ts: Date.now(),
-      blobs: blobRows.rows.map((r) => {
-        const row: BlobSnapRow = {
-          id: String(r.id),
-          owner: String(r.owner),
-          filename: r.filename === null ? null : String(r.filename),
-          mime: r.mime === null ? null : String(r.mime),
-          size: Number(r.size ?? 0),
-          checksum: r.checksum === null ? null : String(r.checksum),
-          status: String(r.status),
-          storage_key: r.storage_key === null ? null : String(r.storage_key),
-          chunks: Number(r.chunks ?? 0),
-          is_public: Number(r.is_public ?? 0),
-          created_at: Number(r.created_at ?? 0),
-          updated_at: Number(r.updated_at ?? 0),
-          parts_json: r.parts_json === null || r.parts_json === undefined ? null : String(r.parts_json),
-        }
-        return row
-      }),
+      blobs: blobRows.rows
+        .map((r) => {
+          const row: BlobSnapRow = {
+            id: String(r.id),
+            owner: String(r.owner),
+            filename: r.filename === null ? null : String(r.filename),
+            mime: r.mime === null ? null : String(r.mime),
+            size: Number(r.size ?? 0),
+            checksum: r.checksum === null ? null : String(r.checksum),
+            status: String(r.status),
+            storage_key: r.storage_key === null ? null : String(r.storage_key),
+            chunks: Number(r.chunks ?? 0),
+            is_public: Number(r.is_public ?? 0),
+            created_at: Number(r.created_at ?? 0),
+            updated_at: Number(r.updated_at ?? 0),
+            parts_json: r.parts_json === null || r.parts_json === undefined ? null : String(r.parts_json),
+          }
+          return row
+        })
+        // Tombstoned rows ride the del list, not the blobs list — a receiving
+        // instance must APPLY the tombstone (UPDATE), and INSERT OR IGNORE on
+        // a deleted row would leave its live local copy untouched.
+        .filter((row) => row.status !== 'deleted'),
       meta: metaRows.rows.map((r) => ({
         o: String(r.owner),
         k: String(r.key),
         v: String(r.value),
         ua: Number(r.updated_at ?? 0),
       })),
+      del: blobRows.rows
+        .filter((r) => String(r.status) === 'deleted')
+        .map((r) => ({ id: String(r.id), ua: Number(r.updated_at ?? 0) })),
+      metaDel: recentBlobMetaDeletes(),
     }
     const gz = gzipSync(Buffer.from(JSON.stringify(payload), 'utf-8'))
     const sent = await sendDocumentFile({
@@ -587,7 +664,7 @@ export async function uploadBlobsSnapshot(reason: 'finalize' | 'init'): Promise<
       caption: `${BLOBS_MARKER}|ts=${payload.ts}|blobs=${payload.blobs.length}|meta=${payload.meta.length}|reason=${reason}`,
     })
     if (!sent.ok || !sent.document) return { ok: false, reason: (!sent.ok && sent.error) || 'sendDocument failed' }
-    // Merge into the bio pointer (keep the full-snapshot fields).
+    // Merge into the bio pointer (keep the full-snapshot + delta fields).
     const cur = (await getBioPointer()) ?? prev
     const base: SnapshotPointer = cur?.f ? cur : { f: '', m: 0, ts: 0 }
     const ok = await setBioPointer({ ...base, bf: sent.document.fileId, bm: sent.document.messageId, bts: payload.ts })
@@ -626,7 +703,7 @@ export async function applyBlobsSnapshot(fileId: string): Promise<{ ok: boolean;
     const buf = Buffer.from(await res.arrayBuffer())
     const raw = gunzipSync(buf).toString('utf-8')
     const payload = JSON.parse(raw) as BlobsSnapshotPayloadV1
-    if (payload.v !== 1 || payload.kind !== 'v5-blobs-snapshot') return { ok: false, reason: 'bad payload' }
+    if ((payload.v !== 1 && payload.v !== 2) || payload.kind !== 'v5-blobs-snapshot') return { ok: false, reason: 'bad payload' }
     // Rows: earliest-wins (consistent with the full restore's merge rule).
     if (Array.isArray(payload.blobs) && payload.blobs.length > 0) {
       const stmts = payload.blobs
@@ -657,6 +734,31 @@ export async function applyBlobsSnapshot(fileId: string): Promise<{ ok: boolean;
         args: [m.o, m.k, m.v, Buffer.byteLength(m.v, 'utf-8'), m.ua, m.ua],
       })
     }
+    // v2 DELETE CONVERGENCE: blob row tombstones (status='deleted' when
+    // newer than the local row) + blobmeta soft-deletes. Without this, a
+    // deleted blob would resurrect on instances that never saw the delete.
+    if (Array.isArray(payload.del) && payload.del.length > 0) {
+      for (const d of payload.del) {
+        if (!d || typeof d.id !== 'string' || typeof d.ua !== 'number') continue
+        await db
+          .execute({
+            sql: `UPDATE v5_blobs SET status = 'deleted', updated_at = ? WHERE id = ? AND updated_at < ? AND status != 'deleted'`,
+            args: [d.ua, d.id, d.ua],
+          })
+          .catch(() => undefined)
+      }
+    }
+    if (Array.isArray(payload.metaDel) && payload.metaDel.length > 0) {
+      for (const d of payload.metaDel) {
+        if (!d || typeof d.o !== 'string' || typeof d.k !== 'string' || typeof d.ua !== 'number') continue
+        await db
+          .execute({
+            sql: `UPDATE v5_kv SET deleted_at = ?, updated_at = ? WHERE owner = ? AND collection = 'v5_blobmeta' AND key = ? AND deleted_at IS NULL AND updated_at < ?`,
+            args: [d.ua, d.ua, d.o, d.k, d.ua],
+          })
+          .catch(() => undefined)
+      }
+    }
     setLastAppliedBlobsTs(payload.ts)
     // CRITICAL: direct db writes bypass the KV hot cache — a negative cache
     // entry (30s) would keep serving the miss AFTER this apply. Same rule
@@ -665,6 +767,196 @@ export async function applyBlobsSnapshot(fileId: string): Promise<{ ok: boolean;
     return { ok: true, ts: payload.ts }
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+// ─── KV delta channel (fast cross-instance convergence for regular KV) ──────
+//
+// Full snapshots carry the entire v5_kv table (13MB+ at current data) and ride
+// an idle cadence — a KV write (resource record, profile, tombstone) only
+// converged cross-instance after the next FULL snapshot (15-30s), which is
+// exactly the window where listings served stale state: freshly-created
+// records 404'd on other instances ("0 uploaded" / 20-40s verification) and
+// freshly-deleted records resurrected on refresh.
+//
+// The delta channel is a BOUNDED doc (rows touched in the last 10 minutes,
+// capped at 400 rows / ~1MB) that uploads within ~1-2s of a write. Receivers
+// apply it with the same upsert-if-newer semantics as the full snapshot, so it
+// is always a SUBSET of a later full snapshot — an accelerator, never a
+// regression risk. v5_blobmeta is excluded (it rides the blobs channel).
+
+export interface KvDeltaPayloadV1 {
+  v: 1
+  kind: 'v5-kv-delta'
+  ts: number
+  kv: Array<{ o: string; c: string; k: string; v: string; s: number; ca: number; ua: number; d: number | null }>
+}
+
+const KV_DELTA_WINDOW_MS = 10 * 60 * 1000
+const KV_DELTA_MAX_ROWS = 400
+const KV_DELTA_MAX_BYTES = 1024 * 1024
+const KV_DELTA_MIN_INTERVAL_MS = 2_500
+const DELTA_MARKER = 'ONYXBASE_V5_DELTA'
+
+interface DeltaBusyGlobal {
+  __v5DeltaBusy?: { busy: boolean; rerun: boolean }
+  __v5DeltaQueuedAt?: number
+  __v5DeltaTs?: number
+}
+
+function deltaState(): { busy: boolean; rerun: boolean } {
+  const g = globalThis as unknown as DeltaBusyGlobal
+  g.__v5DeltaBusy ??= { busy: false, rerun: false }
+  return g.__v5DeltaBusy
+}
+
+/**
+ * Dump recently-touched KV rows → one small Telegram doc → merge the delta
+ * pointer (df/dm/dts) into the bio. Includes soft-deleted rows (deletes must
+ * converge fast too). Rows applied from OTHER instances' deltas keep their
+ * original updated_at, so a later delta from this instance is a superset —
+ * the single shared pointer converges without loss under concurrent writers.
+ */
+export async function uploadKvDelta(reason: 'kv-write' | 'manual'): Promise<{ ok: boolean; reason?: string; ts?: number; rows?: number }> {
+  if (!isV5BackupConfigured()) return { ok: false, reason: 'backup-not-configured' }
+  const s = deltaState()
+  if (s.busy) {
+    s.rerun = true // never drop: chain one trailing upload for mid-flight writes
+    return { ok: false, reason: 'delta-in-progress' }
+  }
+  s.busy = true
+  try {
+    const db = await v5db()
+    const cutoff = Date.now() - KV_DELTA_WINDOW_MS
+    const rs = await db.execute({
+      sql: `SELECT owner, collection, key, value, size, created_at, updated_at, deleted_at
+            FROM v5_kv
+            WHERE collection != 'v5_blobmeta' AND updated_at > ?
+            ORDER BY updated_at DESC
+            LIMIT ?`,
+      args: [cutoff, KV_DELTA_MAX_ROWS],
+    })
+    const rows: KvDeltaPayloadV1['kv'] = []
+    let bytes = 0
+    for (const r of rs.rows) {
+      const row = {
+        o: String(r.owner),
+        c: String(r.collection),
+        k: String(r.key),
+        v: String(r.value),
+        s: Number(r.size ?? 0),
+        ca: Number(r.created_at ?? 0),
+        ua: Number(r.updated_at ?? 0),
+        d: r.deleted_at === null || r.deleted_at === undefined ? null : Number(r.deleted_at),
+      }
+      const sz = row.v.length + row.k.length + row.o.length + row.c.length + 64
+      if (bytes + sz > KV_DELTA_MAX_BYTES && rows.length > 0) break // bounded doc
+      rows.push(row)
+      bytes += sz
+    }
+    if (rows.length === 0) return { ok: true, ts: getLastAppliedDeltaTs(), rows: 0 }
+    const payload: KvDeltaPayloadV1 = { v: 1, kind: 'v5-kv-delta', ts: Date.now(), kv: rows }
+    const gz = gzipSync(Buffer.from(JSON.stringify(payload), 'utf-8'))
+    const sent = await sendDocumentFile({
+      file: new Blob([new Uint8Array(gz)]),
+      fileName: `v5-delta-${payload.ts}.json.gz`,
+      mimeType: 'application/gzip',
+      caption: `${DELTA_MARKER}|ts=${payload.ts}|rows=${rows.length}|reason=${reason}`,
+    })
+    if (!sent.ok || !sent.document) return { ok: false, reason: (!sent.ok && sent.error) || 'sendDocument failed' }
+    // Merge into the bio pointer (keep full-snapshot + blobs fields).
+    const cur = await getBioPointer()
+    const base: SnapshotPointer = cur?.f ? cur : { f: '', m: 0, ts: 0 }
+    const ok = await setBioPointer({ ...base, df: sent.document.fileId, dm: sent.document.messageId, dts: payload.ts })
+    if (!ok) return { ok: false, reason: 'bio pointer write failed' }
+    setLastAppliedDeltaTs(payload.ts)
+    console.log(JSON.stringify({ t: new Date().toISOString(), operation: 'v5.backup.kv-delta-uploaded', level: 'info', reason, ts: payload.ts, rows: rows.length, bytes: gz.length }))
+    return { ok: true, ts: payload.ts, rows: rows.length }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return { ok: false, reason: message }
+  } finally {
+    s.busy = false
+    if (s.rerun) {
+      s.rerun = false
+      try {
+        const { durable } = await import('./durable')
+        durable(uploadKvDelta('kv-write').catch(() => undefined))
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+}
+
+/** Track the newest applied kv-delta ts (per instance). */
+export function getLastAppliedDeltaTs(): number {
+  const g = globalThis as unknown as DeltaBusyGlobal
+  return g.__v5DeltaTs ?? 0
+}
+
+export function setLastAppliedDeltaTs(ts: number): void {
+  const g = globalThis as unknown as DeltaBusyGlobal
+  if (ts > (g.__v5DeltaTs ?? 0)) g.__v5DeltaTs = ts
+}
+
+/** Apply a kv-delta doc: upsert-if-newer (incl. soft-deletes), then cache drop. */
+export async function applyKvDelta(fileId: string): Promise<{ ok: boolean; reason?: string; ts?: number }> {
+  try {
+    const db = await v5db()
+    const dl = await getFileDownloadUrl(fileId)
+    if (!dl) return { ok: false, reason: 'getFile failed' }
+    const res = await fetch(dl.url, { signal: AbortSignal.timeout(15_000) })
+    if (!res.ok) return { ok: false, reason: `download HTTP ${res.status}` }
+    const buf = Buffer.from(await res.arrayBuffer())
+    const payload = JSON.parse(gunzipSync(buf).toString('utf-8')) as KvDeltaPayloadV1
+    if (payload.v !== 1 || payload.kind !== 'v5-kv-delta' || !Array.isArray(payload.kv)) {
+      return { ok: false, reason: 'bad payload' }
+    }
+    const BATCH = 200
+    for (let i = 0; i < payload.kv.length; i += BATCH) {
+      const stmts = payload.kv.slice(i, i + BATCH).map(
+        (r) =>
+          `INSERT INTO v5_kv (owner, collection, key, value, size, created_at, updated_at, deleted_at) VALUES (` +
+          `'${sqlEscape(r.o)}', '${sqlEscape(r.c)}', '${sqlEscape(r.k)}', '${sqlEscape(r.v)}', ${r.s}, ${r.ca}, ${r.ua}, ${r.d ?? 'NULL'} ` +
+          `) ON CONFLICT (owner, collection, key) DO UPDATE SET value = excluded.value, size = excluded.size, updated_at = excluded.updated_at, deleted_at = excluded.deleted_at ` +
+          `WHERE excluded.updated_at >= v5_kv.updated_at`,
+      )
+      if (stmts.length) await db.batch(stmts.map((sql) => ({ sql, args: [] })), 'write')
+    }
+    setLastAppliedDeltaTs(payload.ts)
+    clearKvCache()
+    return { ok: true, ts: payload.ts }
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+/**
+ * Rate-limited durable delta upload — called (fire-and-forget) after every KV
+ * write outside v5_blobmeta. At most one upload per KV_DELTA_MIN_INTERVAL_MS
+ * per instance; a write that lands mid-upload chains a trailing run.
+ */
+export function queueKvDeltaSnapshot(): void {
+  if (!isV5BackupConfigured()) return
+  const g = globalThis as unknown as DeltaBusyGlobal
+  const now = Date.now()
+  if (now - (g.__v5DeltaQueuedAt ?? 0) < KV_DELTA_MIN_INTERVAL_MS) return
+  g.__v5DeltaQueuedAt = now
+  try {
+    void import('./durable').then(({ durable }) => {
+      durable(
+        (async () => {
+          for (let i = 0; i < 3; i++) {
+            const res = await uploadKvDelta('kv-write')
+            if (res.ok || (res.reason !== 'delta-in-progress' && res.reason !== 'backup-not-configured')) break
+            await new Promise((r) => setTimeout(r, 2500))
+          }
+        })().catch(() => undefined),
+      )
+    })
+  } catch {
+    /* delta optional — the full snapshot remains the source of truth */
   }
 }
 
@@ -816,6 +1108,18 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
     }
   }
 
+  // Account deletions carried by the snapshot (purge tombstones): hard-delete
+  // the account row AND every key row minted for it, so a purged account can
+  // never resurrect on any instance (login, bearer, everything stops working).
+  if (Array.isArray(payload.accountsDel) && payload.accountsDel.length) {
+    for (const a of payload.accountsDel) {
+      if (!a || typeof a.id !== 'string') continue
+      await db
+        .execute({ sql: `DELETE FROM v5_accounts WHERE id = ? OR owner_key = ?`, args: [a.id, a.id] })
+        .catch(() => undefined)
+    }
+  }
+
   let appliedBlobs = 0
   let blobBytesRestaged = 0
   if (Array.isArray(payload.blobs) && payload.blobs.length) {
@@ -830,6 +1134,19 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
     for (let i = 0; i < stmts.length; i += BATCH) {
       const r = await db.batch(stmts.slice(i, i + BATCH).map((s) => ({ sql: s, args: [] })), 'write')
       appliedBlobs += r.filter((x) => Number(x.rowsAffected ?? 0) > 0).length
+    }
+    // TOMBSTONE CONVERGENCE: rows the uploader deleted (status='deleted')
+    // must override a live local copy, or a restore would resurrect deleted
+    // blobs on instances that never saw the delete (same rule as the
+    // blobs-snapshot del list — INSERT OR IGNORE above cannot do it).
+    for (const b of payload.blobs) {
+      if (b.status !== 'deleted') continue
+      await db
+        .execute({
+          sql: `UPDATE v5_blobs SET status = 'deleted', updated_at = ? WHERE id = ? AND updated_at < ? AND status != 'deleted'`,
+          args: [b.updated_at, b.id, b.updated_at],
+        })
+        .catch(() => undefined)
     }
     // Byte-level recovery: re-stage ready blobs whose parts are referenced.
     // (Parts-mode blobs are served from their Telegram manifests — no staging.)

@@ -40,7 +40,9 @@ import {
 } from './backup'
 import {
   applyBlobsSnapshot,
+  applyKvDelta,
   getLastAppliedBlobsTs,
+  getLastAppliedDeltaTs,
   setLastAppliedBlobsTs,
 } from './backup'
 import { durable } from './durable'
@@ -101,9 +103,16 @@ export async function probeAndApplyIfNewer(): Promise<ProbeResult> {
       const pointer = await readSharedPointer()
       s.lastProbeOk = Boolean(pointer)
       if (!pointer) return { probed: true, applied: false }
-      // FAST CHANNEL first: a newer blobs-only snapshot (KBs) makes
-      // just-finalized files servable without the 13MB full download.
+      // FASTEST CHANNEL first: a newer kv-delta doc (KBs) reconciles recent
+      // KV writes/deletes (resource records, tombstones) in ~1-2s — the
+      // window where listings served stale creates/resurrected deletes.
       let applied = false
+      if (pointer.df && (pointer.dts ?? 0) > getLastAppliedDeltaTs()) {
+        const delta = await applyKvDelta(pointer.df)
+        if (delta.ok) applied = true
+      }
+      // Blobs channel next: a newer blobs-only snapshot (KBs) makes
+      // just-finalized files servable without the 13MB full download.
       if (pointer.bf && (pointer.bts ?? 0) > getLastAppliedBlobsTs()) {
         const fast = await applyBlobsSnapshot(pointer.bf)
         if (fast.ok) applied = true
@@ -163,7 +172,7 @@ export async function ensureFreshness(opts: { force?: boolean } = {}): Promise<v
  * enough to finish the (possible) snapshot download+apply. The CURRENT
  * request may still serve data one snapshot behind; the next one converges.
  */
-const BACKGROUND_PROBE_MIN_INTERVAL_MS = 10_000
+const BACKGROUND_PROBE_MIN_INTERVAL_MS = 3_000
 
 interface SyncBgGlobal {
   __v5SyncBgProbeAt?: number

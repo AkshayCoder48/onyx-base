@@ -25,7 +25,7 @@ export const V5_CHUNK_SIZE = 4 * 1024 * 1024
 export const V5_MAX_CHUNKS = 10_000
 export const V5_MAX_TOTAL_SIZE = V5_CHUNK_SIZE * V5_MAX_CHUNKS
 
-export type BlobStatus = 'created' | 'uploading' | 'uploaded' | 'finalizing' | 'ready' | 'failed' | 'cancelled'
+export type BlobStatus = 'created' | 'uploading' | 'uploaded' | 'finalizing' | 'ready' | 'failed' | 'cancelled' | 'deleted'
 
 export interface V5Blob {
   blobId: string
@@ -219,6 +219,48 @@ export async function cancelBlob(blobId: string, owner: string): Promise<V5Blob>
   await unlink(stagingPath(blobId)).catch(() => {})
   await emitEvent(owner, 'BLOB_STATUS', blobId, { status: 'cancelled' })
   return { ...blob, status: 'cancelled' }
+}
+
+export interface DeleteBlobResult {
+  blobId: string
+  status: 'deleted'
+}
+
+/**
+ * PERMANENTLY delete a staging-mode blob (single-PUT flow): remove the local
+ * staging file and TOMBSTONE the row (status='deleted') — the tombstone rides
+ * the snapshots so every instance stops serving it and restores never
+ * resurrect it. Idempotent.
+ */
+export async function deleteBlob(blobId: string, owner: string): Promise<DeleteBlobResult> {
+  const blob = await getBlob(blobId)
+  if (!blob || blob.owner !== owner) throw Object.assign(new Error('Blob not found.'), { code: 'NOT_FOUND' })
+  if (blob.status === 'deleted') return { blobId, status: 'deleted' }
+  await unlink(stagingPath(blobId)).catch(() => {})
+  const now = nowMs()
+  const db = await v5db()
+  await db.execute({
+    sql: `UPDATE v5_blobs SET status = 'deleted', error = NULL, updated_at = ? WHERE id = ?`,
+    args: [now, blobId],
+  })
+  await emitEvent(owner, 'BLOB_STATUS', blobId, { status: 'deleted' })
+  // Ship the tombstone on the fast blobs channel (del list).
+  try {
+    const { durable } = await import('./durable')
+    durable(
+      (async () => {
+        for (let i = 0; i < 3; i++) {
+          const { uploadBlobsSnapshot } = await import('./backup')
+          const res = await uploadBlobsSnapshot('finalize')
+          if (res.ok || res.reason !== 'snapshot-in-progress') break
+          await new Promise((r) => setTimeout(r, 3000))
+        }
+      })().catch(() => undefined),
+    )
+  } catch {
+    /* snapshot optional */
+  }
+  return { blobId, status: 'deleted' }
 }
 
 /** Content stream for serving (ETag = checksum). */

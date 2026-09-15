@@ -35,6 +35,29 @@ function mirrorKv(owner: string, collection: string, key: string, value: unknown
   }
 }
 
+/** Fire-and-forget kv-delta upload (the FAST convergence channel — KBs,
+ *  ~1-2s) after every regular KV write/delete. v5_blobmeta rides the blobs
+ *  channel instead, so it does not trigger this. */
+function queueDelta(collection: string): void {
+  if (collection === 'v5_blobmeta') return
+  try {
+    void import('./backup').then(({ queueKvDeltaSnapshot }) => queueKvDeltaSnapshot())
+  } catch {
+    /* delta optional */
+  }
+}
+
+/** v5_blobmeta deletes ride the blobs-snapshot metaDel list — record the key
+ *  so the next blobs snapshot propagates the delete cross-instance fast. */
+function noteMetaDelete(owner: string, collection: string, key: string): void {
+  if (collection !== 'v5_blobmeta') return
+  try {
+    void import('./backup').then(({ noteBlobMetaDelete }) => noteBlobMetaDelete(owner, key))
+  } catch {
+    /* best-effort */
+  }
+}
+
 // Register the collection sweep used by BATCH_SET invalidation (no import cycle).
 registerCacheSweep((owner, collection) => {
   const prefix = `${owner}\u0000${collection}\u0000`
@@ -155,6 +178,7 @@ export async function kvSet(
   cache.set(ck(owner, collection, key), { row, expires: Date.now() + CACHE_TTL_MS })
   void emitEvent(owner, 'KV_SET', `${collection}/${key}`, { key, collection })
   mirrorKv(owner, collection, key, value, 'SET')
+  queueDelta(collection)
   return row
 }
 
@@ -194,6 +218,7 @@ export async function kvSetBatch(
     })
   }
   void emitEvent(owner, 'BATCH_SET', `${collection}/*`, { count: items.length, collection })
+  queueDelta(collection)
   return items.length
 }
 
@@ -216,6 +241,8 @@ export async function kvDelete(owner: string, key: string, collection = 'default
   cache.set(ck(owner, collection, key), { row: null, expires: Date.now() + CACHE_TTL_MS })
   void emitEvent(owner, 'KV_DELETED', `${collection}/${key}`, { key, collection })
   mirrorKv(owner, collection, key, null, 'DELETE')
+  noteMetaDelete(owner, collection, key)
+  queueDelta(collection)
   return wasLive
 }
 

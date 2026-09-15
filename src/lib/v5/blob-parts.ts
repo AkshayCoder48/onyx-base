@@ -792,6 +792,131 @@ export async function cancelPartsBlob(owner: string, blobId: string): Promise<{ 
   return { blobId, status: 'cancelled', deletedDocs }
 }
 
+// ─── Delete (real, permanent — the DELETE /api/v5/blobs/:id primitive) ───────
+
+export interface DeletePartsResult {
+  blobId: string
+  status: 'deleted'
+  deletedDocs: number
+  deletedMeta: number
+}
+
+/**
+ * PERMANENTLY delete a parts-mode blob, ready or not:
+ *
+ *   1. Telegram documents for every part (manifest refs + durable part
+ *      records) — best-effort, refs without messageIds are skipped.
+ *   2. v5_blobmeta KV rows: manifest, every part record, the dedup entry
+ *      when it points at THIS blob.
+ *   3. The v5_blobs row is TOMBSTONED (status='deleted', updated_at=now) —
+ *      never removed, so snapshot restores + the blobs-snapshot del list
+ *      propagate the delete to every instance (a hard row DELETE would
+ *      resurrect via INSERT OR IGNORE on instances that never saw it).
+ *   4. A blobs-snapshot upload (durable) ships the tombstone + metaDel
+ *      entries so /f/:id 404s everywhere within ~1-2s — no resurrect window.
+ *
+ * Idempotent: deleting an already-deleted blob succeeds with zero work.
+ */
+export async function deletePartsBlob(owner: string, blobId: string): Promise<DeletePartsResult> {
+  if (!validBlobId(blobId)) throw new V5Error('VALIDATION_ERROR', 'Invalid blob id.')
+  const db = await v5db()
+  const row = await getBlob(blobId)
+  if (row && row.owner !== owner) throw new V5Error('NOT_FOUND', 'Blob not found.')
+  if (row && row.status === 'deleted') {
+    return { blobId, status: 'deleted', deletedDocs: 0, deletedMeta: 0 }
+  }
+
+  // Manifest (row-first, KV fallback — a cross-instance delete may hit an
+  // instance without the KV manifest yet).
+  const manifest = await getManifest(owner, blobId).catch(() => null)
+
+  // Collect part refs from BOTH the finalized manifest and the durable part
+  // records (an in-flight upload has records but no finalized parts).
+  const refs = new Map<number, { fileId: string; messageId?: number }>()
+  if (manifest?.parts) {
+    for (const p of manifest.parts) refs.set(p.index, { fileId: p.fileId, messageId: p.messageId })
+  }
+  const metaKeys: string[] = []
+  let offset = 0
+  for (let page = 0; page < 8; page++) {
+    const p = await kvPage(owner, { collection: BLOBMETA_COLLECTION, prefix: partPrefix(blobId), limit: 1000, offset })
+    for (const it of p.items) {
+      metaKeys.push(it.key)
+      const m = /\.(\d{6})$/.exec(it.key)
+      const rec = it.value as PartRecord | undefined
+      if (m && rec && typeof rec.fileId === 'string') {
+        const existing = refs.get(parseInt(m[1], 10))
+        if (!existing) refs.set(parseInt(m[1], 10), { fileId: rec.fileId, messageId: rec.messageId })
+      }
+    }
+    if (!p.hasMore) break
+    offset += p.items.length
+  }
+
+  // 1. Delete the Telegram documents.
+  let deletedDocs = 0
+  const { deleteKvMessage } = await import('@/lib/telegram')
+  for (const ref of refs.values()) {
+    if (typeof ref.messageId !== 'number') continue
+    const ok = await deleteKvMessage(ref.messageId).catch(() => false)
+    if (ok) deletedDocs++
+  }
+
+  // 2. Delete the blobmeta KV rows (manifest + part records + dedup entry).
+  let deletedMeta = 0
+  const { kvDelete } = await import('./kv')
+  if (manifest?.checksum) {
+    const dedupRow = await kvGet(owner, dedupKey(manifest.checksum), BLOBMETA_COLLECTION).catch(() => null)
+    if (dedupRow?.value === blobId) {
+      if (await kvDelete(owner, dedupKey(manifest.checksum), BLOBMETA_COLLECTION)) deletedMeta++
+    }
+  }
+  for (const k of [manifestKey(blobId), ...metaKeys]) {
+    if (await kvDelete(owner, k, BLOBMETA_COLLECTION)) deletedMeta++
+  }
+
+  // 3. Tombstone the row (monotonic updated_at — the apply-side guard uses it).
+  const now = nowMs()
+  await db
+    .execute({
+      sql: `UPDATE v5_blobs SET status = 'deleted', error = NULL, updated_at = ?, parts_json = NULL WHERE id = ?`,
+      args: [now, blobId],
+    })
+    .catch(() => undefined)
+
+  await emitEvent(owner, 'BLOB_STATUS', blobId, { status: 'deleted' })
+
+  // 4. Ship the tombstone + metaDel entries on the fast blobs channel.
+  try {
+    const { durable } = await import('./durable')
+    durable(
+      (async () => {
+        for (let i = 0; i < 3; i++) {
+          const { uploadBlobsSnapshot } = await import('./backup')
+          const res = await uploadBlobsSnapshot('finalize')
+          if (res.ok || res.reason !== 'snapshot-in-progress') break
+          await new Promise((r) => setTimeout(r, 3000))
+        }
+      })().catch(() => undefined),
+    )
+  } catch {
+    /* snapshot optional — the full snapshot carries the tombstone too */
+  }
+
+  console.log(
+    JSON.stringify({
+      t: new Date().toISOString(),
+      operation: 'v5.blobs.delete',
+      level: 'info',
+      blobId,
+      owner,
+      deletedDocs,
+      deletedMeta,
+    }),
+  )
+  return { blobId, status: 'deleted', deletedDocs, deletedMeta }
+}
+
 // ─── Serving (public /f/:id) ─────────────────────────────────────────────────
 
 /**

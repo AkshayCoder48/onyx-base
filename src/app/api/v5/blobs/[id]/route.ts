@@ -10,8 +10,8 @@
  */
 import { NextRequest } from 'next/server'
 import { withV5Handler, V5Error } from '@/lib/v5/handler'
-import { getBlob, finalizeBlob, cancelBlob } from '@/lib/v5/blobs'
-import { getPartsStatus, finalizePartsBlob, cancelPartsBlob } from '@/lib/v5/blob-parts'
+import { getBlob, finalizeBlob, cancelBlob, deleteBlob } from '@/lib/v5/blobs'
+import { getPartsStatus, finalizePartsBlob, cancelPartsBlob, deletePartsBlob } from '@/lib/v5/blob-parts'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -143,3 +143,47 @@ export const POST = withV5Handler({
 })
 
 export const PATCH = POST
+
+/**
+ * DELETE /api/v5/blobs/:id — PERMANENT storage delete (any status):
+ *   - parts mode: Telegram part documents + manifest/part/dedup KV rows +
+ *     row tombstone, shipped on the fast blobs channel so /f/:id 404s on
+ *     every instance within seconds.
+ *   - staging mode: local staging file + row tombstone.
+ * Idempotent: 404 when the id is unknown; an already-deleted blob is 200.
+ */
+export const DELETE = withV5Handler({
+  operation: 'blobs.delete',
+  auth: 'bearer',
+  handler: async (req: NextRequest, ctx, routeCtx?: Ctx) => {
+    void req
+    const { id } = await routeCtx!.params
+    // Fresh row lookup — a just-finalized blob may live on another instance
+    // (file-mode convergence); force ONE probe before declaring 404.
+    let row = await getBlob(id)
+    if (!row || row.owner !== ctx.user!.owner) {
+      try {
+        const { ensureFreshness } = await import('@/lib/v5/sync')
+        await ensureFreshness({ force: true })
+        row = await getBlob(id)
+      } catch {
+        /* best-effort */
+      }
+    }
+    if (!row || row.owner !== ctx.user!.owner) {
+      throw new V5Error('NOT_FOUND', 'Blob not found.', 404)
+    }
+    if (row.storageKey === 'parts') {
+      const result = await deletePartsBlob(ctx.user!.owner, id)
+      return ctx.ok({
+        blobId: result.blobId,
+        status: result.status,
+        deleted: true,
+        deletedDocs: result.deletedDocs,
+        deletedMeta: result.deletedMeta,
+      })
+    }
+    const result = await deleteBlob(id, ctx.user!.owner)
+    return ctx.ok({ blobId: result.blobId, status: result.status, deleted: true })
+  },
+})
