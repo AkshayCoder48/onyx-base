@@ -13,6 +13,7 @@ import { NextRequest } from 'next/server'
 import { randomUUID } from 'node:crypto'
 import { v5AuthBearer, type V5Account } from './auth'
 import { V5Error, V5_CODE_STATUS } from './errors'
+import { v5EnsureBootRestore } from './db'
 
 export type { V5ErrorCode } from './errors'
 export { V5Error }
@@ -51,6 +52,11 @@ export function withV5Handler<T = unknown>(opts: HandlerOpts<T>) {
     let status = 500
     let user: V5Account | null = null
     try {
+      // Cold-boot recovery: file-mode instances with an EMPTY database
+      // auto-restore from the latest Telegram snapshot. The first request
+      // after a cold start awaits it (once per instance); later requests
+      // resolve instantly.
+      await v5EnsureBootRestore()
       if (opts.auth === 'bearer') {
         const auth = await v5AuthBearer(req.headers.get('authorization'))
         if (!auth) {

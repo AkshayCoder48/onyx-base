@@ -138,6 +138,22 @@ export async function migrateFromV4(
     report.collections.push({ collection, imported, skipped })
     report.totalImported += imported
   }
+
+  // Post-migrate: upload a full-state Telegram snapshot so the freshly imported
+  // data is immediately durable + every cold boot can restore it ("data saver").
+  if (!opts.dryRun && report.totalImported > 0) {
+    try {
+      const { uploadV5Snapshot } = await import('./backup')
+      const snap = await uploadV5Snapshot('post-migrate')
+      ;(report as MigrateReport & { snapshot?: { ok: boolean; kv?: number; reason?: string } }).snapshot = {
+        ok: snap.ok,
+        kv: snap.kv,
+        reason: snap.reason,
+      }
+    } catch {
+      /* snapshot optional — migration itself already committed */
+    }
+  }
   return report
 }
 

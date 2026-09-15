@@ -23,6 +23,7 @@
 import fs from 'fs'
 import { isTelegramConfigured, sendDocumentFile, sendKvMessage, type TelegramPayload } from '@/lib/telegram'
 import { isV5TelegramBackupEnabled } from './db'
+import { noteMirroredBlobPart, noteMirroredWrite } from './backup'
 
 type MirrorJob =
   | { kind: 'kv'; payload: TelegramPayload; attempts: number; notBefore: number }
@@ -120,7 +121,18 @@ async function drain(): Promise<void> {
   } finally {
     state.running = false
     // Jobs may have arrived (or been re-queued) while we paced.
-    if (state.jobs.length > 0) scheduleDrain()
+    if (state.jobs.length > 0) {
+      scheduleDrain()
+      return
+    }
+    // Queue idle → periodic full-state snapshot to Telegram (the "data saver"
+    // role: the pinned snapshot makes cold boots + disaster recovery instant).
+    try {
+      const { maybeSnapshotOnIdle } = await import('./backup')
+      await maybeSnapshotOnIdle()
+    } catch {
+      /* snapshot optional */
+    }
   }
 }
 
@@ -132,6 +144,7 @@ async function runJob(job: MirrorJob): Promise<boolean> {
   try {
     if (job.kind === 'kv') {
       const messageId = await sendKvMessage(job.payload)
+      if (messageId !== null) noteMirroredWrite()
       return messageId !== null
     }
     // blob-part: stream the staged part file (≤ 4 MiB) to Telegram as a
@@ -144,6 +157,16 @@ async function runJob(job: MirrorJob): Promise<boolean> {
       mimeType: 'application/octet-stream',
       caption: `onyxbase-v5-blob|${job.blobId}`,
     })
+    if (sent.ok && sent.document) {
+      // Record the Telegram reference so full-state snapshots can point at
+      // the part for byte-level restore.
+      noteMirroredBlobPart(job.blobId, {
+        messageId: sent.document.messageId,
+        fileId: sent.document.fileId,
+        fileName: job.partName,
+        bytes: buf.length,
+      })
+    }
     return sent.ok
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

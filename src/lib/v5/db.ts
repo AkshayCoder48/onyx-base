@@ -17,6 +17,7 @@ const V5_DATABASE_AUTH_TOKEN = process.env.V5_DATABASE_AUTH_TOKEN || ''
 const globalForV5 = globalThis as unknown as {
   __v5Client?: Client
   __v5Ready?: Promise<Client>
+  __v5BootRestore?: Promise<unknown>
 }
 
 export function v5Configured(): boolean {
@@ -131,7 +132,43 @@ async function init(): Promise<Client> {
     }
   }
   for (const stmt of DDL) await c.execute(stmt)
+
+  // Cold-boot recovery ("Telegram = data saver"): when the store is EMPTY and
+  // a Telegram snapshot exists, rebuild automatically. bootRestoreIfEmpty()
+  // itself owns the globalThis promise (never store THIS import chain on the
+  // slot — a chain that resolves to itself deadlocks).
+  if (isV5TelegramBackupEnabled()) {
+    void import('./backup')
+      .then((m) => m.bootRestoreIfEmpty())
+      .catch((err) => {
+        console.warn(
+          JSON.stringify({ t: new Date().toISOString(), operation: 'v5.db.init', level: 'warn', error: err instanceof Error ? err.message : String(err) }),
+        )
+      })
+  }
+
   return c
+}
+
+/**
+ * Trigger init (which arms the boot restore) and await its completion.
+ * Called by the request handler so the FIRST request after a cold boot
+ * sees restored data; resolves instantly once initialized. The setTimeout(0)
+ * yields one macrotask so the dynamic import's microtask chain can store
+ * the restore promise before we look for it.
+ */
+export async function v5EnsureBootRestore(): Promise<void> {
+  if (!v5Configured() || !isV5TelegramBackupEnabled()) return
+  try {
+    await v5db()
+  } catch {
+    return
+  }
+  if (!globalForV5.__v5BootRestore) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  }
+  const p = globalForV5.__v5BootRestore
+  if (p) await p
 }
 
 /** The singleton, schema-bootstrapped V5 client. */

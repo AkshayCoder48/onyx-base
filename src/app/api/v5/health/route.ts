@@ -4,6 +4,7 @@
 import { withV5Handler } from '@/lib/v5/handler'
 import { v5Configured, v5Ping, isFileMode } from '@/lib/v5/db'
 import { blobBackendLabel } from '@/lib/v5/blobs'
+import { snapshotStatus } from '@/lib/v5/backup'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -22,6 +23,7 @@ export const GET = withV5Handler({
       mode: isFileMode() ? 'file' : 'libsql-remote',
       blobBackend: blobBackendLabel(),
       telegramBackup: process.env.V5_TELEGRAM_BACKUP !== 'false',
+      backup: snapshotStatus(),
     })
   },
 })
