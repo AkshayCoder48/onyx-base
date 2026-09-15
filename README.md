@@ -1150,3 +1150,37 @@ MIT — build on it, ship it, make it yours.
 <sub>Palette: Claude-inspired warm clay on cream.</sub>
 
 </div>
+
+## V5 — Instant Architecture
+
+V5 is a parallel API surface (`/api/v5/*`) that makes OnyxBase **instant**:
+SQLite is authoritative (indexed, transactional, WAL), and Telegram becomes
+an async backup mirror that never blocks a response. Full contract:
+[`docs/v5-contract.md`](docs/v5-contract.md).
+
+```bash
+# .env.local (self-host / dev — SQLite file)
+V5_DATABASE_URL=file:./.data/v5.db
+V5_MASTER_API_KEYS=kv_live_your_master_key
+
+# Vercel (serverless) — free Turso DB, same SQLite dialect:
+#   turso db create onyxbase-v5 && turso db show onyxbase-v5 --url
+V5_DATABASE_URL=libsql://onyxbase-v5-<org>.turso.io
+V5_DATABASE_AUTH_TOKEN=<turso token>
+```
+
+| Endpoint | What |
+|---|---|
+| `GET/PUT/DELETE /api/v5/kv/:key` | atomic KV (≤256 KB values), Idempotency-Key replay |
+| `POST /api/v5/kv/batch` | one-transaction multi-upsert (≤500) |
+| `GET /api/v5/kv?collection=&limit=&offset=` | indexed paginated scan + maintained counters |
+| `POST /api/v5/accounts` · `/accounts/login` | instant accounts (idempotent register) |
+| `POST /api/v5/blobs` → `PUT …/data` → `POST …/finalize` | streamed blob uploads (never buffered in RAM) |
+| `GET /api/v5/operations/:id` · `POST /operations/lookup` | durable op status — lost-response recovery |
+| `GET /api/v5/events` · `/api/v5/realtime` (SSE) | event stream + cache invalidation |
+| `POST /api/v5/admin/migrate` | V4 → V5 import (idempotent, re-runnable) |
+
+Migration: keep V4 running, set the client's `ONYXBASE_V5_URL`, run
+`POST /api/v5/admin/migrate {"source":{"baseUrl":"<v4-url>","apiKey":"<key>"}}`,
+verify, then retire V4 hot paths at your leisure. Rollback = unset
+`ONYXBASE_V5_URL`.

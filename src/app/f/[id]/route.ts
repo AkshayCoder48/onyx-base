@@ -36,6 +36,34 @@ export const maxDuration = 300
  */
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
+
+  // ─── V5 fast path ──────────────────────────────────────────────────────────
+  // When the V5 engine is configured, a ready public blob with this id is
+  // served directly from V5 staging (authoritative instant path). Falls
+  // through to the V4 Telegram flow otherwise — V4 URLs keep working.
+  try {
+    const { v5Configured } = await import('@/lib/v5/db')
+    if (v5Configured()) {
+      const { getBlob, blobContentStream } = await import('@/lib/v5/blobs')
+      const blob = await getBlob(id)
+      if (blob && blob.status === 'ready' && blob.isPublic) {
+        const headers = new Headers()
+        headers.set('Content-Type', blob.mimeType || 'application/octet-stream')
+        const safeName = encodeURIComponent(blob.filename || id).replace(/'/g, '%27')
+        const inline = req.nextUrl.searchParams.get('inline') === '1'
+        headers.set('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename="${safeName}"; filename*=UTF-8''${safeName}`)
+        if (blob.checksum) headers.set('ETag', blob.checksum)
+        headers.set('Content-Length', String(blob.size))
+        if (req.headers.get('if-none-match') && req.headers.get('if-none-match') === blob.checksum) {
+          return new Response(null, { status: 304, headers })
+        }
+        return new Response(blobContentStream(blob), { status: 200, headers })
+      }
+    }
+  } catch {
+    /* V5 unavailable → fall through to V4 */
+  }
+
   const file = findFileByPublicId(id)
   if (!file) {
     return new Response('File not found.', { status: 404, headers: { 'Content-Type': 'text/plain' } })

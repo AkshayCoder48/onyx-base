@@ -100,3 +100,6 @@ db/recovered-manifest.json
 secrets.*
 credentials.*
 db/*.db
+
+# V5 local SQLite + blob staging
+.data/
