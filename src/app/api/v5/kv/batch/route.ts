@@ -7,6 +7,7 @@ import { kvSetBatch } from '@/lib/v5/kv'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+export const maxDuration = 60
 
 export const POST = withV5Handler({
   operation: 'kv.batch',

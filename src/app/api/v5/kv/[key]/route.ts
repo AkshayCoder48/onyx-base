@@ -10,6 +10,7 @@ import { beginOp, completeOp, OpConflictError } from '@/lib/v5/ops'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+export const maxDuration = 60
 
 type Ctx = { params: Promise<{ key: string }> }
 

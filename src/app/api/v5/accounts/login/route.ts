@@ -8,6 +8,7 @@ import { v5Login } from '@/lib/v5/auth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+export const maxDuration = 60
 
 const buckets = new Map<string, number[]>()
 function rateLimited(ip: string, max: number, windowMs = 60_000): boolean {

@@ -195,6 +195,14 @@ export async function v5Register(opts: {
   }
   // Miss → reconcile from the shared snapshot before creating (file mode).
   await ensureFreshness()
+  // Re-check the IDEM REPLAY first after convergence: a same-requestId retry
+  // that lands on an instance which just learned about the account must
+  // replay (same account, fresh key) — not collide with EMAIL_TAKEN.
+  const replayedAfterSync = await replay()
+  if (replayedAfterSync) {
+    queueAuthSnapshot()
+    return replayedAfterSync
+  }
   if (await emailTaken()) {
     throw Object.assign(new Error('This email is already registered.'), { code: 'EMAIL_TAKEN' })
   }

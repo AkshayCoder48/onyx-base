@@ -35,6 +35,7 @@ import {
 } from '@/lib/telegram'
 import { isFileMode, isV5TelegramBackupEnabled, v5db } from './db'
 import { clearKvCache } from './kv'
+import { durable } from './durable'
 
 /** Pinned-index userId under which the V5 snapshot document is registered. */
 export const V5_SNAPSHOT_ACCOUNT = '__v5s__'
@@ -282,10 +283,10 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
       'SELECT owner, collection, key, value, size, created_at, updated_at, deleted_at FROM v5_kv',
     )
     const blobRows = await db.execute(
-      'SELECT id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at FROM v5_blobs',
+      'SELECT id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at FROM v5_blobs ORDER BY created_at ASC',
     )
     const acctRows = await db.execute(
-      'SELECT id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, idem_register, created_at, updated_at FROM v5_accounts',
+      'SELECT id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, idem_register, created_at, updated_at FROM v5_accounts ORDER BY created_at ASC',
     )
 
     const parts = g.__v5BlobParts
@@ -437,10 +438,16 @@ export async function maybeSnapshotOnIdle(): Promise<void> {
 }
 
 /**
- * Immediate async snapshot after account writes (register / login key mint).
- * Rate-limited to one per AUTH_SNAPSHOT_MIN_INTERVAL_MS per instance so the
- * shared pointer advances within ~1-2s of a registration — that is what
- * makes a cross-instance login work seconds after a cross-instance signup.
+ * Immediate durable snapshot after account writes (register / login key
+ * mint). Rate-limited to one per AUTH_SNAPSHOT_MIN_INTERVAL_MS per instance
+ * so the shared pointer advances within seconds of a registration — that is
+ * what makes a cross-instance login work soon after a cross-instance signup.
+ *
+ * DURABILITY: the snapshot runs via durable() (waitUntil) — called
+ * synchronously from the request path, the platform keeps the invocation
+ * alive until the snapshot is pinned. Fire-and-forget snapshots were killed
+ * by the serverless freeze the moment the register response shipped, which
+ * stranded accounts on the instance that created them.
  */
 export function queueAuthSnapshot(): void {
   if (!isV5BackupConfigured()) return
@@ -448,7 +455,7 @@ export function queueAuthSnapshot(): void {
   const now = Date.now()
   if (now - s.authSnapshotQueuedAt < AUTH_SNAPSHOT_MIN_INTERVAL_MS) return
   s.authSnapshotQueuedAt = now
-  void (async () => {
+  durable((async () => {
     try {
       const res = await uploadV5Snapshot('auto')
       if (!res.ok && res.reason !== 'snapshot-in-progress' && res.reason !== 'backup-not-configured') {
@@ -459,7 +466,7 @@ export function queueAuthSnapshot(): void {
     } catch {
       /* best-effort */
     }
-  })()
+  })())
 }
 
 // ─── Restore ─────────────────────────────────────────────────────────────────
@@ -544,11 +551,15 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
   if (Array.isArray(payload.accounts) && payload.accounts.length) {
     const stmts = payload.accounts.map(
       (a) =>
-        `INSERT INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, idem_register, created_at, updated_at) VALUES (` +
+        // INSERT OR IGNORE (not ON CONFLICT(id)): in the rare split-brain
+        // window two instances may create different ids for the same email —
+        // ORDER BY created_at ASC makes the EARLIEST (original) win on the
+        // email_lower unique index instead of aborting the whole batch.
+        `INSERT OR IGNORE INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, idem_register, created_at, updated_at) VALUES (` +
         `'${sqlEscape(a.id)}', '${sqlEscape(a.owner_key)}', '${sqlEscape(a.api_key_hash)}', ${a.email === null ? 'NULL' : `'${sqlEscape(a.email)}'`}, ` +
         `${a.email_lower === null ? 'NULL' : `'${sqlEscape(a.email_lower)}'`}, ${a.password_hash === null ? 'NULL' : `'${sqlEscape(a.password_hash)}'`}, ` +
         `${a.name === null ? 'NULL' : `'${sqlEscape(a.name)}'`}, '${sqlEscape(a.role)}', ${a.idem_register === null ? 'NULL' : `'${sqlEscape(a.idem_register)}'`}, ` +
-        `${a.created_at}, ${a.updated_at}) ON CONFLICT (id) DO NOTHING`,
+        `${a.created_at}, ${a.updated_at})`,
     )
     for (let i = 0; i < stmts.length; i += BATCH) {
       const r = await db.batch(stmts.slice(i, i + BATCH).map((s) => ({ sql: s, args: [] })), 'write')
@@ -558,13 +569,14 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
 
   let appliedBlobs = 0
   let blobBytesRestaged = 0
-  if (Array.isArray(payload.blobs) && payload.blobs.length) {    const stmts = payload.blobs.map(
+  if (Array.isArray(payload.blobs) && payload.blobs.length) {
+    const stmts = payload.blobs.map(
       (b) =>
-        `INSERT INTO v5_blobs (id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at) VALUES (` +
+        `INSERT OR IGNORE INTO v5_blobs (id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at) VALUES (` +
         `'${sqlEscape(b.id)}', '${sqlEscape(b.owner)}', ${b.filename === null ? 'NULL' : `'${sqlEscape(b.filename)}'`}, ` +
         `${b.mime === null ? 'NULL' : `'${sqlEscape(b.mime)}'`}, ${b.size}, ${b.checksum === null ? 'NULL' : `'${sqlEscape(b.checksum)}'`}, ` +
         `'${sqlEscape(b.status)}', ${b.storage_key === null ? 'NULL' : `'${sqlEscape(b.storage_key)}'`}, ${b.chunks}, ${b.is_public}, ` +
-        `${b.created_at}, ${b.updated_at}) ON CONFLICT (id) DO NOTHING`,
+        `${b.created_at}, ${b.updated_at})`,
     )
     for (let i = 0; i < stmts.length; i += BATCH) {
       const r = await db.batch(stmts.slice(i, i + BATCH).map((s) => ({ sql: s, args: [] })), 'write')

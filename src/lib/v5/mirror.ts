@@ -24,6 +24,7 @@ import fs from 'fs'
 import { isTelegramConfigured, sendDocumentFile, sendKvMessage, type TelegramPayload } from '@/lib/telegram'
 import { isV5TelegramBackupEnabled } from './db'
 import { noteMirroredBlobPart, noteMirroredWrite } from './backup'
+import { durable } from './durable'
 
 type MirrorJob =
   | { kind: 'kv'; payload: TelegramPayload; attempts: number; notBefore: number }
@@ -32,6 +33,8 @@ type MirrorJob =
 interface MirrorState {
   jobs: MirrorJob[]
   running: boolean
+  /** The active drain cycle (null when idle) — see armDrain. */
+  drainPromise: Promise<void> | null
 }
 
 interface MirrorGlobal {
@@ -44,7 +47,7 @@ const MAX_ATTEMPTS = 5
 
 function mirrorState(): MirrorState {
   const g = globalThis as unknown as MirrorGlobal
-  if (!g.__v5Mirror) g.__v5Mirror = { jobs: [], running: false }
+  if (!g.__v5Mirror) g.__v5Mirror = { jobs: [], running: false, drainPromise: null }
   return g.__v5Mirror
 }
 
@@ -70,18 +73,31 @@ function enqueue(job: MirrorJob): void {
     )
   }
   state.jobs.push(job)
-  scheduleDrain()
+  armDrain()
 }
 
-let drainTimer: ReturnType<typeof setTimeout> | null = null
-
-function scheduleDrain(): void {
+/**
+ * Start (or attach to) the current drain cycle. Called SYNCHRONOUSLY from the
+ * request path (enqueue ← kvSet/blobs/auth) so durable() registers the drain
+ * on the live invocation — the platform keeps the function alive through the
+ * paced Telegram sends AND the idle snapshot that follows (Vercel freeze
+ * fix: fire-and-forget drains were killed the moment the response shipped).
+ */
+function armDrain(): void {
   const state = mirrorState()
-  if (state.running || drainTimer) return
-  drainTimer = setTimeout(() => {
-    drainTimer = null
-    void drain()
-  }, 0)
+  if (state.drainPromise) return
+  const p = (async () => {
+    try {
+      await drain()
+    } finally {
+      state.drainPromise = null
+      // Jobs that raced in while this cycle was closing: chain a fresh cycle
+      // (same durable slot) so they are never left frozen in the queue.
+      if (state.jobs.length > 0) armDrain()
+    }
+  })()
+  state.drainPromise = p
+  durable(p)
 }
 
 async function drain(): Promise<void> {
@@ -120,13 +136,15 @@ async function drain(): Promise<void> {
     }
   } finally {
     state.running = false
-    // Jobs may have arrived (or been re-queued) while we paced.
+    // Jobs may have arrived (or been re-queued) while we paced — armDrain's
+    // finally re-arms a fresh cycle for them.
     if (state.jobs.length > 0) {
-      scheduleDrain()
       return
     }
     // Queue idle → periodic full-state snapshot to Telegram (the "data saver"
     // role: the pinned snapshot makes cold boots + disaster recovery instant).
+    // Runs INSIDE the durable drain promise, so the invocation stays alive
+    // until the snapshot is pinned (or fails — best-effort either way).
     try {
       const { maybeSnapshotOnIdle } = await import('./backup')
       await maybeSnapshotOnIdle()

@@ -259,3 +259,37 @@ the next snapshot merge heals on the kv layer; the accounts unique index
 makes it impossible within one instance, and RGE Hub's stable-requestId
 retries make the client side idempotent. For strict multi-instance
 transactionality, use remote mode (`V5_DATABASE_URL=libsql://…`).
+
+## Durable background work (serverless freeze fix) — src/lib/v5/durable.ts
+
+Vercel may freeze a function the moment its response ships. Fire-and-forget
+promises die mid-flight: the auth snapshot after a registration never reached
+Telegram, the account existed only on the instance that created it, and the
+next login on another instance honestly answered AUTH_INVALID_CREDENTIALS.
+
+`durable(p)` (from `@vercel/functions` `waitUntil`) registers the promise on
+the CURRENT invocation: the platform keeps the function alive until it
+settles, bounded by the route's `maxDuration` (60 s on all write-capable V5
+routes). The HTTP response is NOT delayed. Non-Vercel environments never
+freeze mid-task — `durable()` degrades to a plain void there.
+
+Durable-wrapped paths:
+- `backup.queueAuthSnapshot()` — the post-register/login full-state snapshot
+- `mirror.armDrain()` — one durable cycle per drain: paced Telegram audit
+  sends + the idle full-state snapshot that follows (jobs enqueued while a
+  cycle closes chain a fresh cycle in the same slot)
+- `sync.maybeBackgroundProbe()` — 10 s/instance background pointer probe from
+  every authenticated request (bounds STALE HITS; miss paths probe inline)
+
+Rules: call `durable()` synchronously within the request's async context, and
+the wrapped promise must never reject.
+
+Restore hardening: accounts/blobs apply with `INSERT OR IGNORE` and the
+snapshot SELECTs use `ORDER BY created_at ASC` — in the rare split-brain
+window (same email registered on two instances before convergence), the
+EARLIEST account wins on the email_lower unique index instead of aborting
+the apply batch.
+
+v5Register also re-checks the IDEM REPLAY after the freshness probe (a
+same-requestId retry landing on a just-converged instance replays the
+original account instead of colliding with EMAIL_TAKEN).

@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { v5AuthBearer, type V5Account } from './auth'
 import { V5Error, V5_CODE_STATUS } from './errors'
 import { v5EnsureBootRestore } from './db'
+import { maybeBackgroundProbe } from './sync'
 
 export type { V5ErrorCode } from './errors'
 export { V5Error }
@@ -63,6 +64,11 @@ export function withV5Handler<T = unknown>(opts: HandlerOpts<T>) {
           throw new V5Error('AUTH_REQUIRED', 'A valid Bearer API key is required.', 401)
         }
         user = auth
+        // Bounded staleness for HIT paths: every authenticated request arms a
+        // rate-limited (10s/instance) durable background probe of the shared
+        // snapshot pointer — an instance holding an OLD value for a key would
+        // otherwise serve it forever (miss probes only fire on misses).
+        maybeBackgroundProbe()
       }
       const ctx: V5Ctx = {
         requestId,

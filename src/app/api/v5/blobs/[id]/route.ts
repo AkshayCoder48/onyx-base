@@ -7,6 +7,7 @@ import { getBlob, finalizeBlob, cancelBlob } from '@/lib/v5/blobs'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
+export const maxDuration = 60
 
 type Ctx = { params: Promise<{ id: string }> }
 

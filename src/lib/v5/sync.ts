@@ -38,6 +38,7 @@ import {
   restoreV5FromTelegram,
   type SnapshotPointer,
 } from './backup'
+import { durable } from './durable'
 
 /** Background probe cadence while the instance is warm. */
 const PROBE_INTERVAL_MS = 20_000
@@ -133,6 +134,30 @@ export async function ensureFreshness(): Promise<void> {
   } catch {
     /* freshness is best-effort — the local store still serves */
   }
+}
+
+/**
+ * Bounding STALE HITS (not just misses): an instance that already holds an
+ * OLD value for a key would serve it forever — the miss probes never fire
+ * because the lookup hits. Called from hot read paths (kvGet/kvPage); at
+ * most one background probe per BACKGROUND_PROBE_MIN_INTERVAL_MS per
+ * instance, durable-wrapped so the serverless invocation stays alive long
+ * enough to finish the (possible) snapshot download+apply. The CURRENT
+ * request may still serve data one snapshot behind; the next one converges.
+ */
+const BACKGROUND_PROBE_MIN_INTERVAL_MS = 10_000
+
+interface SyncBgGlobal {
+  __v5SyncBgProbeAt?: number
+}
+
+export function maybeBackgroundProbe(): void {
+  if (!syncActive()) return
+  const g = globalThis as unknown as SyncBgGlobal
+  const now = Date.now()
+  if (now - (g.__v5SyncBgProbeAt ?? 0) < BACKGROUND_PROBE_MIN_INTERVAL_MS) return
+  g.__v5SyncBgProbeAt = now
+  durable(probeAndApplyIfNewer())
 }
 
 /**
