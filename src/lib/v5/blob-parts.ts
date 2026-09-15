@@ -446,6 +446,12 @@ export interface PartsStatusResult {
   totalChunks: number
   receivedChunks: number[]
   missingChunks: number[]
+  /**
+   * Durable refs for every received part — the resume client forwards them
+   * at finalize (client refs are the cross-instance bridge: the finalizing
+   * instance may not yet have this instance's part records).
+   */
+  parts: Array<{ index: number; fileId: string; messageId?: number }>
   filename: string | null
   mimeType: string | null
   checksum: string | null
@@ -453,7 +459,7 @@ export interface PartsStatusResult {
 
 export async function getPartsStatus(owner: string, blobId: string): Promise<PartsStatusResult> {
   const manifest = await resolveManifest(owner, blobId)
-  const have = new Set<number>()
+  const have = new Map<number, { fileId: string; messageId?: number }>()
   let offset = 0
   for (let page = 0; page < 8; page++) {
     const p = await kvPage(owner, { collection: BLOBMETA_COLLECTION, prefix: partPrefix(blobId), limit: 1000, offset })
@@ -463,7 +469,7 @@ export async function getPartsStatus(owner: string, blobId: string): Promise<Par
       const idx = parseInt(m[1], 10)
       const rec = it.value as PartRecord | undefined
       if (rec && typeof rec.fileId === 'string' && rec.bytes === partExpectedBytes(manifest.size, manifest.chunkSize, manifest.totalChunks, idx)) {
-        have.add(idx)
+        have.set(idx, { fileId: rec.fileId, messageId: rec.messageId })
       }
     }
     if (!p.hasMore) break
@@ -474,6 +480,9 @@ export async function getPartsStatus(owner: string, blobId: string): Promise<Par
   for (let i = 0; i < manifest.totalChunks; i++) {
     ;(have.has(i) ? receivedChunks : missingChunks).push(i)
   }
+  const parts = [...have.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([index, ref]) => ({ index, fileId: ref.fileId, messageId: ref.messageId }))
   return {
     blobId,
     status: manifest.status,
@@ -482,6 +491,7 @@ export async function getPartsStatus(owner: string, blobId: string): Promise<Par
     totalChunks: manifest.totalChunks,
     receivedChunks,
     missingChunks,
+    parts,
     filename: manifest.filename,
     mimeType: manifest.mimeType,
     checksum: manifest.checksum,

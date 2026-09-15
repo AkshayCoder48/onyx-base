@@ -19,13 +19,28 @@ export const maxDuration = 300
 
 type Ctx = { params: Promise<{ id: string }> }
 
+/** Row lookup with one cross-instance freshness probe on miss (file mode). */
+async function getBlobFresh(id: string) {
+  let row = await getBlob(id)
+  if (!row) {
+    try {
+      const { ensureFreshness } = await import('@/lib/v5/sync')
+      await ensureFreshness()
+      row = await getBlob(id)
+    } catch {
+      /* best-effort */
+    }
+  }
+  return row
+}
+
 export const GET = withV5Handler({
   operation: 'blobs.get',
   auth: 'bearer',
   handler: async (req: NextRequest, ctx, routeCtx?: Ctx) => {
     const { id } = await routeCtx!.params
     // Parts mode? The row's storage_key marker ('parts') routes us.
-    const row = await getBlob(id)
+    const row = await getBlobFresh(id)
     if (row && row.owner === ctx.user!.owner && row.storageKey === 'parts') {
       const status = await getPartsStatus(ctx.user!.owner, id)
       const origin = process.env.PUBLIC_BASE_URL || req.nextUrl.origin
@@ -41,6 +56,10 @@ export const GET = withV5Handler({
         totalChunks: status.totalChunks,
         receivedChunks: status.receivedChunks,
         missingChunks: status.missingChunks,
+        // Durable part refs — resume clients forward them at finalize
+        // (cross-instance bridge: the finalizing instance may not hold the
+        // uploading instance's part records yet).
+        parts: status.parts,
         publicUrl: status.status === 'ready' ? `${origin}/f/${status.blobId}` : undefined,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
@@ -74,7 +93,7 @@ export const POST = withV5Handler({
       parts?: Array<{ index: number; fileId: string; messageId?: number }>
     }
     const action = body.action || 'finalize'
-    const row = await getBlob(id)
+    const row = await getBlobFresh(id)
 
     // Parts mode routing (storage_key marker).
     if (row && row.owner === ctx.user!.owner && row.storageKey === 'parts') {
