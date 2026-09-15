@@ -11,9 +11,13 @@ import { emitEvent, registerCacheSweep } from './events'
 
 export const MAX_VALUE_BYTES = 256 * 1024
 
-/** Fire-and-forget Telegram backup mirror (best-effort, never in-request). */
+/** Fire-and-forget Telegram backup mirror (best-effort, never in-request).
+ *  The v5_blobmeta collection is EXEMPT: its durability rides the small
+ *  blobs-snapshot channel — one audit message per uploaded file part was
+ *  flooding Telegram and delaying the parts themselves. */
 function mirrorKv(owner: string, collection: string, key: string, value: unknown, op: 'SET' | 'DELETE'): void {
   try {
+    if (collection === 'v5_blobmeta') return
     void import('./mirror').then(({ queueKvMirror, isV5MirrorActive }) => {
       if (!isV5MirrorActive()) return
       queueKvMirror({

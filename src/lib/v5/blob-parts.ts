@@ -260,6 +260,16 @@ export async function createPartsBlob(
     ],
   })
   await putManifest(manifest)
+  // Fast convergence: land the session manifest in the KB-sized blobs
+  // snapshot channel immediately (durable) so status/resume/idempotency on
+  // ANY instance see the session within ~1-2s.
+  try {
+    const { durable } = await import('./durable')
+    const { uploadBlobsSnapshot } = await import('./backup')
+    durable(uploadBlobsSnapshot('init').then(() => undefined))
+  } catch {
+    /* snapshot optional */
+  }
   return { blobId, chunkSize: V5_PART_SIZE, totalChunks, status: 'created' }
 }
 
@@ -268,14 +278,33 @@ export function partExpectedBytes(size: number, chunkSize: number, totalChunks: 
   return index === totalChunks - 1 ? size - chunkSize * (totalChunks - 1) : chunkSize
 }
 
-// ─── Manifest resolution (row → KV → freshness probe) ────────────────────────
+// ─── Manifest resolution (row → KV → freshness probe → stateless ctx) ───────
+
+/**
+ * Client-declared session context — everything a part PUT / finalize needs
+ * to validate WITHOUT the init instance's state. Upload sessions are hot:
+ * parts follow init within milliseconds, but snapshot convergence between
+ * serverless instances takes seconds — uploads must NEVER block on it.
+ */
+export interface SessionContext {
+  size: number
+  chunkSize: number
+  totalChunks: number
+  checksum?: string | null
+  filename?: string | null
+  mimeType?: string | null
+}
 
 /**
  * Resolve the parts manifest for an owner-scoped call. Order:
  *   1. durable KV manifest (fresh via miss-probe),
- *   2. v5_blobs row reconstruction (snapshot-restored rows carry parts_json).
+ *   2. v5_blobs row reconstruction (snapshot-restored rows carry parts_json),
+ *   3. STATELESS reconstruction from client-declared context (part PUT /
+ *      finalize only): INSERT OR IGNORE row + manifest skeleton. Convergence
+ *      merges earliest-wins (restore orders by created_at ASC), so the
+ *      init instance's original manifest always wins once snapshots land.
  */
-async function resolveManifest(owner: string, blobId: string): Promise<BlobManifest> {
+async function resolveManifest(owner: string, blobId: string, ctx?: SessionContext | null): Promise<BlobManifest> {
   if (!validBlobId(blobId)) throw new V5Error('NOT_FOUND', 'Blob not found.', 404)
   let manifest = await getManifest(owner, blobId)
   if (manifest) return manifest
@@ -283,6 +312,36 @@ async function resolveManifest(owner: string, blobId: string): Promise<BlobManif
   if (row && row.owner === owner && row.storageKey === 'parts') {
     const partsJson = await readRowParts(blobId)
     return rowToManifest(row, partsJson)
+  }
+  if (ctx && Number.isFinite(ctx.size) && ctx.size > 0 && Number.isFinite(ctx.chunkSize) && ctx.chunkSize > 0 && Number.isInteger(ctx.totalChunks) && ctx.totalChunks > 0 && ctx.totalChunks <= V5_PARTS_MAX) {
+    // Sanity: the declared geometry must be self-consistent.
+    if (ctx.chunkSize * (ctx.totalChunks - 1) < ctx.size && ctx.size <= ctx.chunkSize * ctx.totalChunks) {
+      const db = await v5db()
+      const now = nowMs()
+      await db.execute({
+        sql: `INSERT OR IGNORE INTO v5_blobs (id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, 'created', 'parts', ?, 1, ?, ?)`,
+        args: [blobId, owner, ctx.filename ?? null, ctx.mimeType ?? null, Math.floor(ctx.size), ctx.checksum ?? null, ctx.totalChunks, now, now],
+      })
+      const skeleton: BlobManifest = {
+        v: 1,
+        mode: 'parts',
+        blobId,
+        owner,
+        filename: ctx.filename ?? null,
+        mimeType: ctx.mimeType ?? null,
+        size: Math.floor(ctx.size),
+        checksum: ctx.checksum ?? null,
+        status: 'created',
+        isPublic: true,
+        chunkSize: Math.floor(ctx.chunkSize),
+        totalChunks: ctx.totalChunks,
+        createdAt: now,
+        updatedAt: now,
+      }
+      await putManifest(skeleton)
+      return skeleton
+    }
   }
   throw new V5Error('NOT_FOUND', 'Blob not found.', 404)
 }
@@ -341,9 +400,10 @@ export async function putBlobPart(
   owner: string,
   blobId: string,
   index: number,
-  body: ReadableStream<Uint8Array> | null
+  body: ReadableStream<Uint8Array> | null,
+  ctx?: SessionContext | null
 ): Promise<PutPartResult> {
-  const manifest = await resolveManifest(owner, blobId)
+  const manifest = await resolveManifest(owner, blobId, ctx)
   if (manifest.status === 'ready' || manifest.status === 'finalizing') {
     throw new V5Error('BLOB_NOT_READY', `Blob is ${manifest.status} and cannot receive more parts.`)
   }
@@ -408,6 +468,11 @@ export async function putBlobPart(
     at: nowMs(),
   }
   await kvSet(owner, partKey(blobId, index), record as unknown as Record<string, unknown>, BLOBMETA_COLLECTION)
+
+  // NOTE: no immediate snapshot per part — full-state snapshots are ~13MB
+  // uploads; per-part churn flooded Telegram and starved the finalize
+  // snapshot. Part-record convergence rides the idle cadence; client part
+  // refs (returned to the uploader) are the primary resume source anyway.
 
   // Best-effort row status refresh (the manifest in KV is authoritative).
   await patchRow(blobId, { status: 'uploading' }).catch(() => {})
@@ -520,9 +585,10 @@ export interface FinalizePartsResult {
 export async function finalizePartsBlob(
   owner: string,
   blobId: string,
-  clientParts: Array<{ index: number; fileId: string; messageId?: number }>
+  clientParts: Array<{ index: number; fileId: string; messageId?: number }>,
+  ctx?: SessionContext | null
 ): Promise<FinalizePartsResult> {
-  const manifest = await resolveManifest(owner, blobId)
+  const manifest = await resolveManifest(owner, blobId, ctx)
 
   if (manifest.status === 'ready' && manifest.parts && manifest.parts.length > 0) {
     return {
@@ -658,14 +724,22 @@ export async function finalizePartsBlob(
   }
   await emitEvent(owner, 'BLOB_STATUS', blobId, { status: 'ready', size: finalized.size, parts: parts.length })
 
-  // Durability: land the manifest in a Telegram snapshot promptly (durable
-  // background work — never blocks the response).
+  // Durability — the SMALL blobs-snapshot channel (durable, never blocks the
+  // response): a few KB containing the final manifest + part records, landed
+  // in ~1-2s so /f/:id is servable from every instance almost immediately.
+  // The full-state snapshot is NOT triggered here — it rides the idle
+  // cadence (13MB+ uploads per finalize flooded Telegram and competed for
+  // memory with in-flight part requests).
   try {
     const { durable } = await import('./durable')
     durable(
       (async () => {
-        const { maybeSnapshotOnIdle } = await import('./backup')
-        await maybeSnapshotOnIdle()
+        for (let i = 0; i < 3; i++) {
+          const { uploadBlobsSnapshot } = await import('./backup')
+          const res = await uploadBlobsSnapshot('finalize')
+          if (res.ok || res.reason !== 'snapshot-in-progress') break
+          await new Promise((r) => setTimeout(r, 3000))
+        }
       })(),
     )
   } catch {

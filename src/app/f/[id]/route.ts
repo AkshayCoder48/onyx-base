@@ -56,7 +56,7 @@ export function OPTIONS(): Response {
  * a download.
  */
 
-async function resolveV5PartsResponse(req: NextRequest, id: string): Promise<Response | null> {
+async function resolveV5PartsResponse(req: NextRequest, id: string, opts: { patient?: boolean } = {}): Promise<Response | null> {
   try {
     const { v5Configured } = await import('@/lib/v5/db')
     if (!v5Configured()) return null
@@ -70,6 +70,18 @@ async function resolveV5PartsResponse(req: NextRequest, id: string): Promise<Res
         const { ensureFreshness } = await import('@/lib/v5/sync')
         await ensureFreshness()
         manifest = await loadBlobForServe(id)
+        // PATIENT second probe: a /f/ hit within the first ~2-4s after
+        // finalize races the durable snapshot upload. Wait past the probe
+        // rate-limit and try once more — a just-uploaded video must never
+        // 404 for its owner. Only for well-formed blob ids (public route:
+        // unauthenticated traffic must not earn free sleeps).
+        if (!manifest && opts.patient && /^blb_[a-z0-9]+$/.test(id)) {
+          // 2.2s: past the finalize snapshot's typical upload window AND the
+          // probe rate limit (force bypasses it anyway).
+          await new Promise((r) => setTimeout(r, 2200))
+          await ensureFreshness({ force: true })
+          manifest = await loadBlobForServe(id)
+        }
       } catch {
         /* fall through */
       }
@@ -103,7 +115,9 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
 
 async function GETImpl(req: NextRequest, id: string) {
   // ─── V5 parts mode: permanent Telegram-backed files (Range-aware) ─────────
-  const partsResponse = await resolveV5PartsResponse(req, id)
+  // patient: a GET (video player / XML viewer / download) right after
+  // finalize may race the durable snapshot — probe twice before 404ing.
+  const partsResponse = await resolveV5PartsResponse(req, id, { patient: true })
   if (partsResponse) return partsResponse
 
   // ─── V5 fast path (single-PUT staging blobs) ──────────────────────────────
@@ -238,6 +252,11 @@ async function HEADImpl(req: NextRequest, id: string) {
           const { ensureFreshness } = await import('@/lib/v5/sync')
           await ensureFreshness()
           manifest = await loadBlobForServe(id)
+          if (!manifest && /^blb_[a-z0-9]+$/.test(id)) {
+            await new Promise((r) => setTimeout(r, 2200))
+            await ensureFreshness({ force: true })
+            manifest = await loadBlobForServe(id)
+          }
         } catch {
           /* fall through */
         }

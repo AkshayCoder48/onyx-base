@@ -38,6 +38,11 @@ import {
   restoreV5FromTelegram,
   type SnapshotPointer,
 } from './backup'
+import {
+  applyBlobsSnapshot,
+  getLastAppliedBlobsTs,
+  setLastAppliedBlobsTs,
+} from './backup'
 import { durable } from './durable'
 
 /** Background probe cadence while the instance is warm. */
@@ -96,16 +101,29 @@ export async function probeAndApplyIfNewer(): Promise<ProbeResult> {
       const pointer = await readSharedPointer()
       s.lastProbeOk = Boolean(pointer)
       if (!pointer) return { probed: true, applied: false }
-      if ((pointer.ts ?? 0) <= getLastAppliedSnapshotTs()) {
-        return { probed: true, applied: false, pointerTs: pointer.ts }
+      // FAST CHANNEL first: a newer blobs-only snapshot (KBs) makes
+      // just-finalized files servable without the 13MB full download.
+      let applied = false
+      if (pointer.bf && (pointer.bts ?? 0) > getLastAppliedBlobsTs()) {
+        const fast = await applyBlobsSnapshot(pointer.bf)
+        if (fast.ok) applied = true
       }
-      const restored = await restoreV5FromTelegram()
-      return {
-        probed: true,
-        applied: restored.ok,
-        pointerTs: pointer.ts,
-        error: restored.ok ? undefined : restored.reason,
+      // FULL snapshot when newer (carries everything; also supersedes the
+      // blobs channel — applying it advances the blobs ts too).
+      if ((pointer.ts ?? 0) > getLastAppliedSnapshotTs()) {
+        const restored = await restoreV5FromTelegram()
+        if (restored.ok) {
+          applied = true
+          if ((pointer.bts ?? 0) > getLastAppliedBlobsTs()) setLastAppliedBlobsTs(pointer.bts ?? 0)
+        }
+        return {
+          probed: true,
+          applied,
+          pointerTs: pointer.ts,
+          error: restored.ok ? undefined : restored.reason,
+        }
       }
+      return { probed: true, applied, pointerTs: pointer.ts }
     } catch (err) {
       s.lastProbeOk = false
       return { probed: true, applied: false, error: err instanceof Error ? err.message : String(err) }
@@ -123,11 +141,11 @@ export async function probeAndApplyIfNewer(): Promise<ProbeResult> {
  * probe per FRESHNESS_MIN_INTERVAL_MS per instance; coalesces onto an
  * in-flight probe; NEVER throws and NEVER blocks the caller on failure.
  */
-export async function ensureFreshness(): Promise<void> {
+export async function ensureFreshness(opts: { force?: boolean } = {}): Promise<void> {
   if (!syncActive()) return
   const s = state()
   const now = Date.now()
-  if (now - s.lastProbeAt < FRESHNESS_MIN_INTERVAL_MS) return
+  if (!opts.force && now - s.lastProbeAt < FRESHNESS_MIN_INTERVAL_MS) return
   s.lastProbeAt = now // claim the slot before awaiting (burst callers skip)
   try {
     await probeAndApplyIfNewer()

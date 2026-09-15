@@ -91,12 +91,25 @@ export const POST = withV5Handler({
     const body = (await req.json().catch(() => ({}))) as {
       action?: string
       parts?: Array<{ index: number; fileId: string; messageId?: number }>
+      /** Stateless session context (init response) — lets finalize work on an
+       *  instance that never saw init before snapshot convergence. */
+      context?: { size?: number; chunkSize?: number; totalChunks?: number; checksum?: string | null; filename?: string | null; mimeType?: string | null }
     }
+    const c = body.context
+    const ctxValid =
+      c && typeof c.size === 'number' && typeof c.chunkSize === 'number' && typeof c.totalChunks === 'number'
+        ? { size: c.size, chunkSize: c.chunkSize, totalChunks: c.totalChunks, checksum: c.checksum ?? null, filename: c.filename ?? null, mimeType: c.mimeType ?? null }
+        : null
     const action = body.action || 'finalize'
     const row = await getBlobFresh(id)
 
-    // Parts mode routing (storage_key marker).
-    if (row && row.owner === ctx.user!.owner && row.storageKey === 'parts') {
+    // Parts mode routing (storage_key marker). A declared session context
+    // also routes parts-mode when the row hasn't converged to this instance
+    // yet (stateless finalize — see blob-parts.ts).
+    const isPartsMode =
+      (row && row.owner === ctx.user!.owner && row.storageKey === 'parts') ||
+      (!row && ctxValid !== null)
+    if (isPartsMode) {
       if (action === 'cancel') {
         const result = await cancelPartsBlob(ctx.user!.owner, id)
         return ctx.ok({ blobId: result.blobId, status: result.status, deletedDocs: result.deletedDocs })
@@ -104,7 +117,7 @@ export const POST = withV5Handler({
       if (action !== 'finalize') {
         throw new V5Error('VALIDATION_ERROR', 'action must be "finalize" or "cancel".', 400)
       }
-      const result = await finalizePartsBlob(ctx.user!.owner, id, body.parts ?? [])
+      const result = await finalizePartsBlob(ctx.user!.owner, id, body.parts ?? [], ctxValid)
       return ctx.ok({
         blobId: result.blobId,
         status: result.status,

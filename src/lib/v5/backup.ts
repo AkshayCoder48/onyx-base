@@ -22,7 +22,7 @@
  * (file mode always; remote mode only with V5_AUTO_RESTORE=true).
  */
 
-import { gunzipSync, gzipSync } from 'node:zlib'
+import { gunzipSync, gzipSync, createGzip } from 'node:zlib'
 import fs from 'fs'
 import path from 'path'
 import {
@@ -128,6 +128,10 @@ interface BackupGlobal {
     lastAppliedTs: number
     /** rate-limit for auth-triggered snapshots */
     authSnapshotQueuedAt: number
+    /** A write landed while a snapshot was mid-flight — the busy-holder must
+     *  chain ONE trailing snapshot so the latest writes are never stranded
+     *  (dropped-on-busy snapshots were losing finalize manifests). */
+    rerunAfterBusy: boolean
   }
   /** blobId → latest mirrored part (captured by mirror.ts on send success). */
   __v5BlobParts?: Map<string, { messageId: number; fileId: string; fileName: string; bytes: number }>
@@ -136,7 +140,7 @@ interface BackupGlobal {
 const g = globalThis as unknown as BackupGlobal
 
 function state() {
-  g.__v5Backup ??= { lastSnapshotAt: null, lastSnapshotKv: null, writesSince: 0, busy: false, lastAppliedTs: 0, authSnapshotQueuedAt: 0 }
+  g.__v5Backup ??= { lastSnapshotAt: null, lastSnapshotKv: null, writesSince: 0, busy: false, lastAppliedTs: 0, authSnapshotQueuedAt: 0, rerunAfterBusy: false }
   return g.__v5Backup
 }
 
@@ -193,6 +197,10 @@ export interface SnapshotPointer {
   f: string
   m: number
   ts?: number
+  /** Blobs-only snapshot (KB-sized, fast-converging channel): file id + ts. */
+  bf?: string
+  bm?: number
+  bts?: number
 }
 
 async function botApi(method: string, body: Record<string, unknown>): Promise<{ ok: boolean; result?: unknown; description?: string }> {
@@ -211,9 +219,13 @@ async function botApi(method: string, body: Record<string, unknown>): Promise<{ 
   }
 }
 
-/** Write the snapshot pointer into the bot's own description (bio). */
+/** Write the snapshot pointer into the bot's own description (bio).
+ *  Carries the blobs-snapshot pointer fields when present (merged by the
+ *  uploaders so neither channel clobbers the other). */
 async function setBioPointer(p: SnapshotPointer): Promise<boolean> {
-  const description = `${BIO_MARKER} {"f":"${p.f}","m":${p.m},"ts":${p.ts ?? 0}}`.slice(0, 512)
+  const parts: string[] = [`"f":"${p.f}"`, `"m":${p.m}`, `"ts":${p.ts ?? 0}`]
+  if (p.bf && p.bm) parts.push(`"bf":"${p.bf}"`, `"bm":${p.bm}`, `"bts":${p.bts ?? 0}`)
+  const description = `${BIO_MARKER} {${parts.join(',')}}`.slice(0, 512)
   const r = await botApi('setMyDescription', { description })
   return r.ok
 }
@@ -256,6 +268,9 @@ export interface SnapshotResult {
   fileId?: string
   /** Pointer registered in the pinned V4 account index. */
   indexed?: boolean
+  /** True when a concurrent uploader had already advanced the shared pointer
+   *  past this payload — this document exists but was NOT pinned (no regress). */
+  stalePinSkipped?: boolean
   /** Pointer registered in the bot bio (fallback). */
   bio?: boolean
 }
@@ -269,7 +284,13 @@ export interface SnapshotResult {
 export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate'): Promise<SnapshotResult> {
   if (!isV5BackupConfigured()) return { ok: false, reason: 'backup-not-configured' }
   const s = state()
-  if (s.busy) return { ok: false, reason: 'snapshot-in-progress' }
+  if (s.busy) {
+    // NEVER drop: mark for a trailing run. The busy-holder chains one more
+    // snapshot after finishing, which captures writes that landed mid-flight
+    // (a dropped finalize snapshot stranded manifests cross-instance).
+    s.rerunAfterBusy = true
+    return { ok: false, reason: 'snapshot-in-progress' }
+  }
   s.busy = true
   try {
     // Monotonicity guard: apply any NEWER shared snapshot FIRST so this
@@ -314,54 +335,78 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
       return row
     })
 
-    const payload: SnapshotPayloadV1 = {
-      v: 1,
-      kind: 'v5-snapshot',
-      ts: Date.now(),
-      kv: kvRows.rows.map((r) => ({
-        o: String(r.owner),
-        c: String(r.collection),
-        k: String(r.key),
-        v: String(r.value),
-        s: Number(r.size ?? 0),
-        ca: Number(r.created_at ?? 0),
-        ua: Number(r.updated_at ?? 0),
-        d: r.deleted_at === null ? null : Number(r.deleted_at),
-      })),
-      blobs,
-      accounts: acctRows.rows.map((r) => ({
-        id: String(r.id),
-        owner_key: String(r.owner_key),
-        api_key_hash: String(r.api_key_hash),
-        email: r.email === null ? null : String(r.email),
-        email_lower: r.email_lower === null ? null : String(r.email_lower),
-        password_hash: r.password_hash === null ? null : String(r.password_hash),
-        name: r.name === null ? null : String(r.name),
-        role: String(r.role),
-        idem_register: r.idem_register === null ? null : String(r.idem_register),
-        created_at: Number(r.created_at ?? 0),
-        updated_at: Number(r.updated_at ?? 0),
-      })),
-    }
-
-    const gz = gzipSync(Buffer.from(JSON.stringify(payload), 'utf-8'))
+    const ts = Date.now()
+    const kvCount = kvRows.rows.length
+    // STREAMED serialization: JSON.stringify of the whole store doubled peak
+    // memory (rows + giant string + gzip buffer) and OOM-killed instances
+    // mid-request. Rows stream into the gzip encoder one at a time; peak
+    // memory stays near the row set itself.
+    const gz = await new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = []
+      const enc = createGzip({ level: 6 })
+      enc.on('data', (c: Buffer) => chunks.push(c))
+      enc.on('error', reject)
+      enc.on('end', () => resolve(Buffer.concat(chunks)))
+      try {
+        enc.write(`{"v":1,"kind":"v5-snapshot","ts":${ts},"kv":[`)
+        for (let i = 0; i < kvCount; i++) {
+          const r = kvRows.rows[i]
+          enc.write(
+            (i > 0 ? ',' : '') +
+              JSON.stringify({
+                o: String(r.owner),
+                c: String(r.collection),
+                k: String(r.key),
+                v: String(r.value),
+                s: Number(r.size ?? 0),
+                ca: Number(r.created_at ?? 0),
+                ua: Number(r.updated_at ?? 0),
+                d: r.deleted_at === null ? null : Number(r.deleted_at),
+              }),
+          )
+        }
+        enc.write(`],"blobs":${JSON.stringify(blobs)},"accounts":`)
+        enc.write(
+          JSON.stringify(
+            acctRows.rows.map((r) => ({
+              id: String(r.id),
+              owner_key: String(r.owner_key),
+              api_key_hash: String(r.api_key_hash),
+              email: r.email === null ? null : String(r.email),
+              email_lower: r.email_lower === null ? null : String(r.email_lower),
+              password_hash: r.password_hash === null ? null : String(r.password_hash),
+              name: r.name === null ? null : String(r.name),
+              role: String(r.role),
+              idem_register: r.idem_register === null ? null : String(r.idem_register),
+              created_at: Number(r.created_at ?? 0),
+              updated_at: Number(r.updated_at ?? 0),
+            })),
+          ),
+        )
+        enc.write('}')
+        enc.end()
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)))
+      }
+    })
     const sent = await sendDocumentFile({
       file: new Blob([new Uint8Array(gz)]),
-      fileName: `v5-snapshot-${payload.ts}.json.gz`,
+      fileName: `v5-snapshot-${ts}.json.gz`,
       mimeType: 'application/gzip',
-      caption: `${CAPTION_MARKER}|ts=${payload.ts}|kv=${payload.kv.length}|blobs=${payload.blobs.length}|reason=${reason}`,
+      caption: `${CAPTION_MARKER}|ts=${ts}|kv=${kvCount}|blobs=${blobs.length}|reason=${reason}`,
     })
     if (!sent.ok || !sent.document) {
       return { ok: false, reason: (!sent.ok && sent.error) || 'sendDocument failed' }
     }
+    const payload = { ts, kv: { length: kvCount }, blobs: { length: blobs.length } }
 
     // ── Pointer layer 1: minimal foreign entry in the pinned V4 index.
     // The shared pin is nearly full (3977/4096 chars in this chat), so the
     // entry carries ONLY {f: fileId, m: messageId} (~110 chars). V4's sync
     // merges foreign accounts into the index, so the entry survives V4
     // activity; V4 never reads fields of accounts it does not own.
-    const iso = new Date(payload.ts).toISOString()
-    const pointer: SnapshotPointer = { f: sent.document.fileId, m: sent.document.messageId, ts: payload.ts }
+    const iso = new Date(ts).toISOString()
+    const pointer: SnapshotPointer = { f: sent.document.fileId, m: sent.document.messageId, ts }
     let indexed = false
     try {
       const index: AccountIndex =
@@ -381,9 +426,14 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
 
     // ── Pointer layer 2: the bot's own bio (setMyDescription) — survives even
     // if the pinned index overflows (new V4 accounts) or loses the entry.
+    // MERGE: keep the fast blobs-snapshot pointer fields so a full-snapshot
+    // pin never clobbers the small channel.
     let bio = false
     try {
-      bio = await setBioPointer(pointer)
+      const prev = await getBioPointer()
+      bio = await setBioPointer(
+        prev?.bf && prev.bm ? { ...pointer, bf: prev.bf, bm: prev.bm, bts: prev.bts } : pointer,
+      )
     } catch {
       bio = false
     }
@@ -399,16 +449,27 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
       }
     }
 
-    s.lastSnapshotAt = payload.ts
-    s.lastSnapshotKv = payload.kv.length
-    s.lastAppliedTs = payload.ts
+    // Stale-pin guard: a CONCURRENT uploader may have already advanced the
+    // shared pointer past this payload's ts — never regress it.
+    try {
+      const current = (await getBioPointer()) ?? (await getIndexPointer())
+      if (current && (current.ts ?? 0) >= ts) {
+        return { ok: true, ts, kv: kvCount, blobs: blobs.length, bytes: gz.length, messageId: sent.document.messageId, fileId: sent.document.fileId, indexed: false, bio: false, stalePinSkipped: true }
+      }
+    } catch {
+      /* pin guard best-effort */
+    }
+    s.lastSnapshotAt = ts
+    s.lastSnapshotKv = kvCount
+    s.lastAppliedTs = ts
     s.writesSince = 0
+    console.log(JSON.stringify({ t: new Date().toISOString(), operation: 'v5.backup.snapshot-uploaded', level: 'info', reason, ts, kv: kvCount, blobs: blobs.length, bytes: gz.length, indexed, bio }))
     return {
       ok: true,
-      ts: payload.ts,
-      kv: payload.kv.length,
-      blobs: payload.blobs.length,
-      accounts: payload.accounts.length,
+      ts,
+      kv: kvCount,
+      blobs: blobs.length,
+      accounts: acctRows.rows.length,
       bytes: gz.length,
       messageId: sent.document.messageId,
       fileId: sent.document.fileId,
@@ -417,9 +478,193 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    console.warn(JSON.stringify({ t: new Date().toISOString(), operation: 'v5.backup.snapshot-failed', level: 'warn', reason: message.slice(0, 200) }))
     return { ok: false, reason: message }
   } finally {
     s.busy = false
+    // Trailing run: a write landed while we were mid-flight — chain ONE more
+    // snapshot (durable, so the invocation survives to finish it).
+    if (s.rerunAfterBusy && isV5BackupConfigured()) {
+      s.rerunAfterBusy = false
+      try {
+        const { durable } = await import('./durable')
+        durable(
+          (async () => {
+            for (let i = 0; i < 3; i++) {
+              const res = await uploadV5Snapshot('auto')
+              if (res.ok || res.reason !== 'snapshot-in-progress') break
+              await new Promise((r) => setTimeout(r, 3000))
+            }
+          })(),
+        )
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+}
+
+
+// ─── Blobs-only snapshot (fast convergence channel) ─────────────────────────
+//
+// Full-state snapshots carry EVERYTHING (13MB+ at current data) — they take
+// 5-15s to upload and cannot make a just-finalized file instantly servable
+// from any instance. The blobs channel dumps ONLY v5_blobs rows + the
+// v5_blobmeta KV collection (manifests/part records/dedup — a few KB), so a
+// finalize lands in every instance within ~1-2s. The full snapshot remains
+// the source of truth; the blobs channel is an accelerator that is always a
+// SUBSET of a later full snapshot.
+
+export interface BlobsSnapshotPayloadV1 {
+  v: 1
+  kind: 'v5-blobs-snapshot'
+  ts: number
+  blobs: BlobSnapRow[]
+  /** v5_blobmeta rows: {o: owner, k: key, v: JSON value, ua: updated_at}. */
+  meta: Array<{ o: string; k: string; v: string; ua: number }>
+}
+
+/** Separate busy flag — KB-sized uploads never queue behind 13MB ones. */
+function blobsBusy(): { busy: boolean } & Record<string, unknown> {
+  const g2 = globalThis as unknown as { __v5BlobsSnapBusy?: { busy: boolean } }
+  g2.__v5BlobsSnapBusy ??= { busy: false }
+  return g2.__v5BlobsSnapBusy
+}
+
+const BLOBS_MARKER = 'ONYXBASE_V5_BLOBS'
+
+/** Dump blobs + blobmeta → one small Telegram doc → merge into the bio pointer. */
+export async function uploadBlobsSnapshot(reason: 'finalize' | 'init'): Promise<{ ok: boolean; reason?: string; ts?: number }> {
+  if (!isV5BackupConfigured()) return { ok: false, reason: 'backup-not-configured' }
+  const b = blobsBusy()
+  if (b.busy) return { ok: false, reason: 'snapshot-in-progress' }
+  b.busy = true
+  try {
+    // Monotonicity: never regress the blobs pointer.
+    const prev = await getBioPointer()
+    if (prev?.bts && Date.now() <= prev.bts) return { ok: true, ts: prev.bts }
+    const db = await v5db()
+    const blobRows = await db.execute(
+      'SELECT id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at, parts_json FROM v5_blobs ORDER BY created_at ASC',
+    )
+    const metaRows = await db.execute(
+      "SELECT owner, key, value, updated_at FROM v5_kv WHERE collection = 'v5_blobmeta' AND deleted_at IS NULL",
+    )
+    const payload: BlobsSnapshotPayloadV1 = {
+      v: 1,
+      kind: 'v5-blobs-snapshot',
+      ts: Date.now(),
+      blobs: blobRows.rows.map((r) => {
+        const row: BlobSnapRow = {
+          id: String(r.id),
+          owner: String(r.owner),
+          filename: r.filename === null ? null : String(r.filename),
+          mime: r.mime === null ? null : String(r.mime),
+          size: Number(r.size ?? 0),
+          checksum: r.checksum === null ? null : String(r.checksum),
+          status: String(r.status),
+          storage_key: r.storage_key === null ? null : String(r.storage_key),
+          chunks: Number(r.chunks ?? 0),
+          is_public: Number(r.is_public ?? 0),
+          created_at: Number(r.created_at ?? 0),
+          updated_at: Number(r.updated_at ?? 0),
+          parts_json: r.parts_json === null || r.parts_json === undefined ? null : String(r.parts_json),
+        }
+        return row
+      }),
+      meta: metaRows.rows.map((r) => ({
+        o: String(r.owner),
+        k: String(r.key),
+        v: String(r.value),
+        ua: Number(r.updated_at ?? 0),
+      })),
+    }
+    const gz = gzipSync(Buffer.from(JSON.stringify(payload), 'utf-8'))
+    const sent = await sendDocumentFile({
+      file: new Blob([new Uint8Array(gz)]),
+      fileName: `v5-blobs-${payload.ts}.json.gz`,
+      mimeType: 'application/gzip',
+      caption: `${BLOBS_MARKER}|ts=${payload.ts}|blobs=${payload.blobs.length}|meta=${payload.meta.length}|reason=${reason}`,
+    })
+    if (!sent.ok || !sent.document) return { ok: false, reason: (!sent.ok && sent.error) || 'sendDocument failed' }
+    // Merge into the bio pointer (keep the full-snapshot fields).
+    const cur = (await getBioPointer()) ?? prev
+    const base: SnapshotPointer = cur?.f ? cur : { f: '', m: 0, ts: 0 }
+    const ok = await setBioPointer({ ...base, bf: sent.document.fileId, bm: sent.document.messageId, bts: payload.ts })
+    if (!ok) return { ok: false, reason: 'bio pointer write failed' }
+    // This instance obviously has this data already.
+    setLastAppliedBlobsTs(payload.ts)
+    console.log(JSON.stringify({ t: new Date().toISOString(), operation: 'v5.backup.blobs-snapshot-uploaded', level: 'info', reason, ts: payload.ts, blobs: payload.blobs.length, meta: payload.meta.length, bytes: gz.length }))
+    return { ok: true, ts: payload.ts }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return { ok: false, reason: message }
+  } finally {
+    b.busy = false
+  }
+}
+
+/** Track the newest applied blobs-snapshot ts (per instance). */
+export function getLastAppliedBlobsTs(): number {
+  const g2 = globalThis as unknown as { __v5BlobsTs?: number }
+  return g2.__v5BlobsTs ?? 0
+}
+
+export function setLastAppliedBlobsTs(ts: number): void {
+  const g2 = globalThis as unknown as { __v5BlobsTs?: number }
+  if (ts > (g2.__v5BlobsTs ?? 0)) g2.__v5BlobsTs = ts
+}
+
+/** Apply a blobs-only snapshot: rows earliest-wins, blobmeta upsert-if-newer. */
+export async function applyBlobsSnapshot(fileId: string): Promise<{ ok: boolean; reason?: string; ts?: number }> {
+  try {
+    const db = await v5db()
+    const dl = await getFileDownloadUrl(fileId)
+    if (!dl) return { ok: false, reason: 'getFile failed' }
+    const res = await fetch(dl.url, { signal: AbortSignal.timeout(20_000) })
+    if (!res.ok) return { ok: false, reason: `download HTTP ${res.status}` }
+    const buf = Buffer.from(await res.arrayBuffer())
+    const raw = gunzipSync(buf).toString('utf-8')
+    const payload = JSON.parse(raw) as BlobsSnapshotPayloadV1
+    if (payload.v !== 1 || payload.kind !== 'v5-blobs-snapshot') return { ok: false, reason: 'bad payload' }
+    // Rows: earliest-wins (consistent with the full restore's merge rule).
+    if (Array.isArray(payload.blobs) && payload.blobs.length > 0) {
+      const stmts = payload.blobs
+        .slice()
+        .sort((a, b) => a.created_at - b.created_at)
+        .map(
+          (bl) =>
+            `INSERT OR IGNORE INTO v5_blobs (id, owner, filename, mime, size, checksum, status, storage_key, chunks, is_public, created_at, updated_at, parts_json) VALUES (` +
+            `'${sqlEscape(bl.id)}', '${sqlEscape(bl.owner)}', ${bl.filename === null ? 'NULL' : `'${sqlEscape(bl.filename)}'`}, ` +
+            `${bl.mime === null ? 'NULL' : `'${sqlEscape(bl.mime)}'`}, ${bl.size}, ${bl.checksum === null ? 'NULL' : `'${sqlEscape(bl.checksum)}'`}, ` +
+            `'${sqlEscape(bl.status)}', ${bl.storage_key === null ? 'NULL' : `'${sqlEscape(bl.storage_key)}'`}, ${bl.chunks}, ${bl.is_public}, ` +
+            `${bl.created_at}, ${bl.updated_at}, ${!bl.parts_json ? 'NULL' : `'${sqlEscape(bl.parts_json)}'`})`,
+        )
+      for (let i = 0; i < stmts.length; i += 100) {
+        await db.batch(stmts.slice(i, i + 100).map((sql) => ({ sql, args: [] })), 'write')
+      }
+    }
+    // Blobmeta: upsert-if-newer (a finalized manifest must REPLACE an older
+    // skeleton for the same key — earliest-wins would strand it at 'created').
+    for (const m of Array.isArray(payload.meta) ? payload.meta : []) {
+      if (!m || typeof m.o !== 'string' || typeof m.k !== 'string' || typeof m.v !== 'string') continue
+      await db.execute({
+        sql: `INSERT INTO v5_kv (owner, collection, key, value, size, created_at, updated_at)
+              VALUES (?, 'v5_blobmeta', ?, ?, ?, ?, ?)
+              ON CONFLICT(owner, collection, key) DO UPDATE SET
+                value = excluded.value, size = excluded.size, updated_at = excluded.updated_at, deleted_at = NULL
+              WHERE excluded.updated_at > v5_kv.updated_at`,
+        args: [m.o, m.k, m.v, Buffer.byteLength(m.v, 'utf-8'), m.ua, m.ua],
+      })
+    }
+    setLastAppliedBlobsTs(payload.ts)
+    // CRITICAL: direct db writes bypass the KV hot cache — a negative cache
+    // entry (30s) would keep serving the miss AFTER this apply. Same rule
+    // as the full restore.
+    clearKvCache()
+    return { ok: true, ts: payload.ts }
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) }
   }
 }
 
