@@ -13,6 +13,25 @@ export const runtime = 'nodejs'
 export const maxDuration = 300
 
 /**
+ * CORS: these permanent file URLs are embedded/fetched cross-origin (e.g. the
+ * RGE Hub app loads XML previews with Range requests, videos seek via
+ * <video>). Public files get permissive CORS; the Expose-Headers list makes
+ * 206/Content-Range/ETag readable by fetch() callers (XML viewer pagination).
+ */
+const CORS_HEADERS: Record<string, string> = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Headers': 'Range, If-None-Match, Content-Type',
+  'Access-Control-Expose-Headers':
+    'Content-Range, Content-Length, Accept-Ranges, ETag, Cache-Control, X-File-Name, Content-Disposition',
+  'Access-Control-Max-Age': '86400',
+}
+
+export function OPTIONS(): Response {
+  return new Response(null, { status: 204, headers: CORS_HEADERS })
+}
+
+/**
  * GET /f/[id] — the public file-to-link proxy.
  *
  * Three serving paths:
@@ -70,9 +89,19 @@ async function resolveV5PartsResponse(req: NextRequest, id: string): Promise<Res
   }
 }
 
+/** Append CORS headers to any serving response (public files are embedded cross-origin). */
+function withCors(res: Response): Response {
+  if (res.status === 403 || res.status === 404) return res // errors stay as-is
+  for (const [k, v] of Object.entries(CORS_HEADERS)) res.headers.set(k, v)
+  return res
+}
+
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
+  return withCors(await GETImpl(req, id))
+}
 
+async function GETImpl(req: NextRequest, id: string) {
   // ─── V5 parts mode: permanent Telegram-backed files (Range-aware) ─────────
   const partsResponse = await resolveV5PartsResponse(req, id)
   if (partsResponse) return partsResponse
@@ -194,7 +223,10 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
  */
 export async function HEAD(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params
+  return withCors(await HEADImpl(req, id))
+}
 
+async function HEADImpl(req: NextRequest, id: string) {
   // V5 parts mode: resolve metadata and answer with real headers.
   try {
     const { v5Configured } = await import('@/lib/v5/db')
