@@ -276,4 +276,52 @@ export async function v5Login(email: string, password: string): Promise<AccountR
   return result
 }
 
+/**
+ * Update an existing account's password (admin/master-authenticated service
+ * endpoint — the RGE Hub calls this after verifying the user's reset OTP).
+ *
+ * Updates the password hash on the canonical account row AND every
+ * minted-key row of the same account (their password_hash is a vestigial
+ * copy — kept consistent), then mints a fresh api key (same semantics as
+ * login) and advances the shared snapshot so every instance converges.
+ */
+export async function v5UpdatePassword(email: string, newPassword: string): Promise<AccountResult> {
+  await ensureSeeded()
+  const db = await v5db()
+  const emailLower = email.toLowerCase().trim()
+  const lookup = async () =>
+    (
+      await db.execute({
+        sql: `SELECT id, password_hash, name, email FROM v5_accounts WHERE email_lower = ? LIMIT 1`,
+        args: [emailLower],
+      })
+    ).rows
+  let rows = await lookup()
+  if (rows.length === 0) {
+    // Cross-instance freshness before a "no account" verdict (file mode).
+    await ensureFreshness()
+    rows = await lookup()
+  }
+  if (rows.length === 0) {
+    throw Object.assign(new Error('No account exists with this email address.'), { code: 'NOT_FOUND' })
+  }
+  const row = rows[0] as Record<string, unknown>
+  const accountId = String(row.id)
+  const pwh = hashPassword(newPassword)
+  const now = nowMs()
+  // Canonical row + all minted-key rows of this account (owner_key = id).
+  await db.batch(
+    [
+      {
+        sql: `UPDATE v5_accounts SET password_hash = ?, updated_at = ? WHERE id = ? OR owner_key = ?`,
+        args: [pwh, now, accountId, accountId],
+      },
+    ],
+    'write'
+  )
+  const result = await mintKeyFor(db, row)
+  queueAuthSnapshot()
+  return result
+}
+
 export { num }
