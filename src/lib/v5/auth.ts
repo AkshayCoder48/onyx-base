@@ -269,6 +269,19 @@ export async function v5Login(email: string, password: string): Promise<AccountR
   }
   const row = rows[0] as Record<string, unknown>
   if (!verifyPassword(password, row.password_hash as string | null)) {
+    // Password mismatch — but this instance may be STALE (e.g. the password
+    // was just rotated on another instance). One rate-limited freshness
+    // probe + re-verify before failing (mirrors the not-found path).
+    await ensureFreshness()
+    const retry = await lookup()
+    if (retry.length > 0) {
+      const retryRow = retry[0] as Record<string, unknown>
+      if (verifyPassword(password, retryRow.password_hash as string | null)) {
+        const converged = await mintKeyFor(db, retryRow)
+        queueAuthSnapshot()
+        return converged
+      }
+    }
     throw Object.assign(new Error('Invalid email or password.'), { code: 'AUTH_INVALID_CREDENTIALS' })
   }
   const result = await mintKeyFor(db, row)
@@ -319,7 +332,9 @@ export async function v5UpdatePassword(email: string, newPassword: string): Prom
     ],
     'write'
   )
-  const result = await mintKeyFor(db, row)
+  // mintKeyFor copies password_hash into the new key row — hand it the
+  // UPDATED hash, not the pre-update snapshot from `row`.
+  const result = await mintKeyFor(db, { ...row, password_hash: pwh })
   queueAuthSnapshot()
   return result
 }
