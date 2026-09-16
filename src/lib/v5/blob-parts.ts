@@ -729,19 +729,12 @@ export async function finalizePartsBlob(
   // in ~1-2s so /f/:id is servable from every instance almost immediately.
   // The full-state snapshot is NOT triggered here — it rides the idle
   // cadence (13MB+ uploads per finalize flooded Telegram and competed for
-  // memory with in-flight part requests).
+  // memory with in-flight part requests). BULLETPROOF retries — a dropped
+  // snapshot leaves the finalized blob invisible cross-instance.
   try {
+    const { propagateBlobTombstone } = await import('./blobs')
     const { durable } = await import('./durable')
-    durable(
-      (async () => {
-        for (let i = 0; i < 3; i++) {
-          const { uploadBlobsSnapshot } = await import('./backup')
-          const res = await uploadBlobsSnapshot('finalize')
-          if (res.ok || res.reason !== 'snapshot-in-progress') break
-          await new Promise((r) => setTimeout(r, 3000))
-        }
-      })(),
-    )
+    durable(propagateBlobTombstone().catch(() => false))
   } catch {
     /* snapshot optional */
   }
@@ -886,21 +879,29 @@ export async function deletePartsBlob(owner: string, blobId: string): Promise<De
 
   await emitEvent(owner, 'BLOB_STATUS', blobId, { status: 'deleted' })
 
-  // 4. Ship the tombstone + metaDel entries on the fast blobs channel.
+  // 4. Ship the tombstone + metaDel entries on the fast blobs channel —
+  // BULLETPROOF retries: the del list is the only fast carrier of the
+  // delete; a dropped upload ghosts the file on every other instance.
+  // In-request attempt first (bounded), durable retry behind it.
   try {
-    const { durable } = await import('./durable')
-    durable(
-      (async () => {
-        for (let i = 0; i < 3; i++) {
-          const { uploadBlobsSnapshot } = await import('./backup')
-          const res = await uploadBlobsSnapshot('finalize')
-          if (res.ok || res.reason !== 'snapshot-in-progress') break
-          await new Promise((r) => setTimeout(r, 3000))
-        }
-      })().catch(() => undefined),
-    )
+    const { propagateBlobTombstone } = await import('./blobs')
+    const shipped = await Promise.race([
+      propagateBlobTombstone(),
+      new Promise<null>((r) => setTimeout(() => r(null), 6_000)),
+    ])
+    if (shipped !== true) {
+      const { durable } = await import('./durable')
+      durable(propagateBlobTombstone().catch(() => false))
+    }
   } catch {
-    /* snapshot optional — the full snapshot carries the tombstone too */
+    /* local row state is committed — the full snapshot carries the tombstone too */
+    try {
+      const { durable } = await import('./durable')
+      const { propagateBlobTombstone } = await import('./blobs')
+      durable(propagateBlobTombstone().catch(() => false))
+    } catch {
+      /* nothing more we can do in-process */
+    }
   }
 
   console.log(

@@ -225,12 +225,42 @@ export async function kvSetBatch(
 export async function kvDelete(owner: string, key: string, collection = 'default'): Promise<boolean> {
   const now = nowMs()
   const db = await v5db()
-  const rs = await db.execute({
-    sql: `UPDATE v5_kv SET deleted_at = ?, updated_at = ? WHERE owner = ? AND collection = ? AND key = ? AND deleted_at IS NULL`,
-    args: [now, now, owner, collection, key],
+
+  // RESURRECTION-PROOF DELETE (deterministic deletes over eventually-
+  // consistent instances): a plain `UPDATE ... WHERE deleted_at IS NULL`
+  // no-ops on an instance that hasn't converged the row yet — the row then
+  // arrives via that instance's kv-delta and the id RESURRECTS. Instead:
+  //   1. live row        → soft-delete as before (updated_at = now),
+  //   2. row absent      → INSERT a tombstone row (deleted_at = now). A
+  //      later-arriving create delta has an OLDER updated_at and loses to
+  //      the merge guard (`excluded.updated_at >= v5_kv.updated_at`), so the
+  //      id stays deleted everywhere once the tombstone's delta applies.
+  // Idempotent: an already-deleted row is left untouched.
+  const existing = await db.execute({
+    sql: `SELECT deleted_at FROM v5_kv WHERE owner = ? AND collection = ? AND key = ? LIMIT 1`,
+    args: [owner, collection, key],
   })
-  const wasLive = rs.rowsAffected > 0
-  if (wasLive) {
+  const hadRow = existing.rows.length > 0
+  const wasLive = hadRow && (existing.rows[0] as Record<string, unknown>).deleted_at === null
+
+  let deleted = false
+  if (hadRow) {
+    const rs = await db.execute({
+      sql: `UPDATE v5_kv SET deleted_at = ?, updated_at = ? WHERE owner = ? AND collection = ? AND key = ? AND deleted_at IS NULL`,
+      args: [now, now, owner, collection, key],
+    })
+    deleted = rs.rowsAffected > 0
+  } else {
+    // Absent locally (never converged, or genuinely unknown) — plant the
+    // tombstone so no in-flight create can resurrect it.
+    await db.execute({
+      sql: `INSERT OR IGNORE INTO v5_kv (owner, collection, key, value, size, created_at, updated_at, deleted_at)
+            VALUES (?, ?, ?, 'null', 4, ?, ?, ?)`,
+      args: [owner, collection, key, now, now, now],
+    })
+    deleted = true
+  }
+  if (wasLive && deleted) {
     await db.execute({
       sql: `INSERT INTO v5_counters (owner, name, value, updated_at)
             VALUES (?, ?, -1, ?)
@@ -243,7 +273,7 @@ export async function kvDelete(owner: string, key: string, collection = 'default
   mirrorKv(owner, collection, key, null, 'DELETE')
   noteMetaDelete(owner, collection, key)
   queueDelta(collection)
-  return wasLive
+  return deleted || !hadRow
 }
 
 export interface KvPage {

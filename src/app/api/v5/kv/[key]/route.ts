@@ -80,7 +80,26 @@ export const DELETE = withV5Handler({
   handler: async (req: NextRequest, ctx, routeCtx?: Ctx) => {
     const key = decodeKey((await routeCtx!.params).key)
     const collection = req.nextUrl.searchParams.get('collection') || 'default'
-    await kvDelete(ctx.user!.owner, key, collection)
-    return ctx.ok({ key, collection, deleted: true })
+    const wasLive = await kvDelete(ctx.user!.owner, key, collection)
+    // DETERMINISTIC PROPAGATION: the queue is throttled per instance — when
+    // the delete is the LAST write, a throttled-out queue never ships the
+    // tombstone and the id ghosts. Ship the KB-sized kv-delta NOW (bounded,
+    // coalesced per instance); the idle-cadence full snapshot reconciles
+    // anything the delta races lose. Blobmeta rides the blobs channel.
+    // `propagated` tells the caller whether the delta shipped so it can
+    // retry (possibly on a healthier instance) when Telegram is flooded.
+    let propagated = true
+    if (collection !== 'v5_blobmeta') {
+      try {
+        const { propagateKvDeleteDelta } = await import('@/lib/v5/backup')
+        propagated = await Promise.race([
+          propagateKvDeleteDelta(),
+          new Promise<boolean>((r) => setTimeout(() => r(false), 5000)),
+        ])
+      } catch {
+        propagated = false
+      }
+    }
+    return ctx.ok({ key, collection, deleted: true, wasLive, propagated })
   },
 })

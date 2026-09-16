@@ -197,6 +197,22 @@ export async function finalizeBlob(blobId: string, owner: string): Promise<Final
   }
   await patchBlob(blobId, { status: 'ready', error: null, storage_key: stagingPath(blobId) })
   await emitEvent(blob.owner, 'BLOB_STATUS', blobId, { status: 'ready', size: blob.size, checksum: blob.checksum })
+  // Ship the row state on the FAST blobs channel so every instance sees the
+  // ready blob within ~1-2s — finalize is the LAST write of an upload, and
+  // without this a delete/serve/finalize-retry landing on another instance
+  // within the ~15s idle-snapshot window 404s a file that EXISTS.
+  try {
+    const shipped = await Promise.race([
+      propagateBlobTombstone(),
+      new Promise<null>((r) => setTimeout(() => r(null), 6_000)),
+    ])
+    if (shipped !== true) {
+      const { durable } = await import('./durable')
+      durable(propagateBlobTombstone().catch(() => false))
+    }
+  } catch {
+    /* snapshot optional */
+  }
   // Async Telegram backup mirror — fire-and-forget, never gates 'ready'.
   // Cloud Bot API caps a single document at 50 MB; larger blobs are skipped
   // (SQLite/staging remains authoritative — the mirror is redundancy).
@@ -227,6 +243,33 @@ export interface DeleteBlobResult {
 }
 
 /**
+ * Ship the row state on the fast blobs channel — with BULLETPROOF retries.
+ * The blobs-snapshot `del` list is the ONLY fast carrier of blob deletes
+ * (full snapshots only run on the idle/write cadence); a dropped upload
+ * leaves a ghost file on every other instance with no self-heal. Retries
+ * cover busy conflicts AND transient Telegram failures; only
+ * backup-not-configured is terminal. Returns true when a snapshot shipped.
+ */
+export async function propagateBlobTombstone(attempts = 6): Promise<boolean> {
+  const { uploadBlobsSnapshot } = await import('./backup')
+  for (let i = 0; i < attempts; i++) {
+    let res: { ok: boolean; reason?: string } | null = null
+    try {
+      res = await uploadBlobsSnapshot('finalize')
+    } catch {
+      res = { ok: false, reason: 'send-threw' }
+    }
+    if (res.ok) return true
+    if (res.reason === 'backup-not-configured') return false
+    // Busy conflict or transient Telegram failure (429/flood/network) —
+    // back off and retry. The instance-local row state is already
+    // committed; this loop only ships it.
+    await new Promise((r) => setTimeout(r, Math.min(1500 * (i + 1), 8000)))
+  }
+  return false
+}
+
+/**
  * PERMANENTLY delete a staging-mode blob (single-PUT flow): remove the local
  * staging file and TOMBSTONE the row (status='deleted') — the tombstone rides
  * the snapshots so every instance stops serving it and restores never
@@ -244,21 +287,26 @@ export async function deleteBlob(blobId: string, owner: string): Promise<DeleteB
     args: [now, blobId],
   })
   await emitEvent(owner, 'BLOB_STATUS', blobId, { status: 'deleted' })
-  // Ship the tombstone on the fast blobs channel (del list).
+  // Ship the tombstone BEFORE responding when it is cheap (bounded 10s):
+  // deletes are rare and the in-request attempt catches Telegram hiccups
+  // while the caller is still connected; the durable retry covers the rest.
   try {
-    const { durable } = await import('./durable')
-    durable(
-      (async () => {
-        for (let i = 0; i < 3; i++) {
-          const { uploadBlobsSnapshot } = await import('./backup')
-          const res = await uploadBlobsSnapshot('finalize')
-          if (res.ok || res.reason !== 'snapshot-in-progress') break
-          await new Promise((r) => setTimeout(r, 3000))
-        }
-      })().catch(() => undefined),
-    )
+    const shipped = await Promise.race([
+      propagateBlobTombstone(),
+      new Promise<null>((r) => setTimeout(() => r(null), 6_000)),
+    ])
+    if (shipped !== true) {
+      const { durable } = await import('./durable')
+      durable(propagateBlobTombstone().catch(() => false))
+    }
   } catch {
-    /* snapshot optional */
+    /* local row state is committed — durable retry below is best-effort */
+    try {
+      const { durable } = await import('./durable')
+      durable(propagateBlobTombstone().catch(() => false))
+    } catch {
+      /* nothing more we can do in-process */
+    }
   }
   return { blobId, status: 'deleted' }
 }

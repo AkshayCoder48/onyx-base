@@ -5,7 +5,7 @@
  */
 import { NextRequest } from 'next/server'
 import { withV5Handler, V5Error } from '@/lib/v5/handler'
-import { snapshotStatus, uploadV5Snapshot, V5_SNAPSHOT_ACCOUNT } from '@/lib/v5/backup'
+import { snapshotStatus, uploadV5Snapshot, getBioPointer, V5_SNAPSHOT_ACCOUNT } from '@/lib/v5/backup'
 import { fetchAccountIndex, isTelegramConfigured } from '@/lib/telegram'
 
 export const runtime = 'nodejs'
@@ -22,7 +22,10 @@ export const GET = withV5Handler({
     const registered = isTelegramConfigured()
       ? ((await fetchAccountIndex())?.accounts as Record<string, unknown> | undefined)?.[V5_SNAPSHOT_ACCOUNT] ?? null
       : null
-    return ctx.ok({ ...snapshotStatus(), telegram: { configured: isTelegramConfigured() }, registeredSnapshot: registered })
+    // Live shared-pointer state (bio first, pinned index fallback) — the
+    // ground truth for cross-instance convergence debugging.
+    const bio = isTelegramConfigured() ? await getBioPointer().catch(() => null) : null
+    return ctx.ok({ ...snapshotStatus(), telegram: { configured: isTelegramConfigured() }, registeredSnapshot: registered, bioPointer: bio })
   },
 })
 

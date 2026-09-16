@@ -252,6 +252,70 @@ export async function getBioPointer(): Promise<SnapshotPointer | null> {
   }
 }
 
+/** Channel fields a bio-pointer update may carry. */
+export interface BioPointerUpdate {
+  f?: string
+  m?: number
+  ts?: number
+  bf?: string
+  bm?: number
+  bts?: number
+  df?: string
+  dm?: number
+  dts?: number
+}
+
+/**
+ * Read-merge-write the bio pointer with post-write VERIFICATION + retries.
+ * The bio is a shared register with NO compare-and-swap: three uploaders
+ * (full snapshot → f/m/ts, blobs snapshot → bf/bm/bts, kv delta → df/dm/dts)
+ * each advance ONLY their own channel, and a plain read-modify-write lets a
+ * slow writer clobber a faster one's newer registration (proven live: a
+ * full-snapshot pin restored a pre-delete blobs pointer and resurrected a
+ * deleted file). Every writer merges the CURRENT other-channel values and
+ * verifies its OWN channel survived; on regression it re-merges and
+ * rewrites. The last verified write converges to the newest state per
+ * channel.
+ */
+async function mergeBioPointer(update: BioPointerUpdate): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const cur = await getBioPointer()
+      if (!cur && !(update.f && typeof update.m === 'number')) {
+        // Channel-only update with no bio yet — nothing to merge onto and
+        // no full pointer to start one; the follow-up full snapshot will.
+        return false
+      }
+      const merged: SnapshotPointer = {
+        f: update.f ?? cur?.f ?? '',
+        m: update.m ?? cur?.m ?? 0,
+        ts: update.ts ?? cur?.ts ?? 0,
+        bf: update.bf ?? cur?.bf,
+        bm: update.bm ?? cur?.bm,
+        bts: update.bts ?? cur?.bts,
+        df: update.df ?? cur?.df,
+        dm: update.dm ?? cur?.dm,
+        dts: update.dts ?? cur?.dts,
+      }
+      if (!(await setBioPointer(merged))) return false
+      // Verify this update's own channel survived (a concurrent writer may
+      // have overwritten it with an older merged view). Other channels are
+      // THEIR writers' responsibility — each verifies its own.
+      const after = await getBioPointer()
+      if (!after) return true // unreadable — assume the write landed
+      const ownRegression =
+        (update.bf !== undefined && after.bf !== update.bf) ||
+        (update.df !== undefined && after.df !== update.df) ||
+        (update.f !== undefined && after.f !== update.f)
+      if (!ownRegression) return true
+      // Regression — re-merge from the CURRENT state and rewrite.
+    } catch {
+      /* retry */
+    }
+  }
+  return false
+}
+
 /** Read the snapshot pointer from the pinned V4 account index (primary path). */
 export async function getIndexPointer(): Promise<SnapshotPointer | null> {
   const index = await fetchAccountIndex()
@@ -436,14 +500,12 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
 
     // ── Pointer layer 2: the bot's own bio (setMyDescription) — survives even
     // if the pinned index overflows (new V4 accounts) or loses the entry.
-    // MERGE: keep the fast blobs-snapshot pointer fields so a full-snapshot
-    // pin never clobbers the small channel.
+    // MERGE: keep the OTHER channels' registrations (blobs + kv-delta) so a
+    // full-snapshot pin never clobbers them; mergeBioPointer verifies the
+    // write survived concurrent channel updates.
     let bio = false
     try {
-      const prev = await getBioPointer()
-      bio = await setBioPointer(
-        prev?.bf && prev.bm ? { ...pointer, bf: prev.bf, bm: prev.bm, bts: prev.bts } : pointer,
-      )
+      bio = await mergeBioPointer({ f: pointer.f, m: pointer.m, ts: pointer.ts })
     } catch {
       bio = false
     }
@@ -665,9 +727,7 @@ export async function uploadBlobsSnapshot(reason: 'finalize' | 'init'): Promise<
     })
     if (!sent.ok || !sent.document) return { ok: false, reason: (!sent.ok && sent.error) || 'sendDocument failed' }
     // Merge into the bio pointer (keep the full-snapshot + delta fields).
-    const cur = (await getBioPointer()) ?? prev
-    const base: SnapshotPointer = cur?.f ? cur : { f: '', m: 0, ts: 0 }
-    const ok = await setBioPointer({ ...base, bf: sent.document.fileId, bm: sent.document.messageId, bts: payload.ts })
+    const ok = await mergeBioPointer({ bf: sent.document.fileId, bm: sent.document.messageId, bts: payload.ts })
     if (!ok) return { ok: false, reason: 'bio pointer write failed' }
     // This instance obviously has this data already.
     setLastAppliedBlobsTs(payload.ts)
@@ -742,8 +802,8 @@ export async function applyBlobsSnapshot(fileId: string): Promise<{ ok: boolean;
         if (!d || typeof d.id !== 'string' || typeof d.ua !== 'number') continue
         await db
           .execute({
-            sql: `UPDATE v5_blobs SET status = 'deleted', updated_at = ? WHERE id = ? AND updated_at < ? AND status != 'deleted'`,
-            args: [d.ua, d.id, d.ua],
+            sql: `UPDATE v5_blobs SET status = 'deleted', updated_at = MAX(updated_at, ?) WHERE id = ? AND status != 'deleted'`,
+            args: [d.ua, d.id],
           })
           .catch(() => undefined)
       }
@@ -865,9 +925,7 @@ export async function uploadKvDelta(reason: 'kv-write' | 'manual'): Promise<{ ok
     })
     if (!sent.ok || !sent.document) return { ok: false, reason: (!sent.ok && sent.error) || 'sendDocument failed' }
     // Merge into the bio pointer (keep full-snapshot + blobs fields).
-    const cur = await getBioPointer()
-    const base: SnapshotPointer = cur?.f ? cur : { f: '', m: 0, ts: 0 }
-    const ok = await setBioPointer({ ...base, df: sent.document.fileId, dm: sent.document.messageId, dts: payload.ts })
+    const ok = await mergeBioPointer({ df: sent.document.fileId, dm: sent.document.messageId, dts: payload.ts })
     if (!ok) return { ok: false, reason: 'bio pointer write failed' }
     setLastAppliedDeltaTs(payload.ts)
     console.log(JSON.stringify({ t: new Date().toISOString(), operation: 'v5.backup.kv-delta-uploaded', level: 'info', reason, ts: payload.ts, rows: rows.length, bytes: gz.length }))
@@ -947,10 +1005,16 @@ export function queueKvDeltaSnapshot(): void {
     void import('./durable').then(({ durable }) => {
       durable(
         (async () => {
-          for (let i = 0; i < 3; i++) {
+          for (let i = 0; i < 4; i++) {
             const res = await uploadKvDelta('kv-write')
-            if (res.ok || (res.reason !== 'delta-in-progress' && res.reason !== 'backup-not-configured')) break
-            await new Promise((r) => setTimeout(r, 2500))
+            if (res.ok || res.reason === 'backup-not-configured') break
+            // 'delta-in-progress': the in-flight upload chains a rerun that
+            // carries this write too (window-based) — but under load the
+            // chain can be long, so a short wait + retry is still safer.
+            // Send failures (Telegram 429/flood/network) MUST retry — a
+            // dropped delta means the write is invisible cross-instance
+            // until the next write happens to ship one.
+            await new Promise((r) => setTimeout(r, Math.min(1500 * (i + 1), 6000)))
           }
         })().catch(() => undefined),
       )
@@ -1008,6 +1072,52 @@ export function queueAuthSnapshot(): void {
       /* best-effort */
     }
   })())
+}
+
+/** Per-instance coalescing for delete-propagation deltas (deletes of the
+ *  same id in quick succession — idempotent retries, blind deletes — share
+ *  one in-flight delta upload). */
+interface KvDeleteDeltaGlobal {
+  __v5KvDeleteDeltaInFlight?: Promise<boolean> | null
+}
+
+/**
+ * Ship the kv-delta NOW after a KV delete — the deterministic-delete carrier.
+ * The queue (queueKvDeltaSnapshot) is THROTTLED (2.5s/instance) and
+ * fire-and-forget: when the delete is the last write, a throttled-OUT queue
+ * means the tombstone never leaves the instance (proven: ghost rows). This
+ * uploads the KB-sized delta DIRECTLY (the tombstone is in the 10-min
+ * window), with retries for busy/transient failures. The delta apply guard
+ * (`excluded.updated_at >= v5_kv.updated_at`) keeps the tombstone winning
+ * over any older live row; full snapshots reconcile on the idle cadence.
+ * Awaited (bounded) by the kv DELETE route; coalesces concurrent callers.
+ */
+export async function propagateKvDeleteDelta(): Promise<boolean> {
+  if (!isV5BackupConfigured()) return false
+  const g = globalThis as unknown as KvDeleteDeltaGlobal
+  if (g.__v5KvDeleteDeltaInFlight) return g.__v5KvDeleteDeltaInFlight
+  const run = (async (): Promise<boolean> => {
+    for (let i = 0; i < 4; i++) {
+      let res: { ok: boolean; reason?: string }
+      try {
+        res = await uploadKvDelta('kv-write')
+      } catch {
+        res = { ok: false, reason: 'send-threw' }
+      }
+      if (res.ok) return true
+      if (res.reason === 'backup-not-configured') return false
+      // Busy (another upload chains a rerun) or transient Telegram failure —
+      // brief backoff and retry; the delta is KBs, cheap even under load.
+      await new Promise((r) => setTimeout(r, 1000 * (i + 1)))
+    }
+    return false
+  })()
+  g.__v5KvDeleteDeltaInFlight = run
+  try {
+    return await run
+  } finally {
+    g.__v5KvDeleteDeltaInFlight = null
+  }
 }
 
 // ─── Restore ─────────────────────────────────────────────────────────────────
@@ -1143,8 +1253,8 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
       if (b.status !== 'deleted') continue
       await db
         .execute({
-          sql: `UPDATE v5_blobs SET status = 'deleted', updated_at = ? WHERE id = ? AND updated_at < ? AND status != 'deleted'`,
-          args: [b.updated_at, b.id, b.updated_at],
+          sql: `UPDATE v5_blobs SET status = 'deleted', updated_at = MAX(updated_at, ?) WHERE id = ? AND status != 'deleted'`,
+          args: [b.updated_at, b.id],
         })
         .catch(() => undefined)
     }

@@ -101,14 +101,41 @@ export const POST = withV5Handler({
         ? { size: c.size, chunkSize: c.chunkSize, totalChunks: c.totalChunks, checksum: c.checksum ?? null, filename: c.filename ?? null, mimeType: c.mimeType ?? null }
         : null
     const action = body.action || 'finalize'
-    const row = await getBlobFresh(id)
+    let row = await getBlob(id)
+    if (!row || row.owner !== ctx.user!.owner) {
+      // Single-PUT mode cross-instance convergence: init/PUT may have landed
+      // on another engine instance and the kv-delta may not have applied
+      // here yet. FORCE a freshness probe (bypasses the probe rate limit —
+      // finalizes are rare) before routing/404ing.
+      try {
+        const { ensureFreshness } = await import('@/lib/v5/sync')
+        await ensureFreshness({ force: true })
+        row = await getBlob(id)
+      } catch {
+        /* best-effort */
+      }
+    }
+    if (!row && ctxValid === null) {
+      // Still no row and no session context — one short convergence wait
+      // then a second forced probe before declaring NOT_FOUND. The delta
+      // channel ships within ~1-2s of the write.
+      await new Promise((r) => setTimeout(r, 1500))
+      try {
+        const { ensureFreshness } = await import('@/lib/v5/sync')
+        await ensureFreshness({ force: true })
+        row = await getBlob(id)
+      } catch {
+        /* best-effort */
+      }
+    }
+    const rowFresh = row
 
     // Parts mode routing (storage_key marker). A declared session context
     // also routes parts-mode when the row hasn't converged to this instance
     // yet (stateless finalize — see blob-parts.ts).
     const isPartsMode =
-      (row && row.owner === ctx.user!.owner && row.storageKey === 'parts') ||
-      (!row && ctxValid !== null)
+      (rowFresh && rowFresh.owner === ctx.user!.owner && rowFresh.storageKey === 'parts') ||
+      (!rowFresh && ctxValid !== null)
     if (isPartsMode) {
       if (action === 'cancel') {
         const result = await cancelPartsBlob(ctx.user!.owner, id)
@@ -162,6 +189,20 @@ export const DELETE = withV5Handler({
     // (file-mode convergence); force ONE probe before declaring 404.
     let row = await getBlob(id)
     if (!row || row.owner !== ctx.user!.owner) {
+      try {
+        const { ensureFreshness } = await import('@/lib/v5/sync')
+        await ensureFreshness({ force: true })
+        row = await getBlob(id)
+      } catch {
+        /* best-effort */
+      }
+    }
+    if (!row || row.owner !== ctx.user!.owner) {
+      // A blob finalized within the last seconds may still be mid-convergence
+      // (blobs snapshot in flight). One short wait + forced re-probe before
+      // 404 — reporting "deleted" for a file that EXISTS would leak it
+      // forever (the caller treats 404 as already-gone).
+      await new Promise((r) => setTimeout(r, 1500))
       try {
         const { ensureFreshness } = await import('@/lib/v5/sync')
         await ensureFreshness({ force: true })
