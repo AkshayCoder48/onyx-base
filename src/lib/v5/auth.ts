@@ -17,7 +17,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { hashPassword, verifyPassword } from '@/lib/password'
 import { v5db, nowMs, num } from './db'
 import { ensureFreshness, ensureFreshnessRetry } from './sync'
-import { queueAuthSnapshot } from './backup'
+import { queueAuthSnapshot, uploadV5Snapshot } from './backup'
 
 const SALT = process.env.V5_KEY_SALT || 'onyxbase-v5-default-salt-change-me'
 
@@ -344,7 +344,19 @@ export async function v5UpdatePassword(email: string, newPassword: string): Prom
   // mintKeyFor copies password_hash into the new key row — hand it the
   // UPDATED hash, not the pre-update snapshot from `row`.
   const result = await mintKeyFor(db, { ...row, password_hash: pwh })
-  queueAuthSnapshot(true)
+  // SYNCHRONOUS publication: a user who signs out right after resetting and
+  // immediately signs back in must see the NEW password. The async queue
+  // publishes in ~1-3s, but the login's bounded miss-retry can exhaust
+  // before that lands — awaiting the upload here closes the window for the
+  // rare, security-critical password change (bounded: Telegram hiccups fall
+  // back to the forced background queue; the password update itself is
+  // already committed locally).
+  try {
+    const published = await uploadV5Snapshot('manual')
+    if (!published.ok) queueAuthSnapshot(true)
+  } catch {
+    queueAuthSnapshot(true)
+  }
   return result
 }
 
