@@ -356,12 +356,23 @@ export async function v5UpdatePassword(email: string, newPassword: string): Prom
 export async function v5DeleteAccountByEmail(email: string): Promise<number> {
   const db = await v5db()
   const emailLower = email.trim().toLowerCase()
-  const canonical = (
-    await db.execute({
-      sql: `SELECT id FROM v5_accounts WHERE email_lower = ? LIMIT 1`,
-      args: [emailLower],
-    })
-  ).rows[0] as { id?: string } | undefined
+  const lookup = async () =>
+    (
+      await db.execute({
+        sql: `SELECT id FROM v5_accounts WHERE email_lower = ? LIMIT 1`,
+        args: [emailLower],
+      })
+    ).rows
+  let rows = await lookup()
+  if (rows.length === 0) {
+    // Cross-instance staleness: the account may live on another instance
+    // only (registered seconds ago). Bounded retrying probe before
+    // concluding "nothing to delete" — otherwise the row survives and
+    // the deleted user can still log in.
+    await ensureFreshnessRetry()
+    rows = await lookup()
+  }
+  const canonical = rows[0] as { id?: string } | undefined
   const res = await db.batch(
     [
       {
