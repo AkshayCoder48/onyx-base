@@ -1060,11 +1060,15 @@ export async function maybeSnapshotOnIdle(): Promise<void> {
  * by the serverless freeze the moment the register response shipped, which
  * stranded accounts on the instance that created them.
  */
-export function queueAuthSnapshot(): void {
+export function queueAuthSnapshot(force = false): void {
   if (!isV5BackupConfigured()) return
   const s = state()
   const now = Date.now()
-  if (now - s.authSnapshotQueuedAt < AUTH_SNAPSHOT_MIN_INTERVAL_MS) return
+  // force: account-existence writes (register / password change / account
+  // delete) MUST publish a snapshot even inside the per-instance spacing
+  // window — dropping one strands the account on this instance and the
+  // very next login on another instance honestly 401s.
+  if (!force && now - s.authSnapshotQueuedAt < AUTH_SNAPSHOT_MIN_INTERVAL_MS) return
   s.authSnapshotQueuedAt = now
   durable((async () => {
     try {

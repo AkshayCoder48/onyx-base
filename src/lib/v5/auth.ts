@@ -242,8 +242,10 @@ export async function v5Register(opts: {
     throw err
   }
   // Advance the shared snapshot so other instances see this account within
-  // ~1-2s (cross-instance login / bearer resolution).
-  queueAuthSnapshot()
+  // ~1-2s (cross-instance login / bearer resolution). FORCED: a dropped
+  // snapshot (per-instance 5s spacing) strands the new account here and the
+  // next login elsewhere honestly 401s.
+  queueAuthSnapshot(true)
   return { userId: id, apiKey, name: opts.name.trim(), email: opts.email.trim() }
 }
 
@@ -342,7 +344,7 @@ export async function v5UpdatePassword(email: string, newPassword: string): Prom
   // mintKeyFor copies password_hash into the new key row — hand it the
   // UPDATED hash, not the pre-update snapshot from `row`.
   const result = await mintKeyFor(db, { ...row, password_hash: pwh })
-  queueAuthSnapshot()
+  queueAuthSnapshot(true)
   return result
 }
 
@@ -378,7 +380,7 @@ export async function v5DeleteAccountByEmail(email: string): Promise<number> {
     'write'
   )
   const removed = res.reduce((n, r) => n + Number(r?.rowsAffected ?? 0), 0)
-  if (removed > 0) queueAuthSnapshot()
+  if (removed > 0) queueAuthSnapshot(true)
   return removed
 }
 

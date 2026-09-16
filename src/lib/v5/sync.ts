@@ -181,7 +181,7 @@ export async function ensureFreshness(opts: { force?: boolean } = {}): Promise<v
  * auth operations are rare, so this costs nothing under load.
  */
 export async function ensureFreshnessRetry(
-  attempts = Number(process.env.V5_AUTH_MISS_RETRIES) || 3,
+  attempts = Number(process.env.V5_AUTH_MISS_RETRIES) || 4,
   waitMs = 450,
 ): Promise<void> {
   for (let i = 0; i < Math.max(1, attempts); i++) {
