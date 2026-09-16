@@ -1157,7 +1157,7 @@ export interface RestoreResult {
   reason?: string
   snapshotTs?: number
   /** Which pointer layer located the snapshot. */
-  via?: 'explicit' | 'index' | 'bio' | null
+  via?: 'explicit' | 'index' | 'bio' | 'newest' | null
   applied?: { kv: number; blobs: number; accounts: number; blobBytesRestaged: number }
 }
 
@@ -1173,38 +1173,69 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
     console.log(JSON.stringify({ t: new Date().toISOString(), operation: 'v5.backup.restore-step', level: 'info', step: name, ms: Date.now() - t0, ...extra }))
   if (!isTelegramConfigured()) return { ok: false, reason: 'telegram-not-configured' }
   let pointer: SnapshotPointer | null = null
-  let via: 'explicit' | 'index' | 'bio' | null = null
+  let via: 'explicit' | 'index' | 'bio' | 'newest' | null = null
   if (opts?.fileId) {
     pointer = { f: opts.fileId, m: 0 }
     via = 'explicit'
   }
+  let preloaded: SnapshotPayloadV1 | null = null
   if (!pointer) {
-    pointer = await getIndexPointer()
-    if (pointer) via = 'index'
-  }
-  if (!pointer) {
-    pointer = await getBioPointer()
-    if (pointer) via = 'bio'
+    // TWO registration channels exist (bot-bio pointer + pinned V4 index).
+    // They can DIVERGE when one of the two Telegram writes fails or gets
+    // rate-limited (the index edit is message-edit rate-limited; the bio
+    // write is not). The OLD resolution order (index first, bio fallback)
+    // could pick the STALE channel forever — the newest snapshot never
+    // applied, so account changes (password resets) never reached warm
+    // instances. Docs are small after the tombstone diet (~100-200KB), so
+    // when the channels disagree we download BOTH and apply the NEWER.
+    const [bio, idx] = await Promise.all([getBioPointer(), getIndexPointer()])
+    if (bio && idx && bio.f !== idx.f) {
+      const loadPayload = async (f: string): Promise<SnapshotPayloadV1 | null> => {
+        try {
+          const dl = await getFileDownloadUrl(f)
+          if (!dl) return null
+          const r = await fetch(dl.url, { signal: AbortSignal.timeout(20_000) })
+          if (!r.ok) return null
+          const buf = Buffer.from(await r.arrayBuffer())
+          return JSON.parse(gunzipSync(buf).toString('utf-8')) as SnapshotPayloadV1
+        } catch {
+          return null
+        }
+      }
+      const [a, b] = await Promise.all([loadPayload(bio.f), loadPayload(idx.f)])
+      if (a && b) {
+        const newerIsBio = (a.ts ?? 0) >= (b.ts ?? 0)
+        preloaded = newerIsBio ? a : b
+        pointer = newerIsBio ? bio : idx
+        via = 'newest'
+      }
+    }
+    if (!pointer) {
+      // Channels agree (or only one exists) — bio first (atomic single-call
+      // write on every upload), index as the legacy fallback.
+      pointer = bio ?? idx
+      via = bio ? 'bio' : 'index'
+    }
   }
   step('pointer', { via })
   if (!pointer) return { ok: false, reason: 'no-snapshot-registered' }
 
-  const dl = await getFileDownloadUrl(pointer.f)
-  step('getFile', { ok: !!dl })
-  if (!dl) return { ok: false, reason: 'getFile failed' }
-  const res = await fetch(dl.url, { signal: AbortSignal.timeout(20_000) })
-  const buf = Buffer.from(await res.arrayBuffer())
-  step('download', { bytes: buf.length, status: res.status })
-  if (!res.ok) return { ok: false, reason: `snapshot download failed (${res.status})` }
   let payload: SnapshotPayloadV1
-  try {
-    payload = JSON.parse(gunzipSync(buf).toString('utf-8')) as SnapshotPayloadV1
-  } catch {
-    return { ok: false, reason: 'snapshot payload invalid' }
-  }
-  step('parse', { kv: payload.kv?.length, blobs: payload.blobs?.length, accounts: payload.accounts?.length })
-  if (payload?.kind !== 'v5-snapshot' || payload?.v !== 1 || !Array.isArray(payload.kv)) {
-    return { ok: false, reason: 'snapshot payload unrecognized' }
+  if (preloaded) {
+    payload = preloaded
+  } else {
+    const dl = await getFileDownloadUrl(pointer.f)
+    step('getFile', { ok: !!dl })
+    if (!dl) return { ok: false, reason: 'getFile failed' }
+    const res = await fetch(dl.url, { signal: AbortSignal.timeout(20_000) })
+    const buf = Buffer.from(await res.arrayBuffer())
+    step('download', { bytes: buf.length, status: res.status })
+    if (!res.ok) return { ok: false, reason: `snapshot download failed (${res.status})` }
+    try {
+      payload = JSON.parse(gunzipSync(buf).toString('utf-8')) as SnapshotPayloadV1
+    } catch {
+      return { ok: false, reason: 'snapshot payload invalid' }
+    }
   }
 
   const db = await v5db()
