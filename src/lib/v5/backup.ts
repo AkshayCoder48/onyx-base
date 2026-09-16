@@ -1230,21 +1230,62 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
 
   let appliedAccounts = 0
   if (Array.isArray(payload.accounts) && payload.accounts.length) {
-    const stmts = payload.accounts.map(
-      (a) =>
-        // INSERT OR IGNORE (not ON CONFLICT(id)): in the rare split-brain
-        // window two instances may create different ids for the same email —
-        // ORDER BY created_at ASC makes the EARLIEST (original) win on the
-        // email_lower unique index instead of aborting the whole batch.
-        `INSERT OR IGNORE INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, idem_register, created_at, updated_at) VALUES (` +
-        `'${sqlEscape(a.id)}', '${sqlEscape(a.owner_key)}', '${sqlEscape(a.api_key_hash)}', ${a.email === null ? 'NULL' : `'${sqlEscape(a.email)}'`}, ` +
-        `${a.email_lower === null ? 'NULL' : `'${sqlEscape(a.email_lower)}'`}, ${a.password_hash === null ? 'NULL' : `'${sqlEscape(a.password_hash)}'`}, ` +
-        `${a.name === null ? 'NULL' : `'${sqlEscape(a.name)}'`}, '${sqlEscape(a.role)}', ${a.idem_register === null ? 'NULL' : `'${sqlEscape(a.idem_register)}'`}, ` +
-        `${a.created_at}, ${a.updated_at})`,
-    )
-    for (let i = 0; i < stmts.length; i += BATCH) {
-      const r = await db.batch(stmts.slice(i, i + BATCH).map((s) => ({ sql: s, args: [] })), 'write')
-      appliedAccounts += r.filter((x) => Number(x.rowsAffected ?? 0) > 0).length
+    // CONDITIONAL UPSERT (newer wins) — the old INSERT OR IGNORE never
+    // UPDATED an existing row, so password/role changes made on another
+    // instance NEVER propagated to instances that already held the row
+    // (post-reset logins 401'd forever on warm instances).
+    // Row matching: same id, same owner (key rows), or same email_lower
+    // (split-brain: two instances mint different ids for one email — the
+    // NEWER row wins either way). Accounts are few (tens), so per-row
+    // two-step is fine.
+    for (const a of payload.accounts) {
+      if (!a || typeof a.id !== 'string') continue
+      const upd = await db
+        .execute({
+          sql: `UPDATE v5_accounts SET api_key_hash = ?, email = ?, email_lower = ?, password_hash = ?, name = ?, role = ?, idem_register = ?, updated_at = ?
+                WHERE (id = ? OR owner_key = ? OR (email_lower IS NOT NULL AND email_lower = ?)) AND updated_at <= ?`,
+          args: [
+            String(a.api_key_hash ?? ''),
+            a.email ?? null,
+            a.email_lower ?? null,
+            a.password_hash ?? null,
+            a.name ?? null,
+            String(a.role ?? 'user'),
+            a.idem_register ?? null,
+            Number(a.updated_at ?? 0),
+            String(a.id),
+            String(a.owner_key ?? a.id),
+            a.email_lower ?? null,
+            Number(a.updated_at ?? 0),
+          ],
+        })
+        .catch(() => undefined)
+      if (upd && Number(upd.rowsAffected ?? 0) > 0) {
+        appliedAccounts++
+        continue
+      }
+      // No older local row matched — insert (IGNORE survives split-brain
+      // unique collisions where the LOCAL row is NEWER).
+      const ins = await db
+        .execute({
+          sql: `INSERT OR IGNORE INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, idem_register, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          args: [
+            String(a.id),
+            String(a.owner_key ?? a.id),
+            String(a.api_key_hash ?? ''),
+            a.email ?? null,
+            a.email_lower ?? null,
+            a.password_hash ?? null,
+            a.name ?? null,
+            String(a.role ?? 'user'),
+            a.idem_register ?? null,
+            Number(a.created_at ?? 0),
+            Number(a.updated_at ?? 0),
+          ],
+        })
+        .catch(() => undefined)
+      if (ins && Number(ins.rowsAffected ?? 0) > 0) appliedAccounts++
     }
   }
 
