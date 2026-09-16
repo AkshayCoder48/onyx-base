@@ -16,7 +16,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { hashPassword, verifyPassword } from '@/lib/password'
 import { v5db, nowMs, num } from './db'
-import { ensureFreshness } from './sync'
+import { ensureFreshness, ensureFreshnessRetry } from './sync'
 import { queueAuthSnapshot } from './backup'
 
 const SALT = process.env.V5_KEY_SALT || 'onyxbase-v5-default-salt-change-me'
@@ -93,8 +93,10 @@ export async function v5AuthBearer(header: string | null): Promise<V5Account | n
   let rows = await lookup()
   if (rows.length === 0) {
     // Cross-instance freshness (file mode): this key may have been minted on
-    // another instance after this one booted. One rate-limited probe + retry.
-    await ensureFreshness()
+    // another instance after this one booted. Bounded retrying probe — a
+    // single probe races the async auth-snapshot upload (register/login on
+    // another instance ~1s ago), which made immediate next-logins 401.
+    await ensureFreshnessRetry()
     rows = await lookup()
   }
   if (rows.length === 0) return null
@@ -260,8 +262,10 @@ export async function v5Login(email: string, password: string): Promise<AccountR
   let rows = await lookup()
   if (rows.length === 0) {
     // Cross-instance freshness: the account may have been registered on
-    // another instance after this one booted. Probe + retry before failing.
-    await ensureFreshness()
+    // another instance after this one booted. Bounded retrying probe (the
+    // register's auth snapshot uploads asynchronously — a single immediate
+    // probe can still see the pre-register pointer and wrongly 401).
+    await ensureFreshnessRetry()
     rows = await lookup()
   }
   if (rows.length === 0) {
@@ -270,10 +274,10 @@ export async function v5Login(email: string, password: string): Promise<AccountR
   const row = rows[0] as Record<string, unknown>
   if (!verifyPassword(password, row.password_hash as string | null)) {
     // Password mismatch — but this instance may be STALE (e.g. the password
-    // was just rotated on another instance). One FORCED freshness probe +
+    // was just rotated on another instance). Bounded retrying probe +
     // re-verify before failing (mirrors the not-found path; wrong-password
     // attempts are rare and rate-limited, so the forced probe is bounded).
-    await ensureFreshness({ force: true })
+    await ensureFreshnessRetry()
     const retry = await lookup()
     if (retry.length > 0) {
       const retryRow = retry[0] as Record<string, unknown>
@@ -340,6 +344,42 @@ export async function v5UpdatePassword(email: string, newPassword: string): Prom
   const result = await mintKeyFor(db, { ...row, password_hash: pwh })
   queueAuthSnapshot()
   return result
+}
+
+/**
+ * Delete a V5 account entirely (canonical row + every minted-key row).
+ * Master/admin-only service endpoint used by the RGE Hub's authenticated
+ * Delete Account flow. Returns the number of rows removed.
+ */
+export async function v5DeleteAccountByEmail(email: string): Promise<number> {
+  const db = await v5db()
+  const emailLower = email.trim().toLowerCase()
+  const canonical = (
+    await db.execute({
+      sql: `SELECT id FROM v5_accounts WHERE email_lower = ? LIMIT 1`,
+      args: [emailLower],
+    })
+  ).rows[0] as { id?: string } | undefined
+  const res = await db.batch(
+    [
+      {
+        sql: `DELETE FROM v5_accounts WHERE email_lower = ?`,
+        args: [emailLower],
+      },
+      ...(canonical?.id
+        ? [
+            {
+              sql: `DELETE FROM v5_accounts WHERE owner_key = ?`,
+              args: [canonical.id],
+            },
+          ]
+        : []),
+    ],
+    'write'
+  )
+  const removed = res.reduce((n, r) => n + Number(r?.rowsAffected ?? 0), 0)
+  if (removed > 0) queueAuthSnapshot()
+  return removed
 }
 
 export { num }

@@ -47,13 +47,21 @@ import {
 } from './backup'
 import { durable } from './durable'
 
-/** Background probe cadence while the instance is warm. */
-const PROBE_INTERVAL_MS = 20_000
+/**
+ * Background probe cadence (env-tunable). The always-on interval loop is
+ * now OPT-IN (V5_FRESHNESS_LOOP=true) and OFF by default: on Vercel Fluid
+ * Compute a repeating timer keeps every warm instance alive 24/7 and burns
+ * Fluid CPU Duration even with ZERO traffic — the exact usage spike we
+ * need to avoid. Convergence is carried by the on-demand paths (miss
+ * probes + read-path background probes), so an idle instance now costs
+ * NOTHING.
+ */
+const PROBE_INTERVAL_MS = Number(process.env.V5_PROBE_INTERVAL_MS) || 20_000
 /**
  * Minimum spacing between on-demand (miss-path) probes per instance —
  * bounds Telegram API load under miss bursts while keeping self-heal fast.
  */
-const FRESHNESS_MIN_INTERVAL_MS = 2_000
+const FRESHNESS_MIN_INTERVAL_MS = Number(process.env.V5_FRESHNESS_MIN_INTERVAL_MS) || 2_000
 
 export interface ProbeResult {
   probed: boolean
@@ -164,6 +172,25 @@ export async function ensureFreshness(opts: { force?: boolean } = {}): Promise<v
 }
 
 /**
+ * Freshness with bounded retries for AUTH writes racing the async snapshot
+ * upload: register/password-change on instance A queues an auth snapshot
+ * (upload takes ~1-2s); a login landing on instance B within that window
+ * probes, sees the OLD pointer, and would 401. Retry the probe a few times
+ * with short waits so the just-written account converges instead of failing.
+ * Bounded (default 3 attempts × 450ms) and used ONLY on auth miss paths —
+ * auth operations are rare, so this costs nothing under load.
+ */
+export async function ensureFreshnessRetry(
+  attempts = Number(process.env.V5_AUTH_MISS_RETRIES) || 3,
+  waitMs = 450,
+): Promise<void> {
+  for (let i = 0; i < Math.max(1, attempts); i++) {
+    await ensureFreshness({ force: true })
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, waitMs))
+  }
+}
+
+/**
  * Bounding STALE HITS (not just misses): an instance that already holds an
  * OLD value for a key would serve it forever — the miss probes never fire
  * because the lookup hits. Called from hot read paths (kvGet/kvPage); at
@@ -172,7 +199,7 @@ export async function ensureFreshness(opts: { force?: boolean } = {}): Promise<v
  * enough to finish the (possible) snapshot download+apply. The CURRENT
  * request may still serve data one snapshot behind; the next one converges.
  */
-const BACKGROUND_PROBE_MIN_INTERVAL_MS = 3_000
+const BACKGROUND_PROBE_MIN_INTERVAL_MS = Number(process.env.V5_BG_PROBE_MIN_INTERVAL_MS) || 3_000
 
 interface SyncBgGlobal {
   __v5SyncBgProbeAt?: number
@@ -188,11 +215,17 @@ export function maybeBackgroundProbe(): void {
 }
 
 /**
- * Background convergence loop (file mode only). Armed once per instance from
- * db init; the timer is unref'd so it never holds the event loop open.
+ * Background convergence loop (file mode only) — OPT-IN via
+ * V5_FRESHNESS_LOOP=true, OFF by default: a repeating timer keeps warm
+ * serverless instances alive forever and burns Fluid CPU Duration with
+ * zero traffic (every 20s tick = a Telegram API call = TLS + JSON CPU).
+ * The on-demand probe paths (miss probes + read-path background probes)
+ * carry convergence under real traffic, so the loop is only needed for
+ * exotic always-stale-read workloads.
  */
 export function startFreshnessLoop(): void {
   if (!syncActive()) return
+  if (process.env.V5_FRESHNESS_LOOP !== 'true') return
   const s = state()
   if (s.loopStarted) return
   s.loopStarted = true

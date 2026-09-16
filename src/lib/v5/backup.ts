@@ -43,8 +43,14 @@ export const V5_SNAPSHOT_ACCOUNT = '__v5s__'
 /** Bot-bio marker for the fallback snapshot pointer (setMyDescription). */
 const BIO_MARKER = 'ONYXBASE_V5_SNAPSHOT'
 
-/** Upload a fresh snapshot after this many mirrored writes (queue idle). */
-const SNAPSHOT_EVERY_WRITES = 10
+/**
+ * Upload a fresh snapshot after this many mirrored writes (queue idle).
+ * Env-tunable: full-state snapshots gzip the ENTIRE database (MBs of CPU);
+ * the KB-sized kv-delta fast channel carries recent writes between them, so
+ * production can raise this (e.g. 100) to cut snapshot CPU ~10x while the
+ * delta channel keeps cross-instance convergence at ~1-2s.
+ */
+const SNAPSHOT_EVERY_WRITES = Number(process.env.V5_SNAPSHOT_EVERY_WRITES) || 10
 
 /** Minimum spacing between idle-cadence snapshots (convergence vs API load). */
 const SNAPSHOT_MIN_INTERVAL_MS = 15_000

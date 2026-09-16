@@ -5,7 +5,7 @@
  */
 import { NextRequest } from 'next/server'
 import { withV5Handler, V5Error } from '@/lib/v5/handler'
-import { v5Register } from '@/lib/v5/auth'
+import { v5Register, v5DeleteAccountByEmail } from '@/lib/v5/auth'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -62,5 +62,30 @@ export const POST = withV5Handler({
       if (code === 'PAYLOAD_TOO_LARGE') throw new V5Error('VALIDATION_ERROR', String((err as Error).message), 400)
       throw err
     }
+  },
+})
+
+/**
+ * DELETE /api/v5/accounts?email=… — service endpoint for the RGE Hub's
+ * authenticated Delete Account flow (the Hub calls it with its MASTER key
+ * after verifying the user's session + re-authentication).
+ *
+ * Removes the canonical account row + every minted-key row. The Hub deletes
+ * the user's kv data / blobs / profiles separately under its own master
+ * account. Idempotent: deleting a nonexistent email returns removed=0.
+ */
+export const DELETE = withV5Handler({
+  operation: 'accounts.delete',
+  auth: 'bearer',
+  handler: async (req: NextRequest, ctx) => {
+    if (!ctx.user || ctx.user.role !== 'admin') {
+      throw new V5Error('AUTH_REQUIRED', 'Admin access required.', 401)
+    }
+    const email = (req.nextUrl.searchParams.get('email') || '').trim()
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new V5Error('VALIDATION_ERROR', 'A valid email address is required.', 400)
+    }
+    const removed = await v5DeleteAccountByEmail(email)
+    return ctx.ok({ email, removed })
   },
 })

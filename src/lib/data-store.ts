@@ -708,6 +708,16 @@ export function findUserByDbId(dbUserId: string): UserRecord | undefined {
   return store.users.find((u) => u.id === dbUserId)
 }
 
+/** Read-only snapshot of all V4 user records (used by the V4→V5 account migration). */
+export function allUsersSnapshot(): UserRecord[] {
+  return store.users.map((u) => ({ ...u }))
+}
+
+/** Read-only snapshot of all non-revoked V4 API keys (migration seed data). */
+export function allApiKeysSnapshot(): ApiKeyRecord[] {
+  return store.apiKeys.filter((k) => !k.revoked).map((k) => ({ ...k }))
+}
+
 export function findUserByPublicId(userId: string): UserRecord | undefined {
   return store.users.find((u) => u.userId === userId)
 }
