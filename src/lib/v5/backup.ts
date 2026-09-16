@@ -430,17 +430,24 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
         enc.write(`{"v":1,"kind":"v5-snapshot","ts":${ts},"kv":[`)
         for (let i = 0; i < kvCount; i++) {
           const r = kvRows.rows[i]
+          // TOMBSTONE DIET: deleted rows keep only identity + timestamps —
+          // the VALUE is dead weight (17.5MB of purged e2e/debris values
+          // made every snapshot ~13MB, hammering Telegram + cold-boot
+          // restores + Fluid CPU). The apply path only needs (o,c,k,ua,d)
+          // to propagate a soft delete; writing '' shrinks the value column
+          // on applying instances too.
+          const isTomb = r.deleted_at !== null && r.deleted_at !== undefined
           enc.write(
             (i > 0 ? ',' : '') +
               JSON.stringify({
                 o: String(r.owner),
                 c: String(r.collection),
                 k: String(r.key),
-                v: String(r.value),
-                s: Number(r.size ?? 0),
+                v: isTomb ? '' : String(r.value),
+                s: isTomb ? 0 : Number(r.size ?? 0),
                 ca: Number(r.created_at ?? 0),
                 ua: Number(r.updated_at ?? 0),
-                d: r.deleted_at === null ? null : Number(r.deleted_at),
+                d: isTomb ? Number(r.deleted_at) : null,
               }),
           )
         }
@@ -905,15 +912,18 @@ export async function uploadKvDelta(reason: 'kv-write' | 'manual'): Promise<{ ok
     const rows: KvDeltaPayloadV1['kv'] = []
     let bytes = 0
     for (const r of rs.rows) {
+      // TOMBSTONE DIET (same as full snapshots): a soft-deleted row carries
+      // identity + timestamps only — never the dead value.
+      const isTomb = r.deleted_at !== null && r.deleted_at !== undefined
       const row = {
         o: String(r.owner),
         c: String(r.collection),
         k: String(r.key),
-        v: String(r.value),
-        s: Number(r.size ?? 0),
+        v: isTomb ? '' : String(r.value),
+        s: isTomb ? 0 : Number(r.size ?? 0),
         ca: Number(r.created_at ?? 0),
         ua: Number(r.updated_at ?? 0),
-        d: r.deleted_at === null || r.deleted_at === undefined ? null : Number(r.deleted_at),
+        d: isTomb ? Number(r.deleted_at) : null,
       }
       const sz = row.v.length + row.k.length + row.o.length + row.c.length + 64
       if (bytes + sz > KV_DELTA_MAX_BYTES && rows.length > 0) break // bounded doc
@@ -1072,7 +1082,17 @@ export function queueAuthSnapshot(force = false): void {
   s.authSnapshotQueuedAt = now
   durable((async () => {
     try {
-      const res = await uploadV5Snapshot('auto')
+      let res = await uploadV5Snapshot('auto')
+      // ONE bounded retry — auth snapshots carry account existence; a lost
+      // one strands the account on this instance (next login elsewhere 401s).
+      if (
+        !res.ok &&
+        res.reason !== 'snapshot-in-progress' &&
+        res.reason !== 'backup-not-configured'
+      ) {
+        await new Promise((r) => setTimeout(r, 1500))
+        res = await uploadV5Snapshot('auto')
+      }
       if (!res.ok && res.reason !== 'snapshot-in-progress' && res.reason !== 'backup-not-configured') {
         console.warn(
           JSON.stringify({ t: new Date().toISOString(), operation: 'v5.backup.auth-snapshot', level: 'warn', reason: res.reason }),
