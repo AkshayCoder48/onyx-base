@@ -28,7 +28,11 @@ export const POST = withV5Handler({
   auth: 'none',
   handler: async (req: NextRequest, ctx) => {
     const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'unknown'
-    if (rateLimited(ip, 20)) {
+    // 60/min per instance: the RGE Hub proxies ALL its users' logins through
+    // its own egress IPs, so a low per-IP cap collectively punishes real
+    // users. The Hub applies its own per-user rate limits; this cap only
+    // needs to stop raw floods.
+    if (rateLimited(ip, 60)) {
       throw new V5Error('RATE_LIMITED', 'Too many login attempts — wait a minute.', 429)
     }
     const body = (await req.json().catch(() => null)) as { email?: string; password?: string } | null
