@@ -412,6 +412,47 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
       )
       return { ok: false, reason: `monotonicity-guard: ${guardAbort}` }
     }
+
+    // WRITE-LIVENESS CANARY: a write-locked instance (stuck SQLite
+    // transaction — e.g. a serverless freeze mid-batch) silently fails to
+    // APPLY newer snapshots (the accounts loop's per-row catches eat
+    // SQLITE_BUSY), yet reports itself converged; its upload would pin a
+    // REGRESSING snapshot and strand every row it never applied, fleet-wide
+    // (accounts vanish from the shared truth while profiles survive →
+    // "Invalid email or password" for users who registered fine). Prove
+    // the local store accepts writes AND reads them back before trusting
+    // it as the source of a shared pin.
+    try {
+      const canaryAt = Date.now()
+      const db = await v5db()
+      await db.batch(
+        [
+          {
+            sql: `INSERT INTO v5_kv (owner, collection, key, value, size, created_at, updated_at, deleted_at)
+                  VALUES ('master', 'v5_health', 'upload-canary', '1', 1, ?, ?, NULL)
+                  ON CONFLICT(owner, collection, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at, deleted_at = NULL`,
+            args: [canaryAt, canaryAt],
+          },
+        ],
+        'write',
+      )
+      const back = await db.execute({
+        sql: `SELECT value FROM v5_kv WHERE owner = 'master' AND collection = 'v5_health' AND key = 'upload-canary' AND deleted_at IS NULL`,
+        args: [],
+      })
+      if (back.rows.length === 0) throw new Error('canary read-back missed')
+    } catch (err) {
+      const reason = `write-canary-failed: ${err instanceof Error ? err.message : String(err)}`
+      console.warn(
+        JSON.stringify({
+          t: new Date().toISOString(),
+          operation: 'v5.backup.upload-aborted',
+          level: 'warn',
+          reason,
+        }),
+      )
+      return { ok: false, reason: `monotonicity-guard: ${reason}` }
+    }
     const db = await v5db()
     const kvRows = await db.execute(
       'SELECT owner, collection, key, value, size, created_at, updated_at, deleted_at FROM v5_kv',
@@ -1292,6 +1333,7 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
   }
 
   let appliedAccounts = 0
+  let accountApplyFailures = 0
   if (Array.isArray(payload.accounts) && payload.accounts.length) {
     // CONDITIONAL UPSERT (newer wins) — the old INSERT OR IGNORE never
     // UPDATED an existing row, so password/role changes made on another
@@ -1322,7 +1364,13 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
             Number(a.updated_at ?? 0),
           ],
         })
-        .catch(() => undefined)
+        .catch(() => {
+          // HONEST APPLY ACCOUNTING: a swallowed SQLITE_BUSY here made the
+          // restore report success while the row never landed — the store
+          // looked converged and its next upload regressed the fleet.
+          accountApplyFailures++
+          return undefined
+        })
       if (upd && Number(upd.rowsAffected ?? 0) > 0) {
         appliedAccounts++
         continue
@@ -1347,7 +1395,10 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
             Number(a.updated_at ?? 0),
           ],
         })
-        .catch(() => undefined)
+        .catch(() => {
+          accountApplyFailures++
+          return undefined
+        })
       if (ins && Number(ins.rowsAffected ?? 0) > 0) appliedAccounts++
     }
   }
@@ -1416,6 +1467,18 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
       } catch {
         /* best-effort per blob */
       }
+    }
+  }
+
+  // Apply-failure gate: if any account row failed to apply (lock, disk,
+  // corruption), this store is NOT a faithful superset of the snapshot —
+  // refuse to mark it applied so (a) the next probe re-applies and (b) the
+  // upload-time monotonicity guard sees an honest, stale lastAppliedTs.
+  if (accountApplyFailures > 0) {
+    return {
+      ok: false,
+      reason: `accounts-apply-failed (${accountApplyFailures} rows)`,
+      via,
     }
   }
 
