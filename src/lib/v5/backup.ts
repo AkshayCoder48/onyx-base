@@ -1374,11 +1374,18 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
             Number(a.updated_at ?? 0),
           ],
         })
-        .catch(() => {
+        .catch((err: unknown) => {
           // HONEST APPLY ACCOUNTING: a swallowed SQLITE_BUSY here made the
           // restore report success while the row never landed — the store
           // looked converged and its next upload regressed the fleet.
-          accountApplyFailures++
+          // UNIQUE violations are BENIGN here (the local copy of this row
+          // already diverged — e.g. a duplicate api_key_hash from the old
+          // owner_key-corruption era): counting them as fatal made the
+          // restore fail on production's dirty data, which aborted the
+          // register's own sync publish at the monotonicity guard and
+          // stranded brand-new accounts on their birth instance.
+          const msg = err instanceof Error ? err.message : String(err)
+          if (!/UNIQUE constraint failed/i.test(msg)) accountApplyFailures++
           return undefined
         })
       if (upd && Number(upd.rowsAffected ?? 0) > 0) {
@@ -1405,8 +1412,9 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
             Number(a.updated_at ?? 0),
           ],
         })
-        .catch(() => {
-          accountApplyFailures++
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (!/UNIQUE constraint failed/i.test(msg)) accountApplyFailures++
           return undefined
         })
       if (ins && Number(ins.rowsAffected ?? 0) > 0) appliedAccounts++

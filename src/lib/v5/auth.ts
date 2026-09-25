@@ -286,7 +286,16 @@ export async function v5Register(opts: {
   // window BEFORE the 201 response ships. Telegram hiccups fall back to
   // the forced async queue; the local row stays committed either way.
   try {
-    const published = await uploadV5Snapshot('manual')
+    let published = await uploadV5Snapshot('manual')
+    if (!published.ok) {
+      // One bounded retry — guard aborts (a newer pointer that failed to
+      // apply on the first probe) are frequently transient: another
+      // instance's pin raced us, the re-probe applies it cleanly and the
+      // retry publishes. Without the retry, a single race strands the
+      // brand-new account on this instance.
+      await new Promise((r) => setTimeout(r, 1200))
+      published = await uploadV5Snapshot('manual')
+    }
     if (!published.ok) queueAuthSnapshot(true)
   } catch {
     queueAuthSnapshot(true)
