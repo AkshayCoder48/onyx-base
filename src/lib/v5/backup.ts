@@ -1114,14 +1114,15 @@ export function queueAuthSnapshot(force = false): void {
   durable((async () => {
     try {
       let res = await uploadV5Snapshot('auto')
-      // ONE bounded retry — auth snapshots carry account existence; a lost
-      // one strands the account on this instance (next login elsewhere 401s).
-      if (
-        !res.ok &&
-        res.reason !== 'snapshot-in-progress' &&
-        res.reason !== 'backup-not-configured'
-      ) {
-        await new Promise((r) => setTimeout(r, 1500))
+      // BOUNDED RETRIES — auth snapshots carry account existence; a lost
+      // one strands the account (or freshly minted key row) on this
+      // instance (next login/whoami elsewhere 401s). Two extra attempts
+      // with growing waits ride out Telegram 429 flood windows while
+      // staying inside the serverless post-response budget.
+      const waits = [1500, 4000]
+      for (const w of waits) {
+        if (res.ok || res.reason === 'snapshot-in-progress' || res.reason === 'backup-not-configured') break
+        await new Promise((r) => setTimeout(r, w))
         res = await uploadV5Snapshot('auto')
       }
       if (!res.ok && res.reason !== 'snapshot-in-progress' && res.reason !== 'backup-not-configured') {

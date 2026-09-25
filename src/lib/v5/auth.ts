@@ -241,11 +241,22 @@ export async function v5Register(opts: {
     }
     throw err
   }
-  // Advance the shared snapshot so other instances see this account within
-  // ~1-2s (cross-instance login / bearer resolution). FORCED: a dropped
-  // snapshot (per-instance 5s spacing) strands the new account here and the
-  // next login elsewhere honestly 401s.
-  queueAuthSnapshot(true)
+  // SYNCHRONOUS publication (same rationale as v5UpdatePassword): until a
+  // snapshot carrying this account is PINNED, the row exists ONLY on this
+  // instance. The old fire-and-forget queue (durable, one retry) could lose
+  // the race against ANOTHER instance's upload — that snapshot (without
+  // this account) becomes the pinned truth, this instance's own upload
+  // then fails or never lands, and the account strands forever: password
+  // logins everywhere else honestly 401 ("Invalid email or password" for
+  // a user who just registered fine). Awaiting the publish closes the
+  // window BEFORE the 201 response ships. Telegram hiccups fall back to
+  // the forced async queue; the local row stays committed either way.
+  try {
+    const published = await uploadV5Snapshot('manual')
+    if (!published.ok) queueAuthSnapshot(true)
+  } catch {
+    queueAuthSnapshot(true)
+  }
   return { userId: id, apiKey, name: opts.name.trim(), email: opts.email.trim() }
 }
 
@@ -451,7 +462,18 @@ export async function v5DeleteAccountByEmail(email: string): Promise<number> {
     'write'
   )
   const removed = res.reduce((n, r) => n + Number(r?.rowsAffected ?? 0), 0)
-  if (removed > 0) queueAuthSnapshot(true)
+  if (removed > 0) {
+    // SYNCHRONOUS publication: the deletion (and its accountsDel tombstone)
+    // must reach the shared pointer before the response ships, or a warm
+    // instance that never saw it resurrects the account on its next upload
+    // and the "deleted" user can log back in.
+    try {
+      const published = await uploadV5Snapshot('manual')
+      if (!published.ok) queueAuthSnapshot(true)
+    } catch {
+      queueAuthSnapshot(true)
+    }
+  }
   return removed
 }
 
