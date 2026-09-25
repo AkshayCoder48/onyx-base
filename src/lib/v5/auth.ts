@@ -367,25 +367,22 @@ export async function v5UpdatePassword(
   } else {
     // No row anywhere this instance can prove — RESURRECT the canonical
     // account with the user's new password (ownership proven by the
-    // caller's OTP flow). api_key_hash stays NULL on the canonical row;
-    // the minted key row below carries the working key.
+    // caller's OTP flow). Same row shape as v5Register: the canonical row
+    // carries the hash of the ONE minted key (api_key_hash is NOT NULL),
+    // and that key is returned directly — no separate key row needed.
     const accountId = `usr_${randomUUID().replace(/-/g, '').slice(0, 10)}`
+    const apiKey = mintApiKey()
     await db.batch(
       [
         {
           sql: `INSERT INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, created_at, updated_at)
-                VALUES (?, ?, NULL, ?, ?, ?, ?, 'user', ?, ?)`,
-          args: [accountId, accountId, email.trim(), emailLower, pwh, fallbackName, now, now],
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'user', ?, ?)`,
+          args: [accountId, accountId, keyHash(apiKey), email.trim(), emailLower, pwh, fallbackName, now, now],
         },
       ],
       'write'
     )
-    result = await mintKeyFor(db, {
-      id: accountId,
-      email: email.trim(),
-      name: fallbackName,
-      password_hash: pwh,
-    })
+    result = { userId: accountId, apiKey, name: fallbackName, email: email.trim() }
     console.warn(
       JSON.stringify({
         t: new Date().toISOString(),
