@@ -220,8 +220,12 @@ export interface SnapshotPointer {
 async function botApi(method: string, body: Record<string, unknown>): Promise<{ ok: boolean; result?: unknown; description?: string }> {
   const token = process.env.TELEGRAM_BOT_TOKEN || ''
   if (!token) return { ok: false, description: 'no bot token' }
+  // Honor the local Bot API override (self-hosted telegram-bot-api servers
+  // for >50MB docs) — this bio-pointer channel was pinned to the cloud URL
+  // while the rest of the Telegram surface already supports the override.
+  const apiBase = (process.env.TELEGRAM_BOT_API_URL || '').trim().replace(/\/+$/, '') || 'https://api.telegram.org'
   try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    const res = await fetch(`${apiBase}/bot${token}/${method}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -1345,10 +1349,17 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
     // two-step is fine.
     for (const a of payload.accounts) {
       if (!a || typeof a.id !== 'string') continue
+      // ROW MATCHING: exact id, or (for canonical rows) email_lower for
+      // split-brain duplicate ids. NEVER owner_key — login-minted KEY rows
+      // share owner_key with the canonical row, and matching them let a
+      // newer key row OVERWRITE the canonical row (email_lower → NULL,
+      // api_key_hash → the login key's): the account's email login then
+      // 401'd fleet-wide ("Invalid email or password" for a user who
+      // registered fine). Key rows apply by their own id only.
       const upd = await db
         .execute({
           sql: `UPDATE v5_accounts SET api_key_hash = ?, email = ?, email_lower = ?, password_hash = ?, name = ?, role = ?, idem_register = ?, updated_at = ?
-                WHERE (id = ? OR owner_key = ? OR (email_lower IS NOT NULL AND email_lower = ?)) AND updated_at <= ?`,
+                WHERE (id = ? OR (email_lower IS NOT NULL AND email_lower = ?)) AND updated_at <= ?`,
           args: [
             String(a.api_key_hash ?? ''),
             a.email ?? null,
@@ -1359,7 +1370,6 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
             a.idem_register ?? null,
             Number(a.updated_at ?? 0),
             String(a.id),
-            String(a.owner_key ?? a.id),
             a.email_lower ?? null,
             Number(a.updated_at ?? 0),
           ],
@@ -1480,6 +1490,20 @@ export async function restoreV5FromTelegram(opts?: { fileId?: string }): Promise
       reason: `accounts-apply-failed (${accountApplyFailures} rows)`,
       via,
     }
+  }
+
+  // CANONICAL-ROW HEAL: rows corrupted by the pre-fix owner_key-matching
+  // apply (login key rows overwrote canonical rows, nulling email_lower)
+  // arrive in every snapshot until every fleet instance has healed them.
+  // Rebuild email_lower from the surviving email column on canonical rows
+  // (id = owner_key) so the corruption dies out instead of propagating.
+  try {
+    await db.execute({
+      sql: `UPDATE v5_accounts SET email_lower = LOWER(email) WHERE id = owner_key AND email IS NOT NULL AND email_lower IS NULL`,
+      args: [],
+    })
+  } catch {
+    /* heal is best-effort — the login-path self-heal also covers it */
   }
 
   // Rebuild the maintained live counters from the applied table state —

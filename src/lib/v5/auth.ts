@@ -20,6 +20,16 @@ import { ensureFreshness, ensureFreshnessRetry } from './sync'
 import { queueAuthSnapshot, uploadV5Snapshot } from './backup'
 
 const SALT = process.env.V5_KEY_SALT || 'onyxbase-v5-default-salt-change-me'
+const DEFAULT_SALT = 'onyxbase-v5-default-salt-change-me'
+// Dual-salt LOOKUPS (writes always hash with the current SALT): a fleet-wide
+// V5_KEY_SALT change (env edit between deployments) instantly invalidated
+// every key row minted under the other salt — users registered fine and
+// email+password login worked (scrypt, not salted by V5_KEY_SALT), but every
+// key-hash lookup (whoami / bearer auth) 401'd on the mismatched half of a
+// mixed-deployment fleet, stranding sessions and API keys. Accepting BOTH
+// the current salt and the historical default on lookups heals both
+// directions during any transition; re-minted keys converge naturally.
+const LOOKUP_SALTS: string[] = Array.from(new Set([SALT, DEFAULT_SALT]))
 
 export interface V5Account {
   id: string
@@ -29,8 +39,12 @@ export interface V5Account {
   role: 'user' | 'admin'
 }
 
+function keyHashWith(apiKey: string, salt: string): string {
+  return createHash('sha256').update(apiKey.trim() + salt).digest('hex')
+}
+
 function keyHash(apiKey: string): string {
-  return createHash('sha256').update(apiKey.trim() + SALT).digest('hex')
+  return keyHashWith(apiKey, SALT)
 }
 
 export function mintApiKey(): string {
@@ -53,15 +67,33 @@ export async function ensureSeeded(): Promise<void> {
   if (boot.length > 8) rows.push({ owner: 'admin', role: 'admin', key: boot })
   if (rows.length > 0) {
     const db = await v5db()
-    await db.batch(
-      rows.map((r) => ({
-        sql: `INSERT INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, created_at, updated_at)
-              VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)
-              ON CONFLICT(api_key_hash) DO NOTHING`,
-        args: [`${r.role}_${keyHash(r.key).slice(0, 16)}`, r.owner, keyHash(r.key), r.role, r.role, now, now],
-      })),
-      'write'
-    )
+    // SEED UPSERT, DEFENSIVE: the pre-fix snapshot apply let another
+    // instance's master/admin row (same owner_key, salt-derived different
+    // id) overwrite THIS row's api_key_hash in place — after which the seed
+    // INSERT hit UNIQUE(id) (its ON CONFLICT targeted api_key_hash only) and
+    // took down every auth request on the instance with a 503. Upsert by id:
+    // insert when absent, HEAL the hash when present, never throw (seeding
+    // is best-effort; a conflict on the api_key_hash unique index just logs).
+    try {
+      await db.batch(
+        rows.map((r) => ({
+          sql: `INSERT INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, created_at, updated_at)
+                VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET api_key_hash = excluded.api_key_hash, updated_at = excluded.updated_at`,
+          args: [`${r.role}_${keyHash(r.key).slice(0, 16)}`, r.owner, keyHash(r.key), r.role, r.role, now, now],
+        })),
+        'write'
+      )
+    } catch (err) {
+      console.warn(
+        JSON.stringify({
+          t: new Date().toISOString(),
+          operation: 'v5.auth.seed',
+          level: 'warn',
+          error: err instanceof Error ? err.message.slice(0, 200) : String(err),
+        }),
+      )
+    }
   }
   seeded = true
 }
@@ -83,11 +115,13 @@ export async function v5AuthBearer(header: string | null): Promise<V5Account | n
   if (!apiKey) return null
   await ensureSeeded()
   const db = await v5db()
+  // Dual-salt: the stored hash may come from the current SALT or the
+  // historical default (fleet transition) — match either.
   const lookup = async () =>
     (
       await db.execute({
-        sql: `SELECT owner_key, email, name, role FROM v5_accounts WHERE api_key_hash = ? LIMIT 1`,
-        args: [keyHash(apiKey)],
+        sql: `SELECT owner_key, email, name, role FROM v5_accounts WHERE api_key_hash IN (${LOOKUP_SALTS.map(() => '?').join(',')}) LIMIT 1`,
+        args: LOOKUP_SALTS.map((s) => keyHashWith(apiKey, s)),
       })
     ).rows
   let rows = await lookup()
@@ -284,6 +318,25 @@ export async function v5Login(email: string, password: string): Promise<AccountR
     // probe can still see the pre-register pointer and wrongly 401).
     await ensureFreshnessRetry()
     rows = await lookup()
+  }
+  if (rows.length === 0) {
+    // CORRUPTION SELF-HEAL: the pre-fix snapshot apply let login-minted
+    // key rows overwrite canonical rows (owner_key match), nulling
+    // email_lower — the account's email login then 401'd everywhere. The
+    // email column SURVIVES on the canonical row: repair email_lower and
+    // retry the lookup before concluding invalid credentials. The healed
+    // row rides this login's auth snapshot — the repair spreads fleet-wide.
+    try {
+      const healed = await db.execute({
+        sql: `UPDATE v5_accounts SET email_lower = ? WHERE email = ? COLLATE NOCASE AND id = owner_key AND email_lower IS NULL`,
+        args: [emailLower, email.trim()],
+      })
+      if (Number(healed.rowsAffected ?? 0) > 0) {
+        rows = await lookup()
+      }
+    } catch {
+      /* best-effort heal */
+    }
   }
   if (rows.length === 0) {
     throw Object.assign(new Error('Invalid email or password.'), { code: 'AUTH_INVALID_CREDENTIALS' })
