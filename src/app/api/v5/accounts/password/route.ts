@@ -7,8 +7,13 @@
  * signed resetToken — the user-facing proof lives in the Hub, this route is
  * the privileged write primitive.
  *
- * Body: { email, password }
+ * Body: { email, password, name? }
  * 200 { ok, data: { userId, apiKey, name, email } } — fresh key, same account.
+ *
+ * `name` (optional) seeds the account name when this update must RESURRECT
+ * a stranded account row (row missing instance-wide — the Hub passes the
+ * user's displayName from their profile). For an existing row the name is
+ * left untouched.
  */
 import { NextRequest } from 'next/server'
 import { withV5Handler, V5Error } from '@/lib/v5/handler'
@@ -30,9 +35,11 @@ export const POST = withV5Handler({
     const body = (await req.json().catch(() => null)) as {
       email?: string
       password?: string
+      name?: string
     } | null
     const email = typeof body?.email === 'string' ? body.email.trim() : ''
     const password = typeof body?.password === 'string' ? body.password : ''
+    const name = typeof body?.name === 'string' ? body.name.trim().slice(0, 120) : ''
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       throw new V5Error('VALIDATION_ERROR', 'A valid email address is required.', 400)
     }
@@ -40,7 +47,7 @@ export const POST = withV5Handler({
       throw new V5Error('VALIDATION_ERROR', 'Password must be at least 6 characters.', 400)
     }
     try {
-      const account = await v5UpdatePassword(email, password)
+      const account = await v5UpdatePassword(email, password, name || undefined)
       return ctx.ok(account)
     } catch (err) {
       const code = (err as { code?: string }).code

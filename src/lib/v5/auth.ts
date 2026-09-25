@@ -254,10 +254,14 @@ export async function v5Login(email: string, password: string): Promise<AccountR
   await ensureSeeded()
   const db = await v5db()
   const emailLower = email.toLowerCase().trim()
+  // ORDER BY created_at ASC: split-brain can leave TWO rows for one email
+  // (an original id + a resurrected/newer id). The OLDEST row is the
+  // original registration id — the one hub profiles are keyed by — so it
+  // must win deterministically on every instance, never LIMIT-1 roulette.
   const lookup = async () =>
     (
       await db.execute({
-        sql: `SELECT id, password_hash, name, email FROM v5_accounts WHERE email_lower = ? LIMIT 1`,
+        sql: `SELECT id, password_hash, name, email FROM v5_accounts WHERE email_lower = ? ORDER BY created_at ASC LIMIT 1`,
         args: [emailLower],
       })
     ).rows
@@ -304,46 +308,93 @@ export async function v5Login(email: string, password: string): Promise<AccountR
  * minted-key row of the same account (their password_hash is a vestigial
  * copy — kept consistent), then mints a fresh api key (same semantics as
  * login) and advances the shared snapshot so every instance converges.
+ *
+ * STRANDED-ACCOUNT RESURRECTION: the account row can be missing from this
+ * instance AND from the shared snapshot while the user provably exists
+ * (they are resetting an OTP-verified email that registered fine — the row
+ * was stranded by a regressed snapshot upload). Because the caller has
+ * already verified email ownership (signed resetToken flow in the Hub),
+ * a missing row is RE-CREATED here with the user's new password instead of
+ * dead-ending with NOT_FOUND. Split-brain duplicates (an older row still
+ * alive on a warm instance) converge via the snapshot apply's email_lower
+ * newer-wins merge, and login's ORDER BY created_at ASC keeps the original
+ * id winning wherever both rows exist — hub profile keys stay stable.
  */
-export async function v5UpdatePassword(email: string, newPassword: string): Promise<AccountResult> {
+export async function v5UpdatePassword(
+  email: string,
+  newPassword: string,
+  nameHint?: string
+): Promise<AccountResult> {
   await ensureSeeded()
   const db = await v5db()
   const emailLower = email.toLowerCase().trim()
   const lookup = async () =>
     (
       await db.execute({
-        sql: `SELECT id, password_hash, name, email FROM v5_accounts WHERE email_lower = ? LIMIT 1`,
+        sql: `SELECT id, password_hash, name, email FROM v5_accounts WHERE email_lower = ? ORDER BY created_at ASC LIMIT 1`,
         args: [emailLower],
       })
     ).rows
   let rows = await lookup()
   if (rows.length === 0) {
     // Cross-instance freshness before a "no account" verdict (file mode).
-    // FORCED: a just-registered account may not have converged to this
-    // instance yet, and password resets run seconds after registration.
-    await ensureFreshness({ force: true })
+    // BOUNDED RETRYING probe (same as login): a just-registered account may
+    // not have converged to this instance yet, and password resets can run
+    // seconds after registration.
+    await ensureFreshnessRetry()
     rows = await lookup()
   }
-  if (rows.length === 0) {
-    throw Object.assign(new Error('No account exists with this email address.'), { code: 'NOT_FOUND' })
-  }
-  const row = rows[0] as Record<string, unknown>
-  const accountId = String(row.id)
+  const fallbackName = (nameHint && nameHint.trim()) || email.split('@')[0]
   const pwh = hashPassword(newPassword)
   const now = nowMs()
-  // Canonical row + all minted-key rows of this account (owner_key = id).
-  await db.batch(
-    [
-      {
-        sql: `UPDATE v5_accounts SET password_hash = ?, updated_at = ? WHERE id = ? OR owner_key = ?`,
-        args: [pwh, now, accountId, accountId],
-      },
-    ],
-    'write'
-  )
-  // mintKeyFor copies password_hash into the new key row — hand it the
-  // UPDATED hash, not the pre-update snapshot from `row`.
-  const result = await mintKeyFor(db, { ...row, password_hash: pwh })
+  let result: AccountResult
+  if (rows.length > 0) {
+    const row = rows[0] as Record<string, unknown>
+    const accountId = String(row.id)
+    // Canonical row + all minted-key rows of this account (owner_key = id).
+    await db.batch(
+      [
+        {
+          sql: `UPDATE v5_accounts SET password_hash = ?, updated_at = ? WHERE id = ? OR owner_key = ?`,
+          args: [pwh, now, accountId, accountId],
+        },
+      ],
+      'write'
+    )
+    // mintKeyFor copies password_hash into the new key row — hand it the
+    // UPDATED hash, not the pre-update snapshot from `row`.
+    result = await mintKeyFor(db, { ...row, password_hash: pwh })
+  } else {
+    // No row anywhere this instance can prove — RESURRECT the canonical
+    // account with the user's new password (ownership proven by the
+    // caller's OTP flow). api_key_hash stays NULL on the canonical row;
+    // the minted key row below carries the working key.
+    const accountId = `usr_${randomUUID().replace(/-/g, '').slice(0, 10)}`
+    await db.batch(
+      [
+        {
+          sql: `INSERT INTO v5_accounts (id, owner_key, api_key_hash, email, email_lower, password_hash, name, role, created_at, updated_at)
+                VALUES (?, ?, NULL, ?, ?, ?, ?, 'user', ?, ?)`,
+          args: [accountId, accountId, email.trim(), emailLower, pwh, fallbackName, now, now],
+        },
+      ],
+      'write'
+    )
+    result = await mintKeyFor(db, {
+      id: accountId,
+      email: email.trim(),
+      name: fallbackName,
+      password_hash: pwh,
+    })
+    console.warn(
+      JSON.stringify({
+        t: new Date().toISOString(),
+        operation: 'v5.auth.password-reset-resurrected',
+        level: 'warn',
+        accountId,
+      }),
+    )
+  }
   // SYNCHRONOUS publication: a user who signs out right after resetting and
   // immediately signs back in must see the NEW password. The async queue
   // publishes in ~1-3s, but the login's bounded miss-retry can exhaust

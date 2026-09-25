@@ -372,14 +372,45 @@ export async function uploadV5Snapshot(reason: 'auto' | 'manual' | 'post-migrate
   }
   s.busy = true
   try {
-    // Monotonicity guard: apply any NEWER shared snapshot FIRST so this
-    // upload is a superset — a stale instance must never regress the shared
-    // pointer to a snapshot that misses another instance's writes.
+    // MANDATORY monotonicity guard: apply any NEWER shared snapshot FIRST so
+    // this upload is a superset — a stale instance must never regress the
+    // shared pointer to a snapshot that misses another instance's writes.
+    //
+    // The old guard was BEST-EFFORT (errors swallowed, result ignored): a
+    // stale instance whose probe or apply failed pinned its OWN state as the
+    // newest shared snapshot anyway. Rows that state was missing (accounts
+    // registered on other instances, KV rows delivered only via deltas)
+    // then stranded fleet-wide — cold boots restored the regressed snapshot
+    // and logins/whoami 401'd forever ("Invalid email or password" for a
+    // user who registered fine). Now: unless this instance can PROVE it is
+    // current with the shared pointer (probe readable + applied up to the
+    // pointer's ts), the upload ABORTS. Callers retry; the next upload from
+    // a provably-current instance carries the full merged state.
+    let guardAbort: string | null = null
     try {
       const { probeAndApplyIfNewer } = await import('./sync')
-      await probeAndApplyIfNewer()
-    } catch {
-      /* best-effort — proceed with what this instance has */
+      const probed = await probeAndApplyIfNewer()
+      if (probed.probed) {
+        if (probed.error) {
+          guardAbort = `pointer-probe-failed: ${probed.error}`
+        } else if ((probed.pointerTs ?? 0) > getLastAppliedSnapshotTs()) {
+          guardAbort = 'local-store-behind-shared-pointer'
+        }
+      }
+    } catch (err) {
+      guardAbort = `guard-exception: ${err instanceof Error ? err.message : String(err)}`
+    }
+    if (guardAbort) {
+      console.warn(
+        JSON.stringify({
+          t: new Date().toISOString(),
+          operation: 'v5.backup.upload-aborted',
+          level: 'warn',
+          reason: guardAbort,
+          lastAppliedSnapshotTs: getLastAppliedSnapshotTs(),
+        }),
+      )
+      return { ok: false, reason: `monotonicity-guard: ${guardAbort}` }
     }
     const db = await v5db()
     const kvRows = await db.execute(
