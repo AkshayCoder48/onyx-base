@@ -32,7 +32,6 @@ import {
   Trash2,
   RefreshCw,
   Cpu,
-  Table2,
   Lightbulb,
   Rocket,
   FileText,
@@ -544,7 +543,7 @@ export function DocsView() {
             format="kv_live_…"
             blurb="Your master credential. The Bearer token used by the dashboard, the CLI, and every REST call. Grants full read/write access to everything you own by default — and can be scoped, rate-limited, time-limited, and allowlisted down to a least-privilege credential (see the per-key restrictions card below)."
             mintedAt="Minted in the dashboard → API Keys tab (or returned once at signup). Shown exactly once at creation — copy it before closing the dialog. The full plaintext is never retrievable after creation."
-            scope="Full account access by default: every collection, every key, every file, every share token, every log. Mint with a non-empty scopes array (read, write, delete, files, tables, collections, export) to limit the key to those capabilities."
+            scope="Full account access by default: every collection, every key, every file, every share token, every log. Mint with a non-empty scopes array (read, write, delete, files, collections, export) to limit the key to those capabilities."
             lifetime="No expiry by default. Lives until you revoke it. Optionally pass an ISO expiresAt to mint a time-limited key. Stored as a salted hash on the server."
             revocation="Revoke instantly from the API Keys tab (DELETE /api/dashboard/api-keys/:id). The key stops authenticating on the very next request."
             exampleLang="http"
@@ -570,7 +569,7 @@ curl -X POST ${apiBase}/v1/set \\
               </div>
             </div>
             <p className="text-[13.5px] text-foreground/90 leading-relaxed mb-4">
-              Every <code className="font-mono text-primary">kv_live_…</code> key carries six optional restriction
+              Every <code className="font-mono text-primary">kv_live_…</code> key carries five optional restriction
               fields. Empty / null = unrestricted (the default, and the behavior of every key minted before this feature
               shipped). Setting any of them turns the key into a least-privilege credential — perfect for handing a
               production app a write-only key, capping a public widget at 100 req/min, or expiring a contractor&apos;s
@@ -583,10 +582,9 @@ curl -X POST ${apiBase}/v1/set \\
                 <code className="font-mono text-primary">write</code>,{' '}
                 <code className="font-mono text-primary">delete</code>,{' '}
                 <code className="font-mono text-primary">files</code>,{' '}
-                <code className="font-mono text-primary">tables</code>,{' '}
                 <code className="font-mono text-primary">collections</code>,{' '}
                 <code className="font-mono text-primary">export</code>. Empty / omitted = full
-                access (all 7). Pick any subset for least-privilege keys.
+                access (all 6). Pick any subset for least-privilege keys.
               </DefRow>
               <DefRow label="expiresAt">
                 ISO 8601 timestamp; <code className="font-mono">null</code> = never. After it
@@ -597,11 +595,8 @@ curl -X POST ${apiBase}/v1/set \\
                 non-empty, requests to other collections return{' '}
                 <code className="font-mono">403 collection_not_allowed</code>.
               </DefRow>
-              <DefRow label="tableAllowList">
-                String array of table names. Empty / omitted = all tables. When non-empty,
-                requests to other tables return{' '}
-                <code className="font-mono">403 table_not_allowed</code>.
-              </DefRow>
+              
+
               <DefRow label="rateLimitPerMin">
                 Max requests per 60-second sliding window. <code className="font-mono">null</code>{' '}
                 / <code className="font-mono">0</code> = unlimited. Breach returns{' '}
@@ -623,8 +618,7 @@ curl -X POST ${apiBase}/v1/set \\
                   <code className="font-mono">GET /v1/get/:key</code>, <code className="font-mono">/v1/list</code>,{' '}
                   <code className="font-mono">/v1/stats</code>, <code className="font-mono">/v1/logs</code>,{' '}
                   <code className="font-mono">/v1/health</code>, <code className="font-mono">/v1/whoami</code>,{' '}
-                  <code className="font-mono">GET /v1/collections</code>,{' '}
-                  <code className="font-mono">GET /v1/tables</code>, table describe + row list.
+                  <code className="font-mono">GET /v1/collections</code>.
                 </p>
               </div>
               <div className="rounded-md border border-amber-300/60 bg-amber-100/40 p-3">
@@ -648,13 +642,8 @@ curl -X POST ${apiBase}/v1/set \\
                   mint/revoke, delete, and the public download proxy.
                 </p>
               </div>
-              <div className="rounded-md border border-emerald-300/60 bg-emerald-100/40 p-3">
-                <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-800 mb-1">tables</div>
-                <p className="text-[12px] text-muted-foreground leading-relaxed">
-                  <code className="font-mono">/v1/tables/*</code> — create, drop, mode change,
-                  row insert/update/delete.
-                </p>
-              </div>
+              
+
               <div className="rounded-md border border-primary/30 bg-primary/10 p-3">
                 <div className="text-[11px] font-mono uppercase tracking-wider text-primary mb-1">collections · export</div>
                 <p className="text-[12px] text-muted-foreground leading-relaxed">
@@ -957,16 +946,10 @@ localStorage.removeItem('cloudkv-session')`} />
               title="API Playground"
               body="An interactive REST explorer: pick an endpoint (set / get / list / delete / files / share-tokens / whoami / stats / logs / …), fill in the parameters, hit Send, and inspect the raw JSON response. Auto-injects your current API key as the Bearer header. Great for prototyping calls before committing them to code, or for debugging why a particular request returns 404."
             />
-            <FeatureCard
-              icon={<Code2 className="size-4" />}
-              title="SQL Editor"
-              body="A real SQL console that runs against virtual tables (records, collections, api_keys, logs, users) pre-filtered to your account. Run SELECT / INSERT / UPDATE / DELETE / CREATE / DROP / ALTER statements, plus create your own usr_* tables for custom schemas. 1000-row cap per result, API keys masked in output, ⌘+Enter to run. The fastest way to do bulk updates or exploratory queries."
-            />
-            <FeatureCard
-              icon={<Table2 className="size-4" />}
-              title="Tables"
-              body="Account-scoped SQL tables with read-only / write-only / read+write access modes. Define a schema (TEXT / INTEGER / REAL / NUMERIC / BLOB / DATETIME / BOOLEAN columns, primary keys, auto-increment, defaults, nullability), then drive full CRUD from a real database-grid UI in the dashboard, the REST API (/v1/tables/*), or the CLI (onyx tables). Each table gets a unique usr_<name>_<hash> SQLite name so two accounts can both own a 'notes' table without colliding. Toggle the access mode at any time to lock down public-facing tables."
-            />
+            
+
+            
+
             <FeatureCard
               icon={<BookOpen className="size-4" />}
               title="Docs"
@@ -1019,7 +1002,7 @@ Authorization: Bearer ${keyForCode}
               <h3 className="font-semibold text-[15px]">Quick start in any language</h3>
             </div>
             <p className="text-[13.5px] text-muted-foreground leading-relaxed mb-4">
-              The five core operations below — set, get, upload, create a table, insert a row — cover ~90% of what you&apos;ll
+              The three core operations below — set, get, upload — cover ~90% of what you&apos;ll
               do. Each sample uses <code className="font-mono text-primary">https://onyx.example.com</code> and{' '}
               <code className="font-mono text-primary">kv_live_YOUR_API_KEY</code> as literal placeholders so you can copy,
               swap, and run. Pick your language and copy the snippet.
@@ -1211,167 +1194,6 @@ curl_setopt_array($ch, [
 echo curl_exec($ch), "\\n";` },
                 ]} />
               </div>
-
-              {/* 4. Create a table */}
-              <div>
-                <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-2">4 · Create a table — <code className="font-mono normal-case">POST /v1/tables</code></h4>
-                <MultiLangCode samples={[
-                  { lang: 'bash', label: 'curl', code: `curl -X POST https://onyx.example.com/v1/tables \\
-  -H "Authorization: Bearer kv_live_YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"name":"tasks","accessMode":"readwrite","columns":[{"name":"id","type":"INTEGER","primary":true,"autoIncrement":true},{"name":"title","type":"TEXT","nullable":false},{"name":"done","type":"BOOLEAN","defaultValue":"0"}]}'` },
-                  { lang: 'javascript', label: 'Node', code: `const r = await fetch("https://onyx.example.com/v1/tables", {
-  method: "POST",
-  headers: {
-    Authorization: "Bearer kv_live_YOUR_API_KEY",
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify({
-    name: "tasks",
-    accessMode: "readwrite",
-    columns: [
-      { name: "id", type: "INTEGER", primary: true, autoIncrement: true },
-      { name: "title", type: "TEXT", nullable: false },
-      { name: "done", type: "BOOLEAN", defaultValue: "0" },
-    ],
-  }),
-});
-console.log(await r.json());` },
-                  { lang: 'python', label: 'Python', code: `import requests
-r = requests.post(
-    "https://onyx.example.com/v1/tables",
-    headers={"Authorization": "Bearer kv_live_YOUR_API_KEY"},
-    json={
-        "name": "tasks",
-        "accessMode": "readwrite",
-        "columns": [
-            {"name": "id", "type": "INTEGER", "primary": True, "autoIncrement": True},
-            {"name": "title", "type": "TEXT", "nullable": False},
-            {"name": "done", "type": "BOOLEAN", "defaultValue": "0"},
-        ],
-    },
-)
-print(r.json())` },
-                  { lang: 'go', label: 'Go', code: `package main
-
-import ("bytes"; "fmt"; "net/http")
-
-func main() {
-    body := []byte("{\"name\":\"tasks\",\"accessMode\":\"readwrite\",\"columns\":[{\"name\":\"id\",\"type\":\"INTEGER\",\"primary\":true,\"autoIncrement\":true},{\"name\":\"title\",\"type\":\"TEXT\",\"nullable\":false},{\"name\":\"done\",\"type\":\"BOOLEAN\",\"defaultValue\":\"0\"}]}")
-    req, _ := http.NewRequest("POST", "https://onyx.example.com/v1/tables", bytes.NewReader(body))
-    req.Header.Set("Authorization", "Bearer kv_live_YOUR_API_KEY")
-    req.Header.Set("Content-Type", "application/json")
-    r, _ := http.DefaultClient.Do(req)
-    defer r.Body.Close()
-    fmt.Println(r.Status)
-}` },
-                  { lang: 'rust', label: 'Rust', code: `use reqwest::blocking::Client;
-
-fn main() -> reqwest::Result<()> {
-    let body = serde_json::json!({
-        "name": "tasks",
-        "accessMode": "readwrite",
-        "columns": [
-            {"name":"id","type":"INTEGER","primary":true,"autoIncrement":true},
-            {"name":"title","type":"TEXT","nullable":false},
-            {"name":"done","type":"BOOLEAN","defaultValue":"0"},
-        ]
-    });
-    let r = Client::new()
-        .post("https://onyx.example.com/v1/tables")
-        .bearer_auth("kv_live_YOUR_API_KEY")
-        .json(&body)
-        .send()?;
-    println!("{}", r.status());
-    Ok(())
-}` },
-                  { lang: 'php', label: 'PHP', code: `<?php
-$body = json_encode([
-    "name" => "tasks",
-    "accessMode" => "readwrite",
-    "columns" => [
-        ["name" => "id", "type" => "INTEGER", "primary" => true, "autoIncrement" => true],
-        ["name" => "title", "type" => "TEXT", "nullable" => false],
-        ["name" => "done", "type" => "BOOLEAN", "defaultValue" => "0"],
-    ],
-]);
-$ch = curl_init("https://onyx.example.com/v1/tables");
-curl_setopt_array($ch, [
-    CURLOPT_POST => true,
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_HTTPHEADER => [
-        "Authorization: Bearer kv_live_YOUR_API_KEY",
-        "Content-Type: application/json",
-    ],
-    CURLOPT_POSTFIELDS => $body,
-]);
-echo curl_exec($ch), "\\n";` },
-                ]} />
-              </div>
-
-              {/* 5. Insert a row */}
-              <div>
-                <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70 mb-2">5 · Insert a row — <code className="font-mono normal-case">POST /v1/tables/:name/rows</code></h4>
-                <MultiLangCode samples={[
-                  { lang: 'bash', label: 'curl', code: `curl -X POST https://onyx.example.com/v1/tables/tasks/rows \\
-  -H "Authorization: Bearer kv_live_YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"row":{"title":"Buy milk","done":false}}'` },
-                  { lang: 'javascript', label: 'Node', code: `const r = await fetch("https://onyx.example.com/v1/tables/tasks/rows", {
-  method: "POST",
-  headers: {
-    Authorization: "Bearer kv_live_YOUR_API_KEY",
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify({ row: { title: "Buy milk", done: false } }),
-});
-console.log(await r.json());` },
-                  { lang: 'python', label: 'Python', code: `import requests
-r = requests.post(
-    "https://onyx.example.com/v1/tables/tasks/rows",
-    headers={"Authorization": "Bearer kv_live_YOUR_API_KEY"},
-    json={"row": {"title": "Buy milk", "done": False}},
-)
-print(r.json())` },
-                  { lang: 'go', label: 'Go', code: `package main
-
-import ("bytes"; "fmt"; "net/http")
-
-func main() {
-    body := []byte("{\"row\":{\"title\":\"Buy milk\",\"done\":false}}")
-    req, _ := http.NewRequest("POST", "https://onyx.example.com/v1/tables/tasks/rows", bytes.NewReader(body))
-    req.Header.Set("Authorization", "Bearer kv_live_YOUR_API_KEY")
-    req.Header.Set("Content-Type", "application/json")
-    r, _ := http.DefaultClient.Do(req)
-    defer r.Body.Close()
-    fmt.Println(r.Status)
-}` },
-                  { lang: 'rust', label: 'Rust', code: `use reqwest::blocking::Client;
-
-fn main() -> reqwest::Result<()> {
-    let body = serde_json::json!({"row": {"title": "Buy milk", "done": false}});
-    let r = Client::new()
-        .post("https://onyx.example.com/v1/tables/tasks/rows")
-        .bearer_auth("kv_live_YOUR_API_KEY")
-        .json(&body)
-        .send()?;
-    println!("{}", r.status());
-    Ok(())
-}` },
-                  { lang: 'php', label: 'PHP', code: `<?php
-$ch = curl_init("https://onyx.example.com/v1/tables/tasks/rows");
-curl_setopt_array($ch, [
-    CURLOPT_POST => true,
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_HTTPHEADER => [
-        "Authorization: Bearer kv_live_YOUR_API_KEY",
-        "Content-Type: application/json",
-    ],
-    CURLOPT_POSTFIELDS => json_encode(["row" => ["title" => "Buy milk", "done" => false]]),
-]);
-echo curl_exec($ch), "\\n";` },
-                ]} />
-              </div>
             </div>
           </Card>
 
@@ -1414,80 +1236,29 @@ echo curl_exec($ch), "\\n";` },
             <EndpointCard method="GET" path="/v1/collections/:name" title="Collection detail" auth="required" description="Returns metadata for one collection." />
           </div>
 
-          {/* Tables endpoints */}
-          <div className="space-y-3">
-            <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">Tables</h4>
-            <Card className="p-4 bg-card/40 border-border/60">
-              <p className="text-[13px] text-muted-foreground leading-relaxed">
-                Account-scoped SQL tables. Each table you create gets a unique{' '}
-                <code className="font-mono text-primary">usr_&lt;name&gt;_&lt;hash&gt;</code> SQLite name so two accounts can both
-                own a <code className="font-mono">notes</code> table without colliding. Each table has an{' '}
-                <strong>access mode</strong> that controls what the public API can do:{' '}
-                <code className="font-mono">read</code> → GET only;{' '}
-                <code className="font-mono">write</code> → POST / PATCH / DELETE only;{' '}
-                <code className="font-mono">readwrite</code> → everything. The dashboard owner can always do everything
-                regardless of mode — the <code className="font-mono">/api/dashboard/tables/*</code> routes have the same
-                shape but skip the access-mode check.
-              </p>
-            </Card>
-            <EndpointCard method="GET" path="/v1/tables" title="List your tables" auth="required" description="Returns every table owned by the calling account, with name, accessMode, rowCount, schema, and timestamps." />
-            <EndpointCard method="POST" path="/v1/tables" title="Create a table" auth="required" description={'Body: { name, columns: ColumnDef[], accessMode?: "read"|"write"|"readwrite" }. ColumnDef = { name, type: "TEXT"|"INTEGER"|"REAL"|"NUMERIC"|"BLOB"|"DATETIME"|"BOOLEAN", primary?, autoIncrement?, nullable?, defaultValue? }. accessMode defaults to "readwrite".'}>
-              <CodeBlock lang="bash" code={`# Create a "tasks" table (read+write via the public API)
-curl -X POST ${apiBase}/v1/tables \\
-  -H "Authorization: Bearer ${keyForCode}" \\
-  -H "Content-Type: application/json" \\
-  -d '{"name":"tasks","accessMode":"readwrite","columns":[{"name":"id","type":"INTEGER","primary":true,"autoIncrement":true},{"name":"title","type":"TEXT","nullable":false},{"name":"done","type":"BOOLEAN","defaultValue":"0"}]}'
-
-# Insert a row
-curl -X POST ${apiBase}/v1/tables/tasks/rows \\
-  -H "Authorization: Bearer ${keyForCode}" \\
-  -H "Content-Type: application/json" \\
-  -d '{"row":{"title":"Buy milk","done":false}}'
-
-# List rows
-curl -H "Authorization: Bearer ${keyForCode}" ${apiBase}/v1/tables/tasks/rows`} />
-            </EndpointCard>
-            <EndpointCard method="GET" path="/v1/tables/:name" title="Describe a table" auth="required" description="Returns the table's schema, current rowCount, a sample of the first few rows, and the active accessMode." />
-            <EndpointCard method="PATCH" path="/v1/tables/:name" title="Update access mode" auth="required" description={'Body: { accessMode: "read"|"write"|"readwrite" }. Toggle a public-facing table between read-only, write-only, and full access. Takes effect on the very next request.'} />
-            <EndpointCard method="DELETE" path="/v1/tables/:name" title="Drop a table" auth="required" description="Permanently drops the table (SQLite DROP TABLE) and deletes its metadata row. Cannot be undone — the data is gone, but the Telegram audit-log mirror of the drop event remains." />
-            <EndpointCard method="GET" path="/v1/tables/:name/rows" title="List rows" auth="required (read or readwrite)" description="Returns up to 100 rows by default; bump with ?limit= (max 1000). Honors the access mode — returns 403 if the table is write-only." />
-            <EndpointCard method="POST" path="/v1/tables/:name/rows" title="Insert a row" auth="required (write or readwrite)" description={'Body: { row: { col: value, ... } }. Validates the row against the schema (type-check, nullability, defaults) and returns the inserted row with auto-incremented / defaulted columns filled in.'} />
-            <EndpointCard method="PATCH" path="/v1/tables/:name/rows" title="Update a row by PK" auth="required (write or readwrite)" description={'Body: { pk: { col: value }, patch: { col: value } }. Locates the row by its primary-key column(s) and applies the patch. Validates types against the schema.'} />
-            <EndpointCard method="DELETE" path="/v1/tables/:name/rows" title="Delete a row by PK" auth="required (write or readwrite)" description={'Body: { pk: { col: value } }. Removes the row whose primary-key column matches. 404 if no row matches.'} />
-          </div>
-
-          {/* Account & ops endpoints */}
-          <div className="space-y-3">
-            <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">Account & ops</h4>
-            <EndpointCard method="GET" path="/v1/whoami" title="Who am I?" auth="required" description="Returns { userId, apiKeyId, apiKeyName, isAdmin }. Use this to verify a key is still valid." />
-            <EndpointCard method="GET" path="/v1/health" title="Service + Telegram status" auth="none" description="Liveness + readiness probe. Returns whether the in-memory store, disk cache, and Telegram mirror are reachable." />
-            <EndpointCard method="GET" path="/v1/stats" title="Account statistics" auth="required" description="Returns counts (records / collections / apiKeys / logs / files), activity by day, and recent activity." />
-            <EndpointCard method="GET" path="/v1/logs?limit=50&action=…" title="Recent audit log" auth="required" description="Returns the most recent log entries, optionally filtered by action. Each entry: action, key, detail, source, ts." />
-          </div>
-
           {/* API key management endpoints */}
           <div className="space-y-3">
             <h4 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground/70">API keys (dashboard)</h4>
             <Card className="p-4 bg-card/40 border-border/60">
               <p className="text-[13px] text-muted-foreground leading-relaxed">
                 Mint, list, update, and revoke <code className="font-mono text-primary">kv_live_…</code> keys. Every key
-                carries six optional restriction fields — <code className="font-mono">scopes</code>,{' '}
+                carries five optional restriction fields — <code className="font-mono">scopes</code>,{' '}
                 <code className="font-mono">expiresAt</code>, <code className="font-mono">collectionAllowList</code>,{' '}
-                <code className="font-mono">tableAllowList</code>, <code className="font-mono">rateLimitPerMin</code>,{' '}
+                <code className="font-mono">rateLimitPerMin</code>,{' '}
                 <code className="font-mono">rateLimitMbPerDay</code>. Empty / null = unrestricted (the default, and the
                 behavior of every key minted before this feature shipped). See the{' '}
                 <strong>Keys &amp; Tokens</strong> tab for the full restriction reference + authorize() error table.
               </p>
             </Card>
-            <EndpointCard method="GET" path="/api/dashboard/api-keys" title="List your API keys" auth="required" description="Returns every key on the account with id, name, createdAt, lastUsedAt, revoked, scopes, expiresAt, collectionAllowList, tableAllowList, rateLimitPerMin, rateLimitMbPerDay. The full key string is not returned." />
-            <EndpointCard method="POST" path="/api/dashboard/api-keys" title="Mint a new API key" auth="required" description={'Body: { name, scopes?, expiresAt?, collectionAllowList?, tableAllowList?, rateLimitPerMin?, rateLimitMbPerDay? }. Returns { apiKey } with the full key — shown exactly once.'}>
+            <EndpointCard method="GET" path="/api/dashboard/api-keys" title="List your API keys" auth="required" description="Returns every key on the account with id, name, createdAt, lastUsedAt, revoked, scopes, expiresAt, collectionAllowList, rateLimitPerMin, rateLimitMbPerDay. The full key string is not returned." />
+            <EndpointCard method="POST" path="/api/dashboard/api-keys" title="Mint a new API key" auth="required" description={'Body: { name, scopes?, expiresAt?, collectionAllowList?, rateLimitPerMin?, rateLimitMbPerDay? }. Returns { apiKey } with the full key — shown exactly once.'}>
               <CodeBlock lang="bash" code={`# Least-privilege widget key: read+write, 100 req/min, 50 MB/day, end-of-2026 expiry.
 curl -X POST ${apiBase}/api/dashboard/api-keys \\
   -H "Authorization: Bearer ${keyForCode}" \\
   -H "Content-Type: application/json" \\
   -d '{"name":"widget","scopes":["read","write"],"rateLimitPerMin":100,"rateLimitMbPerDay":50,"expiresAt":"2026-12-31T23:59:59.000Z"}'`} />
             </EndpointCard>
-            <EndpointCard method="PATCH" path="/api/dashboard/api-keys/:id" title="Update an API key's restrictions" auth="required" description={'Body: any subset of { scopes, expiresAt, collectionAllowList, tableAllowList, rateLimitPerMin, rateLimitMbPerDay }. Omitted fields are left unchanged; pass null to clear a field. Returns the updated { apiKey }.'}>
+            <EndpointCard method="PATCH" path="/api/dashboard/api-keys/:id" title="Update an API key's restrictions" auth="required" description={'Body: any subset of { scopes, expiresAt, collectionAllowList, rateLimitPerMin, rateLimitMbPerDay }. Omitted fields are left unchanged; pass null to clear a field. Returns the updated { apiKey }.'}>
               <CodeBlock lang="bash" code={`# Tighten an existing key: drop to read-only and scope to one collection.
 curl -X PATCH ${apiBase}/api/dashboard/api-keys/abc123 \\
   -H "Authorization: Bearer ${keyForCode}" \\
@@ -1510,12 +1281,12 @@ curl -X PATCH ${apiBase}/api/dashboard/api-keys/abc123 \\
                 the authenticated user.
               </p>
             </Card>
-            <EndpointCard method="GET" path="/api/v1/views" title="List views" auth="required" description="Named projections over a collection (think: SQL VIEW). Create with POST /api/v1/views { name, collection, projection, filter? }." />
-            <EndpointCard method="GET" path="/api/v1/views/:name" title="Execute a view" auth="required" description="Applies the stored substring filter on the key and projects the requested columns. Returns the projected rows." />
-            <EndpointCard method="GET" path="/api/v1/matviews" title="List materialized views" auth="required" description="Pre-computed aggregations cached as JSON. Create with POST /api/v1/matviews { name, query } — runs the SELECT immediately and caches the result. Refresh-all via POST /api/v1/matviews { action: 'refresh_all' }." />
-            <EndpointCard method="GET" path="/api/v1/matviews/:name" title="Read a materialized view" auth="required" description="O(1) read of the cached aggregation result. POST to refresh, DELETE to drop." />
-            <EndpointCard method="POST" path="/api/v1/functions" title="Create a server-side function" auth="required" description={`Body: { name, code }. Code runs in a \`new Function("ctx", code)\` sandbox with { record, db, user } — db is read-only and user-scoped. 5s timeout. Syntax-checked at create.`} />
-            <EndpointCard method="POST" path="/api/v1/functions/:name" title="Test-invoke a function" auth="required" description="Runs the stored function with the supplied ctx body and returns the result. Useful for prototyping before wiring the function into a view or RPC." />
+            
+
+            
+
+            
+
             <EndpointCard method="POST" path="/api/v1/rpc/:name" title="Built-in RPC" auth="required" description="Built-in remote procedure calls: count_records, sum { key }, aggregate { collection, type: count|sum|avg|min|max }, search { query, collection?, limit? } (substring match on key + value), touch { key, value, collection? } (upsert + return). All user-scoped." />
             <EndpointCard method="POST" path="/api/v1/graphql" title="GraphQL endpoint" auth="required" description="A minimal hand-rolled GraphQL parser (no Apollo/graphql deps). Single endpoint; queries for records, collections, apiKeys, logs, me — all user-scoped via authenticate(). Args + variables supported on records(limit, collection) and logs(limit, action). Standard { data, errors } JSON response." />
           </div>
@@ -1578,53 +1349,14 @@ onyx file-link f_abc123                             # mint a fresh ~1h download 
 onyx file-revoke f_abc123                           # drop the cached link
 onyx file-delete f_abc123                           # permanently delete a file
 
-# Tables (account-scoped SQL tables; alias: tbl)
-onyx tables                                          # list your tables (alias: onyx tbl)
-onyx tables create tasks --columns "id:INTEGER:pk:ai,title:TEXT:notnull,body:TEXT" --access rw
-onyx tables describe tasks                           # schema + sample rows
-onyx tables rows tasks                               # list rows (default 100)
-onyx tables insert tasks --data '{"title":"Buy milk","done":false}'
-onyx tables update tasks --pk '{"id":1}' --data '{"done":true}'
-onyx tables delete tasks --pk '{"id":1}' --yes
-onyx tables drop tasks --yes                         # drop the whole table
-onyx tables mode tasks r                             # change access mode (r=read, w=write, rw=readwrite)
-
 # API keys (per-key scopes / expiry / allowlists / rate limits)
 onyx api-keys                                                # list (with SCOPES / LIMITS / EXPIRES columns)
 onyx api-keys create prod --scopes read,write --rate-limit-per-min 100 --expires-at 2026-12-31
 onyx api-keys update <id> --scopes read --collections visits,logs
 onyx api-keys revoke <id>                                     # revoke instantly`} />
 
-          <Card className="p-4 bg-card/40 border-border/60">
-            <div className="flex items-center gap-2.5 mb-2">
-              <Table2 className="size-4 text-primary" />
-              <h4 className="font-semibold text-[14px]">Column-spec mini-DSL</h4>
-            </div>
-            <p className="text-[13px] text-muted-foreground mb-3">
-              The <code className="font-mono text-primary">--columns</code> argument for{' '}
-              <code className="font-mono">onyx tables create</code> uses a comma-separated mini-DSL. Each column is:
-            </p>
-            <CodeBlock lang="text" code={`name:TYPE[:pk][:ai][:notnull][:default=VALUE]
+          
 
-  name      any SQL-safe identifier (letters, digits, _)
-  TYPE      INTEGER | TEXT | REAL | NUMERIC | BLOB | DATETIME | BOOLEAN
-  pk        marks the column as PRIMARY KEY
-  ai        AUTOINCREMENT (implies INTEGER + pk)
-  notnull   adds NOT NULL
-  default=… sets a DEFAULT value (colons inside the value are respected if the
-            whole spec is quoted, e.g. "ts:DATETIME:default=2024-01-01 12:00:00")
-
-Examples:
-  "id:INTEGER:pk:ai,title:TEXT:notnull,body:TEXT"
-  "id:INTEGER:pk:ai,email:TEXT:notnull,created:DATETIME:default=now"
-  "k:TEXT:pk,v:TEXT,tags:TEXT"`} />
-            <p className="text-[12px] text-muted-foreground mt-3 leading-relaxed">
-              The CLI parses this spec client-side and POSTs the same{' '}
-              <code className="font-mono">{`{ name, columns: ColumnDef[], accessMode }`}</code> body the REST API expects,
-              so <code className="font-mono">--access rw</code> is just shorthand for{' '}
-              <code className="font-mono">readwrite</code>.
-            </p>
-          </Card>
 
           <Card className="p-4 bg-card/40 border-border/60">
             <div className="flex items-center gap-2.5 mb-2">
@@ -1912,8 +1644,7 @@ Examples:
                 <p className="text-muted-foreground text-[13px] leading-relaxed">
                   These are design notes — the goal is to show how much further Telegram-as-a-database can go. Vote for
                   your favourites by opening an issue, or build one yourself on top of the existing{' '}
-                  <code className="font-mono text-primary">/v1/*</code> surface and{' '}
-                  <code className="font-mono text-primary">/v1/tables/*</code> endpoints.
+                  <code className="font-mono text-primary">/v1/*</code> surface.
                 </p>
               </div>
             </div>

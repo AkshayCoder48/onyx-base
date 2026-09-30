@@ -33,7 +33,7 @@ import {
 // ─── Scope metadata ─────────────────────────────────────────────────────────
 
 const ALL_SCOPES = [
-  'read', 'write', 'delete', 'files', 'tables', 'collections', 'export',
+  'read', 'write', 'delete', 'files', 'collections', 'export',
 ] as const
 type ScopeName = (typeof ALL_SCOPES)[number]
 
@@ -42,7 +42,6 @@ const SCOPE_LABELS: Record<ScopeName, string> = {
   write: 'Write',
   delete: 'Delete',
   files: 'Files',
-  tables: 'Tables',
   collections: 'Collections',
   export: 'Export',
 }
@@ -52,7 +51,6 @@ const SCOPE_HINTS: Record<ScopeName, string> = {
   write: 'POST /v1/set',
   delete: 'DELETE /v1/delete',
   files: '/v1/files/* upload & download',
-  tables: '/v1/tables/* schema + rows',
   collections: '/v1/collections/*',
   export: 'GET /v1/export',
 }
@@ -62,7 +60,6 @@ const SCOPE_BADGE_CLASS: Record<ScopeName, string> = {
   write: 'border-amber-400/30 text-amber-600 dark:text-amber-400',
   delete: 'border-red-400/30 text-red-600 dark:text-red-400',
   files: 'border-orange-400/40 text-orange-700 dark:text-orange-300',
-  tables: 'border-cyan-400/30 text-cyan-600 dark:text-cyan-400',
   collections: 'border-pink-400/30 text-pink-600 dark:text-pink-400',
   export: 'border-orange-400/30 text-orange-600 dark:text-orange-400',
 }
@@ -79,7 +76,6 @@ function normalizeKey(k: ApiKeyView): ApiKeyView {
     scopes: Array.isArray(k.scopes) ? k.scopes : [],
     expiresAt: k.expiresAt ?? null,
     collectionAllowList: Array.isArray(k.collectionAllowList) ? k.collectionAllowList : [],
-    tableAllowList: Array.isArray(k.tableAllowList) ? k.tableAllowList : [],
     rateLimitPerMin: k.rateLimitPerMin ?? null,
     rateLimitMbPerDay: k.rateLimitMbPerDay ?? null,
   }
@@ -93,7 +89,6 @@ interface KeyFormState {
   neverExpires: boolean
   expiresAt: string // datetime-local string
   collectionAllowList: string // comma-separated
-  tableAllowList: string // comma-separated
   rateLimitPerMin: string // empty = unlimited
   rateLimitMbPerDay: string // empty = unlimited
 }
@@ -104,7 +99,6 @@ const EMPTY_FORM: KeyFormState = {
   neverExpires: true,
   expiresAt: '',
   collectionAllowList: '',
-  tableAllowList: '',
   rateLimitPerMin: '',
   rateLimitMbPerDay: '',
 }
@@ -125,7 +119,6 @@ function formFromKey(k: ApiKeyView): KeyFormState {
     neverExpires: !k.expiresAt,
     expiresAt: expiresAtLocal,
     collectionAllowList: k.collectionAllowList.join(', '),
-    tableAllowList: k.tableAllowList.join(', '),
     rateLimitPerMin: k.rateLimitPerMin ? String(k.rateLimitPerMin) : '',
     rateLimitMbPerDay: k.rateLimitMbPerDay ? String(k.rateLimitMbPerDay) : '',
   }
@@ -138,8 +131,6 @@ function formToBody(f: KeyFormState, _isUpdate: boolean): Record<string, unknown
   body.scopes = f.scopes
   body.expiresAt = f.neverExpires || !f.expiresAt ? null : new Date(f.expiresAt).toISOString()
   body.collectionAllowList = f.collectionAllowList
-    .split(',').map((s) => s.trim()).filter(Boolean)
-  body.tableAllowList = f.tableAllowList
     .split(',').map((s) => s.trim()).filter(Boolean)
   body.rateLimitPerMin = f.rateLimitPerMin ? Number(f.rateLimitPerMin) : null
   body.rateLimitMbPerDay = f.rateLimitMbPerDay ? Number(f.rateLimitMbPerDay) : null
@@ -280,20 +271,6 @@ function ApiKeyForm({
           className="font-mono text-sm"
         />
         <p className="text-[11px] text-muted-foreground/70">Comma-separated. Empty = access to all collections.</p>
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="ak-tables" className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
-          Table allowlist
-        </Label>
-        <Input
-          id="ak-tables"
-          value={form.tableAllowList}
-          onChange={(e) => update({ tableAllowList: e.target.value })}
-          placeholder="orders, events  (empty = all)"
-          className="font-mono text-sm"
-        />
-        <p className="text-[11px] text-muted-foreground/70">Comma-separated. Empty = access to all tables.</p>
       </div>
 
       <Separator />
@@ -441,7 +418,7 @@ export function ApiKeysView() {
       <Card className="bg-primary/5 border-primary/20 p-4 mb-4 flex items-start gap-3">
         <ShieldAlert className="size-4 text-primary mt-0.5 shrink-0" />
         <div className="text-xs text-stone-700 dark:text-stone-300">
-          Each key can be scoped to specific operations, restricted to certain collections/tables,
+          Each key can be scoped to specific operations, restricted to certain collections,
           rate-limited, and set to expire. Keys with <strong className="text-primary">no scopes</strong> selected
           have full access. New keys are shown <strong className="text-primary">only once</strong> after creation.
         </div>
@@ -471,7 +448,7 @@ export function ApiKeysView() {
 
                 <ScopesRow k={k} />
 
-                {(isLimited(k) || k.expiresAt || k.collectionAllowList.length > 0 || k.tableAllowList.length > 0) && (
+                {(isLimited(k) || k.expiresAt || k.collectionAllowList.length > 0) && (
                   <div className="flex flex-wrap gap-1.5 pt-1 border-t border-border/40">
                     <LimitsBadges k={k} />
                   </div>
@@ -738,13 +715,6 @@ function LimitsBadges({ k }: { k: ApiKeyView }) {
     badges.push(
       <Badge key="coll" variant="outline" className="font-mono text-[10px] border-border/60 text-muted-foreground">
         {k.collectionAllowList.length} coll{k.collectionAllowList.length > 1 ? 's' : ''}
-      </Badge>,
-    )
-  }
-  if (k.tableAllowList.length) {
-    badges.push(
-      <Badge key="tbl" variant="outline" className="font-mono text-[10px] border-border/60 text-muted-foreground">
-        {k.tableAllowList.length} table{k.tableAllowList.length > 1 ? 's' : ''}
       </Badge>,
     )
   }

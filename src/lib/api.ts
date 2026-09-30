@@ -65,7 +65,8 @@ export interface ApiKeyView {
   expiresAt: string | null
   /** v3: empty = all collections. */
   collectionAllowList: string[]
-  /** v3: empty = all tables. */
+  /** Legacy field (the SQLite tables workspace was removed) — still sent by
+   *  the server for old keys; inert. Kept in the type for wire accuracy. */
   tableAllowList: string[]
   /** v3: null/0 = unlimited. */
   rateLimitPerMin: number | null

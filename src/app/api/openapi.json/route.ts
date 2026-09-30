@@ -18,7 +18,7 @@ const SPEC = {
     title: 'Onyx Base API',
     version: '1.0.0',
     description:
-      'Telegram-backed key-value & file store. A lightweight Supabase-style developer platform — SQLite is the fast local index, Telegram is the durable mirror. Bring a Bot Token + Chat ID (or use the built-in server-side bot) → get a key-value database AND a file store, plus a real-time dashboard, REST API, and a zero-dependency CLI.',
+      'Telegram-backed key-value & file store. A lightweight Supabase-style developer platform — an in-memory store is the fast local index, Telegram is the durable mirror. Bring a Bot Token + Chat ID (or use the built-in server-side bot) → get a key-value database AND a file store, plus a real-time dashboard, REST API, and a zero-dependency CLI.',
     contact: { name: 'Onyx Base', url: 'https://llmstxt.org' },
   },
   servers: [{ url: '/', description: 'Relative to deployment root' }],
@@ -94,41 +94,6 @@ const SPEC = {
           ip: { type: 'string', nullable: true },
           createdAt: { type: 'string', format: 'date-time' },
         },
-      },
-      View: {
-        type: 'object',
-        properties: {
-          id: { type: 'integer' },
-          name: { type: 'string' },
-          collection: { type: 'string' },
-          projection: { type: 'string' },
-          filter: { type: 'string', nullable: true },
-          createdAt: { type: 'string', format: 'date-time' },
-        },
-        required: ['name', 'collection', 'projection'],
-      },
-      Function: {
-        type: 'object',
-        properties: {
-          id: { type: 'integer' },
-          name: { type: 'string' },
-          code: { type: 'string' },
-          trigger: { type: 'string' },
-          createdAt: { type: 'string', format: 'date-time' },
-        },
-        required: ['name', 'code'],
-      },
-      MaterializedView: {
-        type: 'object',
-        properties: {
-          id: { type: 'integer' },
-          name: { type: 'string' },
-          query: { type: 'string' },
-          result: {}, // JSON-parsed on read
-          lastRefreshedAt: { type: 'string', format: 'date-time' },
-          createdAt: { type: 'string', format: 'date-time' },
-        },
-        required: ['name', 'query'],
       },
     },
   },
@@ -301,56 +266,6 @@ const SPEC = {
       },
     },
 
-    // ─── Views ───────────────────────────────────────────────────────────
-    '/api/v1/views': {
-      get: { summary: 'List views', responses: { '200': { description: 'OK', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/View' } } } } } } },
-      post: {
-        summary: 'Create a view',
-        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/View' } } } },
-        responses: { '200': { description: 'OK' }, '409': { description: 'Already exists' } },
-      },
-    },
-    '/api/v1/views/{name}': {
-      get: { summary: 'Execute the view (run the projection)', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } } },
-      delete: { summary: 'Delete a view', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } } },
-    },
-
-    // ─── Functions ───────────────────────────────────────────────────────
-    '/api/v1/functions': {
-      get: { summary: 'List functions', responses: { '200': { description: 'OK' } } },
-      post: {
-        summary: 'Create a server-side JS function',
-        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/Function' } } } },
-        responses: { '200': { description: 'OK' }, '409': { description: 'Already exists' } },
-      },
-    },
-    '/api/v1/functions/{name}': {
-      get: { summary: 'Get a function', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } } },
-      post: {
-        summary: 'Test-invoke a function (manual trigger)',
-        description: 'Runs the stored JS code in a `new Function(ctx, code)` sandbox with `{ record, db, user }`. The body becomes `ctx.record` (optional).',
-        parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }],
-        requestBody: { required: false, content: { 'application/json': { schema: { type: 'object' } } } },
-        responses: { '200': { description: 'OK' }, '500': { description: 'Runtime error' } },
-      },
-      delete: { summary: 'Delete a function', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } } },
-    },
-
-    // ─── Materialized Views ──────────────────────────────────────────────
-    '/api/v1/matviews': {
-      get: { summary: 'List materialized views', responses: { '200': { description: 'OK' } } },
-      post: {
-        summary: 'Create a materialized view + compute the cached result',
-        requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/MaterializedView' } } } },
-        responses: { '200': { description: 'OK' }, '409': { description: 'Already exists' } },
-      },
-    },
-    '/api/v1/matviews/{name}': {
-      get: { summary: 'Read the cached result (O(1))', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } } },
-      post: { summary: 'Refresh (re-run the query + recache)', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } } },
-      delete: { summary: 'Delete a materialized view', parameters: [{ name: 'name', in: 'path', required: true, schema: { type: 'string' } }], responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } } },
-    },
-
     // ─── Admin: network + branches ───────────────────────────────────────
     '/api/admin/network': {
       get: { summary: 'Get the current IP allowlist config (admin)', responses: { '200': { description: 'OK' }, '401': { description: 'Admin key required' } } },
@@ -360,7 +275,7 @@ const SPEC = {
       get: { summary: 'List DB branch snapshots (admin)', responses: { '200': { description: 'OK' } } },
       post: {
         summary: 'Create or restore a DB branch snapshot (admin)',
-        description: 'Body { name } creates a snapshot of the SQLite + JSON cache. Body { name, action: "restore" } restores it.',
+        description: 'Body { name } creates a snapshot of the store JSON cache. Body { name, action: "restore" } restores it.',
         requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' }, action: { type: 'string', enum: ['create', 'restore'] } }, required: ['name'] } } } },
         responses: { '200': { description: 'OK' } },
       },

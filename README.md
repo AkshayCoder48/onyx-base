@@ -44,7 +44,7 @@ and you can walk away with it at any time.
 ## Architecture
 
 Onyx Base is a Next.js application that uses Telegram as its durable storage
-layer and SQLite as a fast local index. A Socket.io mini-service powers the
+layer and an in-memory store (with a JSON file cache) as a fast local index. A Socket.io mini-service powers the
 real-time dashboard. Clients — browser, CLI, or any HTTP library — talk to a
 single REST surface.
 
@@ -54,8 +54,8 @@ single REST surface.
 
 </div>
 
-*Clients (browser · CLI · HTTP) → Next.js API core → { SQLite index, Telegram
-durable storage, Socket.io realtime service }.*
+*Clients (browser · CLI · HTTP) → Next.js API core → { in-memory index,
+Telegram durable storage, Socket.io realtime service }.*
 
 <br/>
 
@@ -227,7 +227,7 @@ localStorage.removeItem('cloudkv-session')
 <!-- ───────────────────────── FEATURE REFERENCE ───────────────────────── -->
 ## Feature reference
 
-Fourteen dashboard tabs, each a real feature — not a placeholder. The icons match
+Twelve dashboard tabs, each a real feature — not a placeholder. The icons match
 the sidebar exactly.
 
 | Tab | What it does |
@@ -240,12 +240,10 @@ the sidebar exactly.
 | **API Keys** | Mint, name, and revoke multiple `kv_live_…` API keys per account. Each key is shown exactly once at creation — copy it before closing the dialog. Use named keys to segregate access (e.g. one for production, one for staging, one for the CLI on your laptop); revoke any of them instantly without touching the others. Keys are stored as salted hashes; the plaintext is never retrievable after creation. |
 | **Public Share** | Create scoped, rate-limited, expiring, revocable share tokens that wrap exactly one `(collection, key)` pair. Choose mode (`read` / `write` / `readwrite`), allowed ops (`set` / `incr` / `append`), max value length, incr bounds, per-IP rate limit, and TTL. Each token comes with copy-paste-ready `readUrl` and `writeUrl` — safe to embed in CodePen, static HTML, or browser extensions. |
 | **API Playground** | An interactive REST explorer: pick an endpoint (`set` / `get` / `list` / `delete` / `files` / `share-tokens` / `whoami` / `stats` / `logs` / …), fill in the parameters, hit **Send**, and inspect the raw JSON response. Auto-injects your current API key as the Bearer header. Great for prototyping calls before committing them to code, or for debugging why a particular request returns 404. |
-| **SQL Editor** | A real SQL console that runs against virtual tables (`records`, `collections`, `api_keys`, `logs`, `users`) pre-filtered to your account. Run `SELECT` / `INSERT` / `UPDATE` / `DELETE` / `CREATE` / `DROP` / `ALTER` statements, plus create your own `usr_*` tables for custom schemas. 1000-row cap per result, API keys masked in output, `⌘+Enter` to run. The fastest way to do bulk updates or exploratory queries. |
 | **Docs** | The in-app reference (the same content as the Keys/Tokens/Features/API/CLI/Realtime/Telegram sections of this README, restructured into tabs). Copy buttons on every code block, multi-language examples, and a **Copy for LLMs** button to grab the whole spec for an AI assistant. The **Single page** tab combines every section into one LLM-friendly document — the exact same content served at [`/llms.txt`](src/app/llms.txt/route.ts) (the [llmstxt.org](https://llmstxt.org) convention). |
 | **Logs** | An append-only audit trail of every API event on your account: `set`, `delete`, `login`, `apikey.create`, `share.create`, file upload, `export`, and more. Each entry includes the action, the key/collection touched, the source (`dashboard` / `cli` / `api` / `share`), and a timestamp. Filter by action type, paginate through history. Every log entry is also mirrored into your Telegram chat as a structured message. |
 | **Analytics** | Aggregate charts over your account activity: requests per day, top actions, top keys, share-token usage, file-download counts. Useful for spotting usage patterns (e.g. a share token that suddenly spiked traffic, or a key that's being read far more than written). All data is derived from the same logs table the Logs tab shows — just rolled up. |
 | **Settings** | Account + storage configuration. View your `userId`, plan, and API-key counts. Configure your own Telegram bot (Bot Token + Chat ID) to route new KV mirrors and file uploads to your private chat instead of the shared server-side bot. Optionally set a local Bot API server URL to unlock 2 GB file uploads/downloads (vs. the cloud Bot API's 50 MB upload / 20 MB download cap). Ping the bot to verify the config. |
-| **Tables** | Account-scoped SQL tables with per-table access modes (`read` / `write` / `readwrite`). Define a schema (TEXT / INTEGER / REAL / NUMERIC / BLOB / DATETIME / BOOLEAN columns, primary keys, auto-increment, defaults, nullability), then drive full CRUD from a real database-grid UI in the dashboard, the REST API (`/v1/tables/*`), or the CLI (`onyx tables`). Each table gets a unique `usr_<name>_<hash>` SQLite name so two accounts can both own a `notes` table without colliding. Toggle the access mode at any time to lock down public-facing tables — `read` blocks all writes, `write` blocks all reads, the dashboard owner always has full access. |
 
 <br/>
 
@@ -341,50 +339,6 @@ curl -H "Authorization: Bearer kv_live_YOUR_API_KEY" \
 | `GET` | `/v1/collections` | List collections (with record counts). |
 | `GET` | `/v1/collections/:name` | Collection detail. |
 
-### Tables
-
-Account-scoped SQL tables. Each table you create gets a unique
-`usr_<name>_<hash>` SQLite name so two accounts can both own a `notes` table
-without colliding. Each table has an **access mode** that controls what the
-public API can do: `read` → GET only; `write` → POST / PATCH / DELETE only;
-`readwrite` → everything. The dashboard owner can always do everything
-regardless of mode — the `/api/dashboard/tables/*` routes have the same shape
-but skip the access-mode check.
-
-| Method | Path | Purpose |
-|:---|:---|:---|
-| `GET` | `/v1/tables` | List your tables (name, accessMode, rowCount, schema, timestamps). |
-| `POST` | `/v1/tables` | Create a table. Body: `{ name, columns: ColumnDef[], accessMode? }`. `ColumnDef = { name, type: TEXT\|INTEGER\|REAL\|NUMERIC\|BLOB\|DATETIME\|BOOLEAN, primary?, autoIncrement?, nullable?, defaultValue? }`. `accessMode` defaults to `readwrite`. |
-| `GET` | `/v1/tables/:name` | Describe a table — schema + rowCount + sample rows + accessMode. |
-| `PATCH` | `/v1/tables/:name` | Update the access mode. Body: `{ accessMode }`. Takes effect on the next request. |
-| `DELETE` | `/v1/tables/:name` | Drop a table (SQLite `DROP TABLE` + metadata delete). Cannot be undone. |
-| `GET` | `/v1/tables/:name/rows` | List rows (default 100, `?limit=` max 1000). Honors the access mode — 403 on a write-only table. |
-| `POST` | `/v1/tables/:name/rows` | Insert a row. Body: `{ row: { col: value, … } }`. Validates against the schema; returns the inserted row with auto-incremented / defaulted columns filled in. |
-| `PATCH` | `/v1/tables/:name/rows` | Update a row by primary key. Body: `{ pk: { col: value }, patch: { col: value } }`. |
-| `DELETE` | `/v1/tables/:name/rows` | Delete a row by primary key. Body: `{ pk: { col: value } }`. 404 if no row matches. |
-
-```bash
-# Create a "tasks" table (read+write via the public API)
-curl -X POST https://onyx.example.com/v1/tables \
-  -H "Authorization: Bearer kv_live_…" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"tasks","accessMode":"readwrite","columns":[{"name":"id","type":"INTEGER","primary":true,"autoIncrement":true},{"name":"title","type":"TEXT","nullable":false},{"name":"done","type":"BOOLEAN","defaultValue":"0"}]}'
-
-# Insert a row
-curl -X POST https://onyx.example.com/v1/tables/tasks/rows \
-  -H "Authorization: Bearer kv_live_…" \
-  -H "Content-Type: application/json" \
-  -d '{"row":{"title":"Buy milk","done":false}}'
-
-# List rows
-curl -H "Authorization: Bearer kv_live_…" https://onyx.example.com/v1/tables/tasks/rows
-```
-
-> The dashboard mirrors the same shape under `/api/dashboard/tables/*` — list,
-> create, describe, drop, mode-change, rows CRUD — but with no access-mode
-> enforcement since the dashboard owner has full access. The CLI talks to the
-> dashboard routes.
-
 ### Account & ops
 
 | Method | Path | Purpose |
@@ -412,12 +366,6 @@ API key and are scoped to the authenticated user.
 
 | Method | Path | Purpose |
 |:---|:---|:---|
-| `GET` | `/api/v1/views` | List named views (projections over a collection). Create with `POST /api/v1/views { name, collection, projection, filter? }`. |
-| `GET` | `/api/v1/views/:name` | Execute a stored view — applies its substring filter on the key and projects the requested columns. |
-| `GET` | `/api/v1/matviews` | List materialized views (pre-computed aggregations cached as JSON). Create with `POST /api/v1/matviews { name, query }`. Refresh-all with `POST /api/v1/matviews { action: "refresh_all" }`. |
-| `GET` | `/api/v1/matviews/:name` | O(1) read of the cached aggregation result. `POST` to refresh, `DELETE` to drop. |
-| `POST` | `/api/v1/functions` | Create a server-side function. Body: `{ name, code }`. Runs in a `new Function("ctx", code)` sandbox with `{ record, db, user }` — `db` is read-only and user-scoped. 5s timeout, syntax-checked at create. |
-| `POST` | `/api/v1/functions/:name` | Test-invoke a stored function with the supplied `ctx` body. |
 | `POST` | `/api/v1/rpc/:name` | Built-in RPC: `count_records`, `sum { key }`, `aggregate { collection, type }`, `search { query, collection?, limit? }`, `touch { key, value, collection? }`. All user-scoped. |
 | `POST` | `/api/v1/graphql` | Minimal hand-rolled GraphQL endpoint (no Apollo/graphql deps). Queries for `records`, `collections`, `apiKeys`, `logs`, `me` — all user-scoped. Args + variables supported on `records(limit, collection)` and `logs(limit, action)`. Standard `{ data, errors }` response. |
 
@@ -429,7 +377,7 @@ API key and are scoped to the authenticated user.
 <!-- ───────────────────────── WRITE PATH DATA FLOW ───────────────────────── -->
 ## How a write flows
 
-Every mutation is fast (SQLite index) **and** durable (Telegram mirror). The
+Every mutation is fast (in-memory index) **and** durable (Telegram mirror). The
 identity manifest is re-pinned so the platform can self-heal after a full reset.
 
 <div align="center">
@@ -438,7 +386,7 @@ identity manifest is re-pinned so the platform can self-heal after a full reset.
 
 </div>
 
-*`set key` → SQLite upsert (fast read path) → Telegram mirror message (durable
+*`set key` → in-memory upsert (fast read path) → Telegram mirror message (durable
 backup) → identity manifest re-pinned (self-healing after reset).*
 
 <br/>
@@ -661,7 +609,7 @@ is the durable substrate; the innermost (UI) is what you click.
 
 </div>
 
-*Telegram (durable storage) → Next.js API routes (logic) → Prisma + SQLite (fast
+*Telegram (durable storage) → Next.js API routes (logic) → In-memory store (fast
 index) → React + shadcn/ui (dashboard).*
 
 <br/>
@@ -676,7 +624,6 @@ public URL. Replace `https://onyx.example.com` below with your instance's URL
 ```bash
 # 1. Install & run the web app (self-host)
 bun install
-bun run db:push     # create the SQLite schema
 bun run dev         # starts on http://localhost:3000 locally
 
 # 2. Create an account (web UI, CLI, or curl) — use your deployed URL in production
@@ -752,34 +699,357 @@ onyx file-link f_abc123            # mint a fresh Telegram cloud URL (~1h)
 onyx file-revoke f_abc123          # drop the cached URL immediately
 onyx file-delete f_abc123          # permanently delete a file
 
-# Tables (account-scoped SQL tables)
-onyx tables                                  # list your tables (alias: tbl)
-onyx tables create tasks --columns "id:INTEGER:pk:ai,title:TEXT:notnull,body:TEXT" --access rw
-onyx tables describe tasks                   # schema + sample rows
-onyx tables rows tasks                       # list rows (default 100)
-onyx tables insert tasks --data '{"title":"Buy milk","done":false}'
-onyx tables update tasks --pk '{"id":1}' --data '{"done":true}'
-onyx tables delete tasks --pk '{"id":1}' --yes
-onyx tables drop tasks --yes                 # drop the whole table
-onyx tables mode tasks r                     # change access mode (r=read, w=write, rw=readwrite)
-```
+# Share tokens (public surface)
 
-**Column-spec mini-DSL.** The `--columns` argument to `onyx tables create`
-takes a comma-separated list of column specs, each in the form:
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `GET` | `/v1/share/:token` | **Public** scoped read — no auth. Returns the value, type, and updatedAt for the single key the token wraps. |
+| `POST` | `/v1/write/:token` | **Public** scoped write — no auth. Body: `{ "op": "set"|"incr"|"append", "value"?, "amount"? }`. Honors `allowedOps`, `maxValueLength`, `incrMin/incrMax`, and the per-IP rate limit. |
+| `POST` | `/api/dashboard/share-tokens` | Create a share token (auth required). Body: `{ collection?, key, mode, label?, ttlMinutes?, rateLimitPerMin?, allowedOps?, maxValueLength?, incrMin?, incrMax? }`. |
+| `GET` | `/api/dashboard/share-tokens` | List your share tokens (auth required). |
+| `DELETE` | `/api/dashboard/share-tokens/:id` | Revoke a share token instantly (auth required). The public URL returns 404 on the next request. |
 
-```
-name:TYPE[:pk][:ai][:notnull][:default=VALUE]
-```
+### Advanced (`/api/v1/*`)
 
-`name` is any SQL-safe identifier; `TYPE` is one of `INTEGER`, `TEXT`, `REAL`,
-`NUMERIC`, `BLOB`, `DATETIME`, `BOOLEAN`; `pk` marks the column as `PRIMARY KEY`;
-`ai` adds `AUTOINCREMENT` (implies `INTEGER` + `pk`); `notnull` adds `NOT NULL`;
-`default=VALUE` sets a `DEFAULT`. Colons inside a quoted `default=…` value are
-respected, e.g. `"ts:DATETIME:default=2024-01-01 12:00:00"` is one column, not
-four. The CLI parses this spec client-side and POSTs the same
-`{ name, columns: ColumnDef[], accessMode }` body the REST API expects.
+A Supabase-style advanced surface lives under `/api/v1/*` (note the `/api`
+prefix, distinct from the basic `/v1/*` surface). All routes require the Bearer
+API key and are scoped to the authenticated user.
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| `POST` | `/api/v1/rpc/:name` | Built-in RPC: `count_records`, `sum { key }`, `aggregate { collection, type }`, `search { query, collection?, limit? }`, `touch { key, value, collection? }`. All user-scoped. |
+| `POST` | `/api/v1/graphql` | Minimal hand-rolled GraphQL endpoint (no Apollo/graphql deps). Queries for `records`, `collections`, `apiKeys`, `logs`, `me` — all user-scoped. Args + variables supported on `records(limit, collection)` and `logs(limit, action)`. Standard `{ data, errors }` response. |
+
+> The full surface — including dashboard routes (`/api/dashboard/*`) and admin
+> routes (`/api/admin/*`) — is in the **API surface** section below.
+
+<br/>
+
+<!-- ───────────────────────── WRITE PATH DATA FLOW ───────────────────────── -->
+## How a write flows
+
+Every mutation is fast (in-memory index) **and** durable (Telegram mirror). The
+identity manifest is re-pinned so the platform can self-heal after a full reset.
+
+<div align="center">
+
+<p align="center"><img src="docs/diagrams/write-data-flow.svg" alt="Write data flow" width="820"></p>
+
+</div>
+
+*`set key` → in-memory upsert (fast read path) → Telegram mirror message (durable
+backup) → identity manifest re-pinned (self-healing after reset).*
+
+<br/>
+
+<!-- ───────────────────────── STORAGE ROUTING ───────────────────────── -->
+## File storage routing
+
+Uploads **automatically** use the server-side Telegram bot when no custom config
+is set up. Set up your own bot in Settings to route new uploads to your private
+chat. Each file remembers which backend holds it, so downloads and deletes always
+hit the correct bot — even if you change config later.
+
+### On-demand download links (Telegram's 1-hour rule)
+
+Telegram revokes every `getFile` download URL after **~1 hour**. Onyx Base
+respects that limit instead of fighting it:
+
+- Every file row has a **Get link** button. Tap it → the backend asks Telegram's
+  `getFile` API for a fresh **Telegram cloud URL** (`https://api.telegram.org/file/bot…/…`)
+  and returns it directly. Telegram revokes this URL after ~1 hour — that's
+  Telegram's built-in behaviour, not ours.
+- A live countdown shows when the link expires. After expiry, tap **Refresh**
+  to pull a brand-new URL from Telegram.
+- **Revoke** drops the cached URL from our server immediately and marks the
+  file's link as revoked. The next **Get link** call mints a brand-new URL via
+  a fresh `getFile` call. (Note: Telegram's own URL remains valid until its
+  natural ~1-hour expiry — we can't force Telegram to revoke it sooner — but
+  we no longer cache or re-serve it on our side.)
+- Links are fetched **only on your tap**, never automatically — so the Telegram
+  API is never spammed. A 55-minute server-side cache means even repeated
+  calls for the same file make at most one `getFile` call per hour.
+- A **proxy URL** on your server's origin (`/f/<fileId>`) is also returned as a
+  fallback — permanent for public files, works worldwide, and never exposes
+  the Telegram bot token.
+
+<div align="center">
+
+<p align="center"><img src="docs/diagrams/storage-routing.svg" alt="Storage routing" width="780"></p>
+
+</div>
+
+*Upload → **full custom config?** → yes: your own Telegram bot · no: the
+server-side bot (automatic). Both produce a permanent `/f/<id>` link.*
+
+<br/>
+
+<!-- ───────────────────────── SHARE TOKEN SECURITY ───────────────────────── -->
+## Public share tokens — layered security
+
+A share token wraps a single key in five concentric layers of protection, so it
+is safe to embed in source-visible platforms (static HTML, CodePen, etc.).
+
+<div align="center">
+
+<p align="center"><img src="docs/diagrams/share-token-security-layers.svg" alt="Share token security layers" width="560"></p>
+
+</div>
+
+From the inside out: the **key** → **scope** (one key only) → **mode**
+(read / write / readwrite) → **rate limit** (requests per minute) → **TTL**
+(auto-expiry) → **revocable** (instant kill switch).
+
+<br/>
+
+<!-- ───────────────────────── AUTH & RECOVERY ───────────────────────── -->
+<!-- ───────────────────────── EMAIL AUTOMATION ───────────────────────── -->
+## Email Automation API — privacy-first (MCPEmail + Telegram bridge)
+
+A generic email automation engine (OTP codes, welcome mails, notifications,
+reports — anything), built around **credential ownership**:
+
+> **Privacy disclaimer.** For private or sensitive email automation, use your
+> own Telegram credentials and your own MCPEmail API key — never credentials
+> belonging to another person. Your `mcpe_*` key is a user-owned credential
+> used only to execute requests on your behalf; it is never exposed, logged,
+> or reused for other users.
+
+Two completely different credentials, never confused:
+
+- **Platform API key** (`kv_live_*`) — authenticates *you → this API*. Never forwarded upstream.
+- **MCPEmail key** (`mcpe_*`) — resolved *by name* from your private store and used only for the *API → MCPEmail* hop.
 
 ```bash
+# 1. Connect YOUR MCPEmail key under a name (live handshake on save;
+#    mirrored to YOUR private pinned Telegram manifest):
+curl -X POST /api/credentials/connect \
+  -H "Authorization: Bearer kv_live_…" \
+  -d '{"name":"personal_email","apiKey":"mcpe_…","rateLimitPerMin":30}'
+
+# 2. Automate — reference the credential BY NAME; $VAR_NAME$ substitution:
+curl -X POST /api/email/send \
+  -H "Authorization: Bearer kv_live_…" \
+  -d '{"credential":"personal_email","to":"user@example.com",
+       "subject":"Welcome $NAME$","body":"Hello $NAME$, code: $OTP$.",
+       "variables":{"NAME":"Akshay","OTP":"483921"}}'
+```
+
+Key rules: unknown `$VARIABLE$` → `400 missing_variable` (send aborted, never
+half-rendered) · unknown credential name → `404 credential_not_found` (**fail
+closed** — no project-wide fallback key exists anywhere) · every send returns
+a `request_id` traceable via `GET /api/email/status/:requestId` (metadata
+only) · secrets are redacted from every log line · cross-user credential
+access is blocked (tenant-scoped). Full docs: **`/docs#email`** (anonymous).
+
+<br/>
+## Authentication & recovery
+
+Your API key (`kv_live_…`) is the only credential needed for all data
+operations. A separate email + password exists solely for key recovery. Every
+identity mutation is mirrored to the Telegram pinned manifest, so the platform
+can self-heal after a full reset.
+
+<div align="center">
+
+<p align="center"><img src="docs/diagrams/authentication-and-recovery-flow.svg" alt="Authentication and recovery flow" width="820"></p>
+
+</div>
+
+*Sign in via API key **or** email + password → dashboard. Lose your key? Recover
+it from the Telegram pinned manifest. Disposable-email signups are blocked at
+the door.*
+
+<br/>
+
+<!-- ───────────────────────── ADMIN SYSTEM ───────────────────────── -->
+## Admin system
+
+Onyx Base ships with a built-in admin role that can see and manage **every
+user's data** on the instance — useful for self-hosted operators, support
+workflows, and disaster recovery. Admins use a separate key prefix
+(`onyxbase_…`) that unlocks a dedicated admin console alongside the regular
+dashboard.
+
+### The bootstrap admin key
+
+Every instance boots with one irrevocable admin key that **you set yourself**
+in `.env`:
+
+```bash
+# .env (NEVER commit this file — it's gitignored)
+BOOTSTRAP_ADMIN_KEY=onyxbase_<your-own-long-random-string>
+```
+
+Generate one with, for example, `openssl rand -hex 16` and prefix it with
+`onyxbase_`. Sign in with this key (web UI or CLI) to enter the **Admin
+Dashboard** — a separate console that shows every user, their collections,
+keyvalues, files, and API keys. The bootstrap key cannot be revoked or rotated
+from the UI; rotate it by changing the env var and redeploying.
+
+### Accessing the admin dashboard
+
+Two ways in:
+
+1. **Sign in** with the admin key on the regular login screen — Onyx Base
+   detects the `onyxbase_` prefix and routes you straight into the admin
+   console. A header toggle lets you switch between the admin console and the
+   regular user dashboard at any time.
+2. **Direct URL** — visit [`/admin`](src/app/admin/page.tsx) on your instance.
+   If you aren't signed in yet, you'll be asked for an admin key; if you are,
+   the admin console loads immediately.
+
+### What the admin can see
+
+- **Users** — every account with stats (records, files, collections, last
+  activity, signup time).
+- Per-user detail: **collections**, **keyvalues** (full database-IDE table
+  with sortable columns and expandable JSON), **files** (with Telegram
+  direct-link mint / refresh / revoke), and **API keys**.
+- **All files** — across every user, with the same Get-link / Refresh / Revoke
+  controls as the regular storage tab.
+- **Admin keys** — list and revoke promoted admin keys (the bootstrap key
+  cannot be revoked).
+
+### Promoting a user to admin
+
+To grant admin powers to a regular user (e.g. a teammate who needs
+cross-user visibility), promote their existing `kv_live_` API key to an
+`onyxbase_` key:
+
+```bash
+# CLI:
+onyx admin promote kv_live_abc123def456 --label "Ada (ops)"
+
+# Or via curl:
+curl -X POST https://onyx.example.com/api/admin/promote \
+  -H "Authorization: Bearer $BOOTSTRAP_ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"kvLiveKey":"kv_live_abc123def456","label":"Ada (ops)"}'
+# → { "adminKey": "onyxbase_a1b2c3d4e5f6…", "label": "Ada (ops)" }
+```
+
+The promoted user gets back a fresh `onyxbase_<hex>` key — they sign in with
+that from then on. Their original `kv_live_` key still works for ordinary
+user-level data operations.
+
+### Revoking an admin key
+
+```bash
+onyx admin revoke onyxbase_a1b2c3d4e5f6
+# or via curl:
+curl -X DELETE "https://onyx.example.com/api/admin/admins?id=<adminKeyId>" \
+  -H "Authorization: Bearer $BOOTSTRAP_ADMIN_KEY"
+```
+
+The bootstrap key (the value you set in `BOOTSTRAP_ADMIN_KEY`) is
+**irrevocable** — attempting to delete it returns a 409 Conflict. To rotate
+it, change the env var and redeploy.
+
+<br/>
+
+<!-- ───────────────────────── TECH STACK LAYERS ───────────────────────── -->
+## Tech stack
+
+Four layered concerns, one cohesive warm palette. The outermost layer (Telegram)
+is the durable substrate; the innermost (UI) is what you click.
+
+<div align="center">
+
+<p align="center"><img src="docs/diagrams/tech-stack-layers.svg" alt="Tech stack layers" width="780"></p>
+
+</div>
+
+*Telegram (durable storage) → Next.js API routes (logic) → In-memory store (fast
+index) → React + shadcn/ui (dashboard).*
+
+<br/>
+
+<!-- ───────────────────────── QUICK START ───────────────────────── -->
+## Quick start
+
+Onyx Base is a cloud-hosted service — once deployed, every developer gets a
+public URL. Replace `https://onyx.example.com` below with your instance's URL
+(or just use the hosted dashboard in your browser).
+
+```bash
+# 1. Install & run the web app (self-host)
+bun install
+bun run dev         # starts on http://localhost:3000 locally
+
+# 2. Create an account (web UI, CLI, or curl) — use your deployed URL in production
+curl -X POST https://onyx.example.com/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Ada","email":"ada@example.com","password":"secret123"}'
+# → { "apiKey": "kv_live_…" }
+
+# 3. Store and read your first value
+curl -X POST https://onyx.example.com/v1/kv/default/visits \
+  -H "Authorization: Bearer kv_live_…" \
+  -H "Content-Type: application/json" \
+  -d '{"value": 0}'
+
+curl https://onyx.example.com/v1/kv/default/visits \
+  -H "Authorization: Bearer kv_live_…"
+# → { "value": 0, "type": "number" }
+
+# 4. Upload a file (any extension, up to 50 MB via cloud Bot API) — auto-routed to server-side Telegram
+curl -X POST https://onyx.example.com/v1/files \
+  -H "Authorization: Bearer kv_live_…" \
+  -F "file=@./report.pdf"
+# → { "file": { "id": "…", "fileId": "f_…", "storageMode": "server", "isPublic": true } }
+
+# 5. Mint a fresh Telegram cloud download link (revoked by Telegram after ~1h)
+curl -X POST https://onyx.example.com/api/files/<id>/link \
+  -H "Authorization: Bearer kv_live_…"
+# → { "url": "https://api.telegram.org/file/bot…/…",   ← raw Telegram cloud URL
+#     "proxyUrl": "https://onyx.example.com/f/f_…",     ← permanent proxy fallback
+#     "expiresAt": 1735900000000, "expiresInSec": 3300, "revocable": true }
+
+# 6. Download the file — the Telegram URL works from anywhere for ~1 hour
+curl -L "https://api.telegram.org/file/bot…/…" -o report.pdf
+
+# Revoke the cached link (drops our cache; the next /link call mints a new URL):
+curl -X POST https://onyx.example.com/api/files/<id>/revoke \
+  -H "Authorization: Bearer kv_live_…"
+
+# After the link expires, mint a new one (add ?force=1 to bypass the cache):
+curl -X POST "https://onyx.example.com/api/files/<id>/link?force=1" \
+  -H "Authorization: Bearer kv_live_…"
+```
+
+> Download links are **Telegram's raw cloud URLs** (`api.telegram.org/file/…`),
+> valid for ~1 hour (Telegram's built-in revocation). The server caches each
+> URL for 55 minutes so repeated calls make at most one `getFile` call per hour —
+> Telegram is never spammed. Mint a new link after expiry. **Revoke** drops our
+> cache immediately; the next Get link call pulls a brand-new URL from Telegram.
+> A permanent proxy URL (`/f/<fileId>`) is also returned for public files.
+
+### CLI
+
+```bash
+npm i -g onyx-base
+export ONYX_URL=https://onyx.example.com
+
+# Auth & data
+onyx login --name "Ada" --email ada@example.com
+onyx set visits 0
+onyx get visits
+onyx list                          # list keys in the default collection
+onyx export --output backup.json   # dump the whole database as JSON
+
+# Collections
+onyx collections                   # list collections (+ record counts)
+onyx collections --create cache    # create a new collection
+
+# Files
+onyx upload ./report.pdf --label "Q3 report"
+onyx files                         # list stored files
+onyx download f_abc123 ./out.pdf
+onyx file-link f_abc123            # mint a fresh Telegram cloud URL (~1h)
+onyx file-revoke f_abc123          # drop the cached URL immediately
+onyx file-delete f_abc123          # permanently delete a file
+
 # Share tokens
 onyx share --key visits --mode read --ttl 3600   # mint a scoped share token
 onyx share --list                               # list your share tokens
@@ -854,24 +1124,6 @@ Authorization: Bearer kv_live_…
 | `GET` | `/v1/collections` | List collections (with record counts) |
 | `POST` | `/v1/collections` | Create a collection (body: `{"name":"cache"}`) |
 | `DELETE` | `/v1/collections/:name` | Delete a collection + all its records |
-| `GET` | `/v1/tables` | List your tables (account-scoped SQL tables) |
-| `POST` | `/v1/tables` | Create a table — body: `{ name, columns: ColumnDef[], accessMode? }` |
-| `GET` | `/v1/tables/:name` | Describe a table (schema + rowCount + sample rows + accessMode) |
-| `PATCH` | `/v1/tables/:name` | Update the access mode (`read` / `write` / `readwrite`) |
-| `DELETE` | `/v1/tables/:name` | Drop a table (SQLite `DROP TABLE` + metadata delete) |
-| `GET` | `/v1/tables/:name/rows` | List rows (default 100, `?limit=` max 1000; honors access mode) |
-| `POST` | `/v1/tables/:name/rows` | Insert a row — body: `{ row: { col: value, … } }` |
-| `PATCH` | `/v1/tables/:name/rows` | Update a row by PK — body: `{ pk: { col: value }, patch: { col: value } }` |
-| `DELETE` | `/v1/tables/:name/rows` | Delete a row by PK — body: `{ pk: { col: value } }` |
-| `GET` | `/api/dashboard/tables` | List your tables (dashboard — no access-mode enforcement) |
-| `POST` | `/api/dashboard/tables` | Create a table (dashboard) |
-| `GET` | `/api/dashboard/tables/:name` | Describe a table (dashboard) |
-| `PATCH` | `/api/dashboard/tables/:name` | Update access mode (dashboard) |
-| `DELETE` | `/api/dashboard/tables/:name` | Drop a table (dashboard) |
-| `GET` | `/api/dashboard/tables/:name/rows` | List rows (dashboard) |
-| `POST` | `/api/dashboard/tables/:name/rows` | Insert a row (dashboard) |
-| `PATCH` | `/api/dashboard/tables/:name/rows` | Update a row by PK (dashboard) |
-| `DELETE` | `/api/dashboard/tables/:name/rows` | Delete a row by PK (dashboard) |
 | `GET` | `/v1/share/:token` | **Public** scoped read (no auth) |
 | `POST` | `/v1/write/:token` | **Public** scoped write (incr / set / append) |
 | `POST` | `/api/dashboard/share-tokens` | Create a scoped share token |
@@ -901,15 +1153,9 @@ cross-user):
 
 | Method | Path | Purpose |
 |:---|:---|:---|
-| `GET` | `/api/v1/views` | List named views (SQL VIEW equivalent). Create with `POST /api/v1/views { name, collection, projection, filter? }`. |
-| `GET` | `/api/v1/views/:name` | Execute a stored view — applies the substring filter, projects the requested columns. |
-| `GET` | `/api/v1/matviews` | List materialized views (cached aggregations). Create with `POST /api/v1/matviews { name, query }`. Refresh-all with `POST /api/v1/matviews { action: "refresh_all" }`. |
-| `GET/POST/DELETE` | `/api/v1/matviews/:name` | O(1) read of the cached result (`GET`); refresh (`POST`); drop (`DELETE`). |
-| `POST` | `/api/v1/functions` | Create a server-side function. Body: `{ name, code }`. Runs in a `new Function("ctx", code)` sandbox with `{ record, db, user }` — `db` is read-only and user-scoped. 5s timeout, syntax-checked at create. |
-| `POST` | `/api/v1/functions/:name` | Test-invoke a stored function with the supplied `ctx` body. |
 | `POST` | `/api/v1/rpc/:name` | Built-in RPC: `count_records`, `sum { key }`, `aggregate { collection, type }`, `search { query, collection?, limit? }`, `touch { key, value, collection? }`. All user-scoped. |
 | `POST` | `/api/v1/graphql` | Minimal hand-rolled GraphQL (no Apollo/graphql deps). Queries for `records`, `collections`, `apiKeys`, `logs`, `me` — all user-scoped. Args + variables on `records(limit, collection)` and `logs(limit, action)`. Standard `{ data, errors }` response. |
-| `GET/POST` | `/api/admin/branches` | List / create DB branches (snapshot SQLite + JSON cache under a named branch). |
+| `GET/POST` | `/api/admin/branches` | List / create DB branches (snapshot the store JSON cache under a named branch). |
 | `DELETE` | `/api/admin/branches/:name` | Drop a branch (delete the snapshot, keep the live DB). |
 
 <br/>
@@ -967,8 +1213,6 @@ mini-services/
 └── realtime/           # Socket.io service (port 3003) — record:changed events
 cli/
 └── index.js            # the zero-dependency `onyx` CLI
-prisma/
-└── schema.prisma       # User, ApiKey, Collection, Record, Log…
 ```
 
 <br/>
@@ -1038,7 +1282,7 @@ replies, inline keyboards, callback queries, `forwardMessage`,
 `copyMessage`, `editMessageText`, `setMyCommands`, Telegram Passport, message
 scheduling, polls, stickers, etc.). They are grouped into five categories of
 five. Vote for your favourites by opening an issue, or build one yourself on
-top of the existing `/v1/*` surface and `/v1/tables/*` endpoints.
+top of the existing `/v1/*` surface.
 
 ### Storage models
 
@@ -1146,7 +1390,7 @@ MIT — build on it, ship it, make it yours.
 
 <div align="center">
 
-<sub>Built with Next.js 16 · Prisma · Socket.io · Telegram · shadcn/ui</sub>
+<sub>Built with Next.js 16 · Socket.io · Telegram · shadcn/ui</sub>
 <br/>
 <sub>Palette: Claude-inspired warm clay on cream.</sub>
 

@@ -15,8 +15,6 @@ export type ViewKey =
   | 'logs'
   | 'analytics'
   | 'playground'
-  | 'sql'
-  | 'tables'
   | 'docs'
   | 'settings'
   | 'diagnostics'
@@ -76,19 +74,24 @@ export const useOnyxBase = create<OnyxBaseState>()(
     }),
     {
       name: 'cloudkv-session',
-      version: 2,
-      // Migrate persisted sessions from the retired 'email-otp' view to the
-      // new Email Automation tab (v1 → v2). Anything unrecognized falls back
-      // to 'overview' so a stale tab can never blank the dashboard.
+      version: 3,
+      // Migrations:
+      //   v1 → v2: the retired 'email-otp' view moves to Email Automation.
+      //   v2 → v3: the SQLite SQL workspace (SQL Editor + Tables tabs) was
+      //            removed — those tabs land on the KV Database tab so a
+      //            stale persisted tab can never blank the dashboard.
       migrate: (persisted, version) => {
         const state = (persisted ?? {}) as Record<string, unknown>
         if (version < 2 && state.activeView === 'email-otp') {
           state.activeView = 'email-automation'
         }
+        if (version < 3 && (state.activeView === 'sql' || state.activeView === 'tables')) {
+          state.activeView = 'database'
+        }
         if (state.activeView !== undefined && ![
           'assistant', 'overview', 'database', 'collections', 'storage', 'api-keys',
           'email-automation', 'share', 'logs', 'analytics', 'playground',
-          'sql', 'tables', 'docs', 'settings', 'diagnostics',
+          'docs', 'settings', 'diagnostics',
         ].includes(state.activeView as string)) {
           state.activeView = 'overview'
         }

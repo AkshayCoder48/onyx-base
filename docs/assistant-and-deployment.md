@@ -12,8 +12,6 @@ The assistant UI follows the existing Sunrise Glass design system (coral/amber a
 
 ## Storage and deployment
 
-For durable Telegram-backed data, configure `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CLOUDKV_SECRET` and other secrets as shown in the repository `.env.example`. SQLite-backed legacy SQL editor functions use `ONYX_SQLITE_URL` (default `file:./onyx-sql.db` locally, `file:/tmp/onyx-sql.db` on Vercel); a platform PostgreSQL `DATABASE_URL` is never passed to Prisma's SQLite driver. The V5 engine retains its existing `V5_DATABASE_URL` configuration; use a remotely durable libsql URL for multi-instance serverless deployments.
-
-The optional Drizzle PostgreSQL workspace (`src/db/` + `drizzle.config.json`) is ready for future relational features: define tables in `src/db/schema.ts` and run `bunx drizzle-kit push` against a `postgres://` `DATABASE_URL`. It is inert by default — importing it never connects and never throws.
+For durable Telegram-backed data, configure `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CLOUDKV_SECRET` and other secrets as shown in the repository `.env.example`. The legacy SQLite SQL editor workspace (Prisma + `ONYX_SQLITE_URL`) has been removed — the app's data plane is the in-memory store + Telegram mirror, end to end. The V5 engine retains its existing `V5_DATABASE_URL` configuration; use a remotely durable libsql URL for multi-instance serverless deployments.
 
 No Next.js application can guarantee zero provider CPU, zero function storage, or zero network latency. Telegram writes and freshness probes require real network round trips and Telegram's service limits apply. Local filesystem-backed indexes are ephemeral on most serverless hosts; use the repo's documented remote/durable configuration for production. CSS entrance motion uses short compospositor-friendly transforms and honors `prefers-reduced-motion`.

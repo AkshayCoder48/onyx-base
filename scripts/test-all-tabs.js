@@ -26,8 +26,6 @@ const CASES = [
   ['share',         'GET',  '/api/dashboard/share-tokens'],
   ['logs',          'GET',  '/api/dashboard/logs'],
   ['analytics',     'GET',  '/api/dashboard/analytics'],
-  ['sql',           'POST', '/api/dashboard/sql', { sql: 'SELECT 1 AS n' }, 200],
-  ['tables',        'GET',  '/api/dashboard/tables'],
   ['docs',          'GET',  '/api/docs'],
   ['settings',      'GET',  '/api/dashboard/stats'],
   ['settings',      'GET',  '/api/dashboard/status'],
@@ -41,12 +39,8 @@ const CASES = [
   ['v1 core',       'GET',  '/v1/whoami'],
   ['v1 core',       'GET',  '/v1/list'],
   ['v1 core',       'GET',  '/v1/collections'],
-  ['v1 core',       'GET',  '/v1/tables'],
   ['v1 core',       'GET',  '/v1/logs'],
   // advanced endpoints exist under /api/v1/* as well
-  ['v1 advanced',   'GET',  '/api/v1/views'],
-  ['v1 advanced',   'GET',  '/api/v1/matviews'],
-  ['v1 advanced',   'GET',  '/api/v1/functions'],
   ['v1 core',       'GET',  '/api/openapi.json'],
   // public docs — must work WITHOUT auth (anonymous)
   ['docs public',   'GET',  '/docs'],

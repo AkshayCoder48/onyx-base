@@ -10,7 +10,7 @@ export const runtime = 'nodejs'
  * Component-level health check. Returns the status of every subsystem the
  * dashboard depends on:
  *   - api       — this Next.js process (always healthy if we're responding)
- *   - database  — the local JSON cache (and on demand, the SQLite index)
+ *   - database  — the local JSON cache (the in-memory store's disk mirror)
  *   - telegram  — reachability of the Telegram Bot API + the configured chat
  *   - realtime  — the socket.io mini-service on port 3003
  *

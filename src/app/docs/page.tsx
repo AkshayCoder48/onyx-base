@@ -356,22 +356,6 @@ const ADVANCED_ENDPOINTS: Endpoint[] = [
   },
   {
     method: "POST",
-    path: "/api/v1/views · /api/v1/matviews · /api/v1/functions",
-    title: "Views, materialized views, server functions",
-    auth: true,
-    description:
-      "Named projections over collections (views), pre-computed cached aggregations (matviews), and sandboxed server-side JS handlers (functions) with a 5-second timeout.",
-  },
-  {
-    method: "POST",
-    path: "/api/dashboard/sql · /api/dashboard/tables",
-    title: "SQL editor + structured tables",
-    auth: true,
-    description:
-      "Run SELECT/WITH queries against the virtual tables users, records, api_keys, collections, logs — and create real structured tables with typed schemas via the Tables API.",
-  },
-  {
-    method: "POST",
     path: "/api/auth/register",
     title: "Self-serve signup",
     auth: false,
@@ -580,7 +564,7 @@ Authorization: Bearer kv_live_aa6d…3d11
             id="kv"
             eyebrow="03 · core api"
             title="Key-value storage"
-            intro="Plain REST over collections of JSON records. SQLite is the fast local index; a private Telegram channel is the durable mirror — cold boots rehydrate automatically from it. Collections group records and are created on first write."
+            intro="Plain REST over collections of JSON records. The in-memory store is the fast local index; a private Telegram channel is the durable mirror — cold boots rehydrate automatically from it. Collections group records and are created on first write."
           >
             {KV_ENDPOINTS.map((e) => (
               <EndpointCard key={e.path} e={e} />

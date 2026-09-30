@@ -13,8 +13,6 @@ import { ShareView } from './share'
 import { LogsView } from './logs'
 import { AnalyticsView } from './analytics'
 import { PlaygroundView } from './playground'
-import { SqlEditorView } from './sql-editor'
-import { TablesView } from './tables'
 import { DocsView } from './docs'
 import { SettingsView } from './settings'
 import { DiagnosticsView } from './diagnostics'
@@ -35,8 +33,6 @@ const VIEW_TITLES: Record<ViewKey, string> = {
   logs: 'Logs',
   analytics: 'Analytics',
   playground: 'API Playground',
-  sql: 'SQL Editor',
-  tables: 'Tables',
   docs: 'Docs',
   settings: 'Settings',
   diagnostics: 'Diagnostics',
@@ -158,8 +154,6 @@ export function DashboardShell() {
                 {view === 'logs' && <LogsView />}
                 {view === 'analytics' && <AnalyticsView />}
                 {view === 'playground' && <PlaygroundView />}
-                {view === 'sql' && <SqlEditorView />}
-                {view === 'tables' && <TablesView />}
                 {view === 'docs' && <DocsView />}
                 {view === 'settings' && <SettingsView />}
                 {view === 'diagnostics' && <DiagnosticsView />}

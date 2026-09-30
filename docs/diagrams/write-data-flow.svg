@@ -12,7 +12,7 @@
 
   <!-- Title bar (Task ID 9: svg-text-enhancer) -->
   <text x="420" y="22" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#2b2825" text-anchor="middle">Write Data Flow</text>
-  <text x="420" y="36" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">Every write is fast (SQLite) AND durable (Telegram)</text>
+  <text x="420" y="36" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">Every write is fast (in-memory) AND durable (Telegram)</text>
 
   <g transform="translate(0 40)">
   <!-- Stage 1: set key -->
@@ -27,7 +27,7 @@
 
   <path d="M185 100 L215 100" fill="none" stroke="#d4744f" stroke-width="2.5" marker-end="url(#arrFlow)"/>
 
-  <!-- Stage 2: SQLite upsert -->
+  <!-- Stage 2: in-memory upsert -->
   <rect x="220" y="50" width="160" height="100" rx="14" fill="url(#flowStage)" stroke="#d4744f" stroke-width="2"/>
   <g>
     <ellipse cx="300" cy="70" rx="36" ry="9" fill="#b1ada1"/>
@@ -37,7 +37,7 @@
     <path d="M286 90 L300 78 L314 90 L308 90 L308 102 L292 102 L292 90 z" fill="#d4744f"/>
   </g>
   <rect x="240" y="125" width="120" height="8" rx="4" fill="#e8e5dc"/>
-  <text x="300" y="175" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#2b2825" text-anchor="middle">2. SQLite upsert</text>
+  <text x="300" y="175" font-family="system-ui, -apple-system, sans-serif" font-size="13" font-weight="700" fill="#2b2825" text-anchor="middle">2. In-memory upsert</text>
   <text x="300" y="193" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">instant ack</text>
   <text x="300" y="208" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">key + value + type</text>
   <text x="300" y="225" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-style="italic" fill="#d4744f" text-anchor="middle">fast read path</text>

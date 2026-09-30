@@ -18,7 +18,7 @@ const LLMS_TXT = `# Onyx Base
 > free and unlimited, your data lives in your own Telegram chat.
 
 Onyx Base is a Next.js 16 backend-as-a-service that uses Telegram as its
-durable storage layer and SQLite (via Prisma) as a fast local index. Bring a
+durable storage layer and an in-memory store as a fast local index. Bring a
 Bot Token + Chat ID (or use the built-in server-side bot) and you get a
 key-value database AND a file store (up to 50 MB upload / 20 MB download via
 the cloud Bot API; 2 GB both ways with a self-hosted Local Bot API server),
@@ -73,7 +73,7 @@ what lets the platform self-heal after a full reset. A Socket.io mini-service
 so the UI updates without polling.
 
 \`\`\`
-browser · CLI · HTTP  →  Next.js API core  →  { SQLite index
+browser · CLI · HTTP  →  Next.js API core  →  { in-memory index
                                                  Telegram durable storage
                                                  Socket.io realtime service }
 \`\`\`
@@ -242,8 +242,6 @@ match the sidebar exactly.
 | **Email Automation** | Privacy-first email automation API. Connect YOUR MCPEmail key as a NAMED credential (\`personal_email\`, \`work_email\`… — live handshake on save, mirrored to your private pinned Telegram manifest), then send via \`/api/email/send\` referencing the name. \`$VAR_NAME$\` variable engine (missing variables abort the send), stored templates, per-credential custom rate limits, request-ID status tracking, and a strict two-credential boundary: the platform \`kv_live_*\` key authenticates you to this API; your \`mcpe_*\` key authenticates the MCPEmail hop. No project-wide fallback — fail closed. |
 | **Public Share** | Create scoped, rate-limited, expiring, revocable share tokens that wrap exactly one \`(collection, key)\` pair. Choose mode, allowed ops, max value length, incr bounds, per-IP rate limit, and TTL. Each token comes with copy-paste-ready \`readUrl\` and \`writeUrl\`. |
 | **API Playground** | An interactive REST explorer: pick an endpoint, fill in the parameters, hit **Send**, and inspect the raw JSON response. Auto-injects your current API key as the Bearer header. |
-| **SQL Editor** | A real SQL console that runs against virtual tables (\`records\`, \`collections\`, \`api_keys\`, \`logs\`, \`users\`) pre-filtered to your account. Run \`SELECT\` / \`INSERT\` / \`UPDATE\` / \`DELETE\` / \`CREATE\` / \`DROP\` / \`ALTER\` statements, plus create your own \`usr_*\` tables for custom schemas. 1000-row cap per result, API keys masked in output, \`⌘+Enter\` to run. |
-| **Tables** | Account-scoped SQL tables with per-table access modes (\`read\` / \`write\` / \`readwrite\`). Define a schema (TEXT / INTEGER / REAL / NUMERIC / BLOB / DATETIME / BOOLEAN columns, primary keys, auto-increment, defaults, nullability), then drive full CRUD from a real database-grid UI in the dashboard, the REST API (\`/v1/tables/*\`), or the CLI (\`onyx tables\`). Each table gets a unique \`usr_<name>_<hash>\` SQLite name so two accounts can both own a \`notes\` table without colliding. Toggle the access mode at any time to lock down public-facing tables. |
 | **Docs** | This in-app reference. Copy buttons on every code block, multi-language examples, and a **Copy for LLMs** button at the top to grab the whole spec for an AI assistant (it fetches this very \`/llms.txt\` file). |
 | **Logs** | An append-only audit trail of every API event on your account: \`set\`, \`delete\`, \`login\`, \`apikey.create\`, \`share.create\`, file upload, \`export\`, and more. Each entry includes the action, the key/collection touched, the source (\`dashboard\` / \`cli\` / \`api\` / \`share\`), and a timestamp. Filter by action type, paginate through history. Every log entry is also mirrored into your Telegram chat as a structured message. |
 | **Analytics** | Aggregate charts over your account activity: requests per day, top actions, top keys, share-token usage, file-download counts. All data is derived from the same logs table the Logs tab shows — just rolled up. |
@@ -291,51 +289,7 @@ Authorization: Bearer kv_live_abc123def456…
 | \`GET\` | \`/v1/collections\` | List collections (with record counts). |
 | \`GET\` | \`/v1/collections/:name\` | Collection detail. |
 
-### 4.4 · Tables
-
-Account-scoped SQL tables. Each table you create gets a unique
-\`usr_<name>_<hash>\` SQLite name so two accounts can both own a \`notes\`
-table without colliding. Each table has an **access mode** that controls
-what the public API can do: \`read\` → GET only; \`write\` → POST / PATCH /
-DELETE only; \`readwrite\` → everything. The dashboard owner can always do
-everything regardless of mode — the \`/api/dashboard/tables/*\` routes have
-the same shape but skip the access-mode check.
-
-| Method | Path | Purpose |
-|:---|:---|:---|
-| \`GET\` | \`/v1/tables\` | List your tables (name, accessMode, rowCount, schema, timestamps). |
-| \`POST\` | \`/v1/tables\` | Create a table. Body: \`{ name, columns: ColumnDef[], accessMode? }\`. \`ColumnDef = { name, type: TEXT\\|INTEGER\\|REAL\\|NUMERIC\\|BLOB\\|DATETIME\\|BOOLEAN, primary?, autoIncrement?, nullable?, defaultValue? }\`. \`accessMode\` defaults to \`readwrite\`. |
-| \`GET\` | \`/v1/tables/:name\` | Describe a table — schema + rowCount + sample rows + accessMode. |
-| \`PATCH\` | \`/v1/tables/:name\` | Update the access mode. Body: \`{ accessMode }\`. Takes effect on the next request. |
-| \`DELETE\` | \`/v1/tables/:name\` | Drop a table (SQLite \`DROP TABLE\` + metadata delete). Cannot be undone. |
-| \`GET\` | \`/v1/tables/:name/rows\` | List rows (default 100, \`?limit=\` max 1000). Honors the access mode — 403 on a write-only table. |
-| \`POST\` | \`/v1/tables/:name/rows\` | Insert a row. Body: \`{ row: { col: value, … } }\`. Validates against the schema; returns the inserted row with auto-incremented / defaulted columns filled in. |
-| \`PATCH\` | \`/v1/tables/:name/rows\` | Update a row by primary key. Body: \`{ pk: { col: value }, patch: { col: value } }\`. |
-| \`DELETE\` | \`/v1/tables/:name/rows\` | Delete a row by primary key. Body: \`{ pk: { col: value } }\`. 404 if no row matches. |
-
-\`\`\`bash
-# Create a "tasks" table (read+write via the public API)
-curl -X POST https://onyx.example.com/v1/tables \\
-  -H "Authorization: Bearer kv_live_…" \\
-  -H "Content-Type: application/json" \\
-  -d '{"name":"tasks","accessMode":"readwrite","columns":[{"name":"id","type":"INTEGER","primary":true,"autoIncrement":true},{"name":"title","type":"TEXT","nullable":false},{"name":"done","type":"BOOLEAN","defaultValue":"0"}]}'
-
-# Insert a row
-curl -X POST https://onyx.example.com/v1/tables/tasks/rows \\
-  -H "Authorization: Bearer kv_live_…" \\
-  -H "Content-Type: application/json" \\
-  -d '{"row":{"title":"Buy milk","done":false}}'
-
-# List rows
-curl -H "Authorization: Bearer kv_live_…" https://onyx.example.com/v1/tables/tasks/rows
-\`\`\`
-
-> The dashboard mirrors the same shape under \`/api/dashboard/tables/*\` —
-> list, create, describe, drop, mode-change, rows CRUD — but with no
-> access-mode enforcement since the dashboard owner has full access. The CLI
-> talks to the dashboard routes.
-
-### 4.5 · Account & ops
+### 4.4 · Account & ops
 
 | Method | Path | Purpose |
 |:---|:---|:---|
@@ -344,7 +298,7 @@ curl -H "Authorization: Bearer kv_live_…" https://onyx.example.com/v1/tables/t
 | \`GET\` | \`/v1/stats\` | Account statistics (records / collections / apiKeys / logs / files counts, activity by day, recent activity). |
 | \`GET\` | \`/v1/logs?limit=50&action=…\` | Recent audit log entries, optionally filtered by action. |
 
-### 4.6 · API Keys management (\`/api/dashboard/api-keys\`)
+### 4.5 · API Keys management (\`/api/dashboard/api-keys\`)
 
 Mint, list, update, and revoke \`kv_live_…\` API keys. Every route requires the
 Bearer header from an existing valid key on the same account. The full key
@@ -362,11 +316,10 @@ set means full access.
 
 | Scope | What it allows |
 |:---|:---|
-| \`read\` | \`GET /v1/get/:key\`, \`/v1/list\`, \`/v1/stats\`, \`/v1/logs\`, \`/v1/health\`, \`/v1/whoami\`, \`GET /v1/collections\`, \`GET /v1/tables\`, \`GET /v1/tables/:name\`, \`GET /v1/tables/:name/rows\` |
+| \`read\` | \`GET /v1/get/:key\`, \`/v1/list\`, \`/v1/stats\`, \`/v1/logs\`, \`/v1/health\`, \`/v1/whoami\`, \`GET /v1/collections\` |
 | \`write\` | \`POST /v1/set\` |
 | \`delete\` | \`DELETE /v1/delete/:key\` |
 | \`files\` | \`/v1/files/*\` (upload, list, metadata, link mint/revoke, delete) and the public download proxy |
-| \`tables\` | \`/v1/tables/*\` (create, drop, mode change, row insert/update/delete) |
 | \`collections\` | \`/v1/collections/*\` (create, delete, detail) |
 | \`export\` | \`GET /v1/export\` |
 
@@ -377,9 +330,9 @@ supplied.
 
 | Method | Path | Purpose |
 |:---|:---|:---|
-| \`GET\` | \`/api/dashboard/api-keys\` | List your keys (id, name, createdAt, lastUsedAt, revoked, scopes, expiresAt, collectionAllowList, tableAllowList, rateLimitPerMin, rateLimitMbPerDay). The full key is **not** returned. |
-| \`POST\` | \`/api/dashboard/api-keys\` | Mint a new key. Body: \`{ name, scopes?, expiresAt?, collectionAllowList?, tableAllowList?, rateLimitPerMin?, rateLimitMbPerDay? }\`. Returns \`{ apiKey }\` with the full key (shown once). |
-| \`PATCH\` | \`/api/dashboard/api-keys/:id\` | Update an existing key's restrictions. Body: any subset of \`{ scopes, expiresAt, collectionAllowList, tableAllowList, rateLimitPerMin, rateLimitMbPerDay }\`. Omitted fields are left unchanged; pass \`null\` to clear a field. Returns the updated \`{ apiKey }\`. |
+| \`GET\` | \`/api/dashboard/api-keys\` | List your keys (id, name, createdAt, lastUsedAt, revoked, scopes, expiresAt, collectionAllowList, rateLimitPerMin, rateLimitMbPerDay). The full key is **not** returned. |
+| \`POST\` | \`/api/dashboard/api-keys\` | Mint a new key. Body: \`{ name, scopes?, expiresAt?, collectionAllowList?, rateLimitPerMin?, rateLimitMbPerDay? }\`. Returns \`{ apiKey }\` with the full key (shown once). |
+| \`PATCH\` | \`/api/dashboard/api-keys/:id\` | Update an existing key's restrictions. Body: any subset of \`{ scopes, expiresAt, collectionAllowList, rateLimitPerMin, rateLimitMbPerDay }\`. Omitted fields are left unchanged; pass \`null\` to clear a field. Returns the updated \`{ apiKey }\`. |
 | \`DELETE\` | \`/api/dashboard/api-keys/:id\` | Revoke a key instantly. The key stops authenticating on the next request. |
 
 #### Body fields (POST + PATCH)
@@ -387,10 +340,9 @@ supplied.
 | Field | Type | Default | Meaning |
 |:---|:---|:---|:---|
 | \`name\` | \`string\` | \`"new-key"\` | Human label shown in the dashboard + CLI. |
-| \`scopes\` | \`string[]\` | \`[]\` (= full access) | Subset of \`read,write,delete,files,tables,collections,export\`. Invalid entries filtered. |
+| \`scopes\` | \`string[]\` | \`[]\` (= full access) | Subset of \`read,write,delete,files,collections,export\`. Invalid entries filtered. |
 | \`expiresAt\` | \`string \\| null\` | \`null\` (never) | ISO 8601 timestamp. After it passes, the key returns \`401 key_expired\`. Pass \`null\` to clear. |
 | \`collectionAllowList\` | \`string[]\` | \`[]\` (all) | When non-empty, the key can only touch these collections. |
-| \`tableAllowList\` | \`string[]\` | \`[]\` (all) | When non-empty, the key can only touch these tables. |
 | \`rateLimitPerMin\` | \`number \\| null\` | \`null\` (unlimited) | Max requests per 60s sliding window. \`0\` / \`null\` = unlimited. |
 | \`rateLimitMbPerDay\` | \`number \\| null\` | \`null\` (unlimited) | Max MB written per UTC day (sum of \`bytesWritten\` on write paths). \`0\` / \`null\` = unlimited. |
 
@@ -426,7 +378,7 @@ curl -X PATCH https://onyx.example.com/api/dashboard/api-keys/abc123 \\
   -d '{"scopes":["read"],"collectionAllowList":["visits"]}'
 \`\`\`
 
-### 4.7 · Share tokens (public surface)
+### 4.6 · Share tokens (public surface)
 
 | Method | Path | Purpose |
 |:---|:---|:---|
@@ -436,7 +388,7 @@ curl -X PATCH https://onyx.example.com/api/dashboard/api-keys/abc123 \\
 | \`GET\` | \`/api/dashboard/share-tokens\` | List your share tokens (auth required). |
 | \`DELETE\` | \`/api/dashboard/share-tokens/:id\` | Revoke a share token instantly (auth required). The public URL returns 404 on the next request. |
 
-### 4.8 · Advanced surface (\`/api/v1/*\`)
+### 4.7 · Advanced surface (\`/api/v1/*\`)
 
 A Supabase-style advanced surface lives under \`/api/v1/*\` (note the \`/api\`
 prefix, distinct from the basic \`/v1/*\` surface). All routes require the
@@ -444,16 +396,10 @@ Bearer API key and are scoped to the authenticated user.
 
 | Method | Path | Purpose |
 |:---|:---|:---|
-| \`GET\` | \`/api/v1/views\` | List named views (projections over a collection). Create with \`POST /api/v1/views { name, collection, projection, filter? }\`. |
-| \`GET\` | \`/api/v1/views/:name\` | Execute a stored view — applies its substring filter on the key and projects the requested columns. |
-| \`GET\` | \`/api/v1/matviews\` | List materialized views (pre-computed aggregations cached as JSON). Create with \`POST /api/v1/matviews { name, query }\`. Refresh-all with \`POST /api/v1/matviews { action: "refresh_all" }\`. |
-| \`GET\` | \`/api/v1/matviews/:name\` | O(1) read of the cached aggregation result. \`POST\` to refresh, \`DELETE\` to drop. |
-| \`POST\` | \`/api/v1/functions\` | Create a server-side function. Body: \`{ name, code }\`. Runs in a \`new Function("ctx", code)\` sandbox with \`{ record, db, user }\` — \`db\` is read-only and user-scoped. 5s timeout, syntax-checked at create. |
-| \`POST\` | \`/api/v1/functions/:name\` | Test-invoke a stored function with the supplied \`ctx\` body. |
 | \`POST\` | \`/api/v1/rpc/:name\` | Built-in RPC: \`count_records\`, \`sum { key }\`, \`aggregate { collection, type }\`, \`search { query, collection?, limit? }\`, \`touch { key, value, collection? }\`. All user-scoped. |
 | \`POST\` | \`/api/v1/graphql\` | Minimal hand-rolled GraphQL endpoint (no Apollo/graphql deps). Queries for \`records\`, \`collections\`, \`apiKeys\`, \`logs\`, \`me\` — all user-scoped. Args + variables supported on \`records(limit, collection)\` and \`logs(limit, action)\`. Standard \`{ data, errors }\` response. |
 
-### 4.9 · Admin routes (\`/api/admin/*\`)
+### 4.8 · Admin routes (\`/api/admin/*\`)
 
 Require \`Authorization: Bearer onyxbase_…\`.
 
@@ -468,13 +414,13 @@ Require \`Authorization: Bearer onyxbase_…\`.
 | \`POST\` | \`/api/admin/promote\` | Promote a \`kv_live_\` key to an \`onyxbase_\` key (body: \`{kvLiveKey, label}\`). |
 | \`GET\` | \`/api/admin/admins\` | List all admin keys (bootstrap flagged). |
 | \`DELETE\` | \`/api/admin/admins?id=\` | Revoke an admin key (bootstrap cannot be revoked → 409). |
-| \`GET · POST\` | \`/api/admin/branches\` | List / create DB branches (snapshot SQLite + JSON cache under a named branch). |
+| \`GET · POST\` | \`/api/admin/branches\` | List / create DB branches (snapshot the store JSON cache under a named branch; legacy SQLite snapshots stay restorable). |
 | \`DELETE\` | \`/api/admin/branches/:name\` | Drop a branch (delete the snapshot, keep the live DB). |
 | \`GET · POST\` | \`/api/admin/network\` | Get / mutate the runtime IP allowlist (IPv4 CIDR matching; empty = open). |
 
 ---
 
-### 4.10 · Email Automation API (privacy-first)
+### 4.9 · Email Automation API (privacy-first)
 
 Every call carries the **platform** key. The **MCPEmail** hop is authenticated
 with YOUR own named credential — resolved from your account, never echoed,
@@ -640,90 +586,6 @@ r = requests.post(
 print(r.json())
 \`\`\`
 
-### 5.4 · Create a table — \`POST /v1/tables\`
-
-\`\`\`bash
-curl -X POST https://onyx.example.com/v1/tables \\
-  -H "Authorization: Bearer kv_live_YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"name":"tasks","accessMode":"readwrite","columns":[
-        {"name":"id","type":"INTEGER","primary":true,"autoIncrement":true},
-        {"name":"title","type":"TEXT","nullable":false},
-        {"name":"done","type":"BOOLEAN","defaultValue":"0"}
-      ]}'
-\`\`\`
-
-\`\`\`javascript
-const r = await fetch("https://onyx.example.com/v1/tables", {
-  method: "POST",
-  headers: {
-    Authorization: "Bearer kv_live_YOUR_API_KEY",
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify({
-    name: "tasks",
-    accessMode: "readwrite",
-    columns: [
-      { name: "id", type: "INTEGER", primary: true, autoIncrement: true },
-      { name: "title", type: "TEXT", nullable: false },
-      { name: "done", type: "BOOLEAN", defaultValue: "0" },
-    ],
-  }),
-});
-console.log(await r.json());
-\`\`\`
-
-\`\`\`python
-import requests
-r = requests.post(
-    "https://onyx.example.com/v1/tables",
-    headers={"Authorization": "Bearer kv_live_YOUR_API_KEY"},
-    json={
-        "name": "tasks",
-        "accessMode": "readwrite",
-        "columns": [
-            {"name": "id", "type": "INTEGER", "primary": True, "autoIncrement": True},
-            {"name": "title", "type": "TEXT", "nullable": False},
-            {"name": "done", "type": "BOOLEAN", "defaultValue": "0"},
-        ],
-    },
-)
-print(r.json())
-\`\`\`
-
-### 5.5 · Insert a row — \`POST /v1/tables/:name/rows\`
-
-\`\`\`bash
-curl -X POST https://onyx.example.com/v1/tables/tasks/rows \\
-  -H "Authorization: Bearer kv_live_YOUR_API_KEY" \\
-  -H "Content-Type: application/json" \\
-  -d '{"row":{"title":"Buy milk","done":false}}'
-\`\`\`
-
-\`\`\`javascript
-const r = await fetch("https://onyx.example.com/v1/tables/tasks/rows", {
-  method: "POST",
-  headers: {
-    Authorization: "Bearer kv_live_YOUR_API_KEY",
-    "Content-Type": "application/json",
-  },
-  body: JSON.stringify({ row: { title: "Buy milk", done: false } }),
-});
-console.log(await r.json());
-\`\`\`
-
-\`\`\`python
-import requests
-r = requests.post(
-    "https://onyx.example.com/v1/tables/tasks/rows",
-    headers={"Authorization": "Bearer kv_live_YOUR_API_KEY"},
-    json={"row": {"title": "Buy milk", "done": False}},
-)
-print(r.json())
-\`\`\`
-
----
-
 ## 6 · CLI (\`onyx\`)
 
 A zero-dependency Node.js tool. Install it globally, point it at your server
@@ -764,17 +626,6 @@ onyx file-link f_abc123                             # mint a fresh ~1h download 
 onyx file-revoke f_abc123                           # drop the cached link
 onyx file-delete f_abc123                           # permanently delete a file
 
-# Tables (account-scoped SQL tables; alias: tbl)
-onyx tables                                          # list your tables (alias: onyx tbl)
-onyx tables create tasks --columns "id:INTEGER:pk:ai,title:TEXT:notnull,body:TEXT" --access rw
-onyx tables describe tasks                           # schema + sample rows
-onyx tables rows tasks                               # list rows (default 100)
-onyx tables insert tasks --data '{"title":"Buy milk","done":false}'
-onyx tables update tasks --pk '{"id":1}' --data '{"done":true}'
-onyx tables delete tasks --pk '{"id":1}' --yes
-onyx tables drop tasks --yes                         # drop the whole table
-onyx tables mode tasks r                             # change access mode (r=read, w=write, rw=readwrite)
-
 # Collections
 onyx collections                     # list collections (+ record counts)
 onyx collections --create cache      # create a new collection
@@ -808,31 +659,6 @@ onyx admin promote kv_live_abc123  # promote a regular user to admin
 onyx admin admins                  # list all admin keys
 onyx admin revoke onyxbase_xxx     # revoke a promoted admin key
 \`\`\`
-
-### Column-spec mini-DSL
-
-The \`--columns\` argument to \`onyx tables create\` takes a comma-separated
-list of column specs, each in the form:
-
-\`\`\`
-name:TYPE[:pk][:ai][:notnull][:default=VALUE]
-
-  name      any SQL-safe identifier (letters, digits, _)
-  TYPE      INTEGER | TEXT | REAL | NUMERIC | BLOB | DATETIME | BOOLEAN
-  pk        marks the column as PRIMARY KEY
-  ai        AUTOINCREMENT (implies INTEGER + pk)
-  notnull   adds NOT NULL
-  default=… sets a DEFAULT value (colons inside the value are respected if the
-            whole spec is quoted, e.g. "ts:DATETIME:default=2024-01-01 12:00:00")
-
-Examples:
-  "id:INTEGER:pk:ai,title:TEXT:notnull,body:TEXT"
-  "id:INTEGER:pk:ai,email:TEXT:notnull,created:DATETIME:default=now"
-  "k:TEXT:pk,v:TEXT,tags:TEXT"
-\`\`\`
-
-The CLI parses this spec client-side and POSTs the same
-\`{ name, columns: ColumnDef[], accessMode }\` body the REST API expects.
 
 ---
 
@@ -895,7 +721,7 @@ list.
 
 ### Self-healing after a full reset
 
-1. The server's local SQLite + JSON cache are wiped (operator action,
+1. The server's local JSON cache is wiped (operator action,
    accident, or a fresh deploy).
 2. The next request arrives with a valid \`Authorization: Bearer
    kv_live_…\` header.
@@ -1048,8 +874,8 @@ curl -X POST https://onyx.example.com/api/admin/promote \\
 
 ## 10 · Storage model
 
-- **SQLite** (embedded, via Prisma) — fast local index, instant reads,
-  single-node.
+- **In-memory store** (with a JSON file cache) — fast local index,
+  instant reads, single-node.
 - **Telegram** — durable backup. Every record is mirrored as a structured
   message in the user's chat (their own bot or the server-side shared
   bot). Append-only, replayable.
@@ -1066,7 +892,7 @@ Telegram (durable storage)
    ↓
 Next.js API routes (logic)
    ↓
-Prisma + SQLite (fast index)
+In-memory store + JSON cache (fast index)
    ↓
 React + shadcn/ui (dashboard)
 \`\`\`
@@ -1085,25 +911,16 @@ React + shadcn/ui (dashboard)
   (\`IP_ALLOWLIST\` env + runtime allowlist via \`POST /api/admin/network\`;
   IPv4 CIDR matching; enforced on every \`/v1/*\` and \`/api/*\` request;
   empty = open).
-- **Database** — Managed PostgreSQL: N/A (we use SQLite + Telegram). PITR:
-  Equivalent (Telegram mirror is append-only, replayable). Backups:
-  Implemented (every record mirrored; manifest pinned). SQL editor:
-  Implemented (read+write \`SELECT\`/\`INSERT\`/\`UPDATE\`/\`DELETE\`/\`CREATE\`/\`DROP\`/\`ALTER\`
-  against user-scoped virtual tables — records, collections, api_keys,
-  logs, users — 1000-row cap, API keys masked, custom \`usr_*\` tables
-  allowed). Triggers: Equivalent (event system fires \`record:changed\` via
+- **Database** — Managed PostgreSQL: N/A (we use an in-memory store +
+  Telegram). PITR: Equivalent (Telegram mirror is append-only, replayable).
+  Backups: Implemented (every record mirrored; manifest pinned).
+  Triggers: Equivalent (event system fires \`record:changed\` via
   WebSocket + Telegram mirror). Branching: Implemented (admin
-  \`POST /api/admin/branches\` snapshots SQLite + JSON cache; restore +
-  delete supported). Functions (PL/pgSQL equivalent): Implemented
-  (\`POST /api/v1/functions\` stores JS code; \`POST /api/v1/functions/:name\`
-  test-invokes in a \`new Function(ctx, code)\` sandbox with
-  \`{ record, db, user }\`; 5s timeout; \`db\` is read-only + user-scoped).
-  Views: Implemented (\`POST /api/v1/views { name, collection, projection,
-  filter? }\`; \`GET /api/v1/views/:name\` executes the projection).
-  Materialised views: Implemented (\`POST /api/v1/matviews { name, query }\`
-  runs + caches the result; \`GET\` reads O(1); \`POST\` refreshes;
-  refresh-all via \`POST /api/v1/matviews { action: "refresh_all" }\`).
-  Read replicas / connection pooling / FDW: N/A (embedded SQLite).
+  \`POST /api/admin/branches\` snapshots the JSON store cache; restore +
+  delete supported). Functions / Views / Materialised views / SQL editor:
+  Removed (the legacy SQLite SQL workspace was retired — the KV engine is
+  Telegram-backed end to end). Read replicas / connection pooling / FDW:
+  N/A (embedded store).
 - **Data API** — REST API: Implemented (\`/v1/*\`). Auto-generated RESTful
   API: every collection auto-exposes \`/v1/set\` \`/v1/get\` \`/v1/delete\`
   \`/v1/list\` (Implemented). Realtime API: WebSocket on :3003 pushes
@@ -1243,7 +1060,6 @@ categories of five.
 \`\`\`bash
 # 1. Install & run the web app (self-host)
 bun install
-bun run db:push     # create the SQLite schema
 bun run dev         # starts on http://localhost:3000 locally
 
 # 2. Create an account (web UI, CLI, or curl) — use your deployed URL in production
@@ -1302,8 +1118,6 @@ mini-services/
 └── realtime/           # Socket.io service (port 3003) — record:changed events
 cli/
 └── index.js            # the zero-dependency \`onyx\` CLI
-prisma/
-└── schema.prisma       # User, ApiKey, Collection, Record, Log…
 \`\`\`
 
 ---

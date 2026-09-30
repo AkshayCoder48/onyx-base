@@ -3,7 +3,7 @@
 
   <!-- Title bar (Task ID 9: svg-text-enhancer) -->
   <text x="390" y="22" font-family="system-ui, -apple-system, sans-serif" font-size="18" font-weight="700" fill="#2b2825" text-anchor="middle">Tech Stack Layers</text>
-  <text x="390" y="36" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">Telegram (durability) → Next.js API (logic) → Prisma + SQLite (index) → shadcn/ui (dashboard)</text>
+  <text x="390" y="36" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557" text-anchor="middle">Telegram (durability) → Next.js API (logic) → In-memory store (index) → shadcn/ui (dashboard)</text>
 
   <g transform="translate(0 40)">
   <!-- Telegram layer -->
@@ -34,7 +34,7 @@
   <circle cx="574" cy="131" r="4" fill="#d4744f"/>
   <text x="586" y="135" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600" fill="#2b2825">Next.js 16 · Turbopack</text>
 
-  <!-- Prisma + SQLite layer -->
+  <!-- In-memory store layer -->
   <rect x="20" y="172" width="740" height="64" rx="12" fill="#e8e5dc" stroke="#d9d4c7" stroke-width="1.5"/>
   <g transform="translate(50 188)">
     <ellipse cx="16" cy="6" rx="14" ry="4" fill="#8a7e6a"/>
@@ -42,7 +42,7 @@
     <ellipse cx="16" cy="26" rx="14" ry="4" fill="#8a7e6a"/>
     <ellipse cx="16" cy="6" rx="14" ry="4" fill="none" stroke="#6b6557" stroke-width="1"/>
   </g>
-  <text x="100" y="202" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" fill="#2b2825" text-anchor="start">Prisma + SQLite — fast local index</text>
+  <text x="100" y="202" font-family="system-ui, -apple-system, sans-serif" font-size="15" font-weight="700" fill="#2b2825" text-anchor="start">In-memory store — fast local index</text>
   <text x="100" y="218" font-family="system-ui, -apple-system, sans-serif" font-size="11" fill="#6b6557">User · ApiKey · Collection · Record · Log · File · AdminKey</text>
   <rect x="560" y="196" width="160" height="22" rx="6" fill="#ffffff" stroke="#d9d4c7"/>
   <text x="572" y="210" font-family="system-ui, -apple-system, sans-serif" font-size="10" font-weight="600" fill="#2b2825">single-file · zero-ops DB</text>

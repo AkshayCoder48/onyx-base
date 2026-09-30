@@ -15,7 +15,7 @@ export const runtime = 'nodejs'
  *
  * Built-in RPC functions, callable by name. Mirrors the Supabase
  * `rpc/<function_name>` pattern but with a fixed set of built-ins
- * (no user-defined functions here — those live at /api/v1/functions).
+ * (a fixed set of built-ins only — no user-defined functions).
  *
  * Implemented:
  *   - count_records          → { count: number }

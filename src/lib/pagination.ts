@@ -28,7 +28,7 @@ export interface PaginationMeta {
 /** Default page size when a caller sends `?offset=` without `?limit=`. */
 export const DEFAULT_PAGE_LIMIT = 100
 
-/** Hard cap on `limit` (matches the /v1/tables row-listing ceiling). */
+/** Hard cap on `limit` for paginated list/export reads. */
 export const MAX_PAGE_LIMIT = 1000
 
 /**

@@ -20,7 +20,7 @@ must say so. NO fake frontend states. NO generic "server busy".
 - Writes commit in one transaction; response returns only after local commit
   (sub-10ms typical). Durability to Telegram rides behind `after()`/setTimeout.
 
-## Schema (DDL — v5 module owns these tables, V4 Prisma tables untouched)
+## Schema (DDL — v5 module owns these tables; the V4 store is untouched)
 
 ```sql
 CREATE TABLE IF NOT EXISTS v5_accounts (

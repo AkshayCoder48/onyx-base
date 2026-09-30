@@ -9,7 +9,7 @@
  * The dashboard uses the same key (pasted by the developer) to authenticate.
  *
  * Storage: in-memory store + JSON cache + Telegram mirror (see store.ts).
- * No Prisma, no SQLite.
+ * No database driver — pure lookups against the store.
  */
 
 import { NextRequest } from 'next/server'

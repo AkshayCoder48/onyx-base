@@ -76,7 +76,9 @@ export interface UserRecord {
  * - `write`       → POST /v1/set + any create/update mutation on records
  * - `delete`      → DELETE /v1/delete, record deletion
  * - `files`       → /v1/files/* (upload, list, download, delete, link, revoke)
- * - `tables`      → /v1/tables/* (schema + row CRUD)
+ * - `tables`      → LEGACY: the SQLite tables workspace was removed; the
+ *                   scope is kept so existing keys/manifests stay valid,
+ *                   but it no longer guards any endpoint
  * - `collections` → /v1/collections/* (list/create/delete)
  * - `export`      → /v1/export
  *

@@ -13,17 +13,15 @@ export const runtime = 'nodejs'
  *
  * Auth: Bearer onyxbase_...
  *
- * A "branch" is a point-in-time snapshot of BOTH:
- *   - the SQLite DB file (db/custom.db — used by Prisma + the SQL Editor)
- *   - the in-memory store JSON cache (db/cloudkv.json — the actual source
- *     of truth for records, apiKeys, etc.)
+ * A "branch" is a point-in-time snapshot of the in-memory store JSON
+ * cache (db/cloudkv.json — the source of truth for records, apiKeys,
+ * etc.). Legacy `.db` snapshots created by the removed SQLite SQL
+ * workspace, if any exist, remain listable and restorable as inert files.
  *
  * Notes:
- *   - Snapshots are stored as files in db/branches/<name>.db + <name>.json.
- *   - Restoring overwrites the live files. For SQLite, an in-flight Prisma
- *     connection may keep a stale view until the server is restarted; the
- *     JSON cache is re-read on the next request. The route returns a hint
- *     about this in the response.
+ *   - Snapshots are stored as files in db/branches/<name>.json.
+ *   - Restoring overwrites the live file; the JSON cache is re-read on
+ *     the next request.
  */
 
 const DB_DIR = path.join(process.cwd(), 'db')
@@ -156,8 +154,6 @@ export async function POST(req: NextRequest) {
     dbRestored,
     jsonRestored,
     hint:
-      'Live files overwritten. JSON cache will be re-read on the next request. ' +
-      'For SQLite, an in-flight Prisma connection may need a server restart to ' +
-      'pick up the restored DB file.',
+      'Live files overwritten. JSON cache will be re-read on the next request.',
   })
 }
