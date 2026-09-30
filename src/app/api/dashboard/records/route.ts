@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import { authenticate, ok, fail } from '@/lib/auth'
+import { v6Ok } from '@/lib/v6'
 import { listKeysWithRehydrate, setKey, deleteKey } from '@/lib/kv'
 
 export const runtime = 'nodejs'
@@ -20,7 +21,7 @@ export async function GET(req: NextRequest) {
   if (q) {
     records = records.filter((r) => r.key.toLowerCase().includes(q) || JSON.stringify(r.value).toLowerCase().includes(q))
   }
-  return ok({ records, count: records.length })
+  return v6Ok({ records, count: records.length }, req.headers.get('if-none-match'))
 }
 
 /**

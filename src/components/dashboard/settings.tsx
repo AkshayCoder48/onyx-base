@@ -237,13 +237,17 @@ function TelegramChatIdCard({
   const [clearingToken, setClearingToken] = useState(false)
   const hasCustomBotToken = customConfig?.hasCustomBotToken ?? false
 
-  // Sync local state when the server data loads/changes.
-  useEffect(() => {
+  // Sync local state when the server data loads/changes — using React's
+  // documented "adjust state during render" pattern (no effect → no
+  // cascading re-render; React discards the render and re-renders immediately).
+  const [prevConfig, setPrevConfig] = useState(customConfig)
+  if (customConfig !== prevConfig) {
+    setPrevConfig(customConfig)
     if (customConfig) {
       setChatId(customConfig.chatId)
       setLabel(customConfig.label ?? '')
     }
-  }, [customConfig])
+  }
 
   async function save() {
     const trimmed = chatId.trim()

@@ -1,5 +1,6 @@
 'use client'
 
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ScrollText, Loader2, RefreshCw } from 'lucide-react'
 import { useApi, type LogView } from '@/lib/api'
@@ -8,7 +9,6 @@ import { Card } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { useState } from 'react'
 import { PageHeader } from './shell'
 import { toast } from 'sonner'
 
@@ -33,12 +33,15 @@ export function LogsView() {
   const user = useOnyxBase((s) => s.user)
 
   const { data, isLoading, refetch, isFetching } = useQuery({
-    queryKey: ['logs', filter],
-    queryFn: () =>
-      api<{ logs: LogView[] }>(`/api/dashboard/logs?limit=200${filter !== 'all' ? `&action=${filter}` : ''}`),
+    queryKey: ['logs'],
+    queryFn: () => api<{ logs: LogView[] }>(`/api/dashboard/logs?limit=200`),
     refetchInterval: 8000,
   })
-  const logs = data?.logs ?? []
+  // V6: the action filter is a client-side derivation (instant, zero network).
+  const logs = useMemo(
+    () => (filter === 'all' ? (data?.logs ?? []) : (data?.logs ?? []).filter((l) => l.action === filter)),
+    [data, filter],
+  )
 
   return (
     <div>

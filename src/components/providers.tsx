@@ -3,6 +3,7 @@
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useOnyxBase } from '@/lib/store'
+import { hydrateFromStorage, runV6Boot } from '@/lib/v6/ultima'
 
 /**
  * Watches the active session's `apiKey` and clears the ENTIRE React Query
@@ -46,22 +47,69 @@ function SessionCacheGuard({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
+/**
+ * V6 Ultima boot daemon (renders nothing).
+ *
+ * After the session resolves, performs the ONE background boot round trip
+ * (ETag-revalidated — 304 when the localStorage copy is still current) and
+ * seeds every dashboard query cache. The synchronous localStorage hydration
+ * already happened in the QueryClient initializer below, so this effect is
+ * purely the revalidation pass.
+ */
+function V6BootDaemon() {
+  const apiKey = useOnyxBase((s) => s.apiKey)
+  const userId = useOnyxBase((s) => s.user?.userId)
+  const qc = useQueryClient()
+  const bootedFor = useRef<string | null>(null)
+
+  useEffect(() => {
+    if (!apiKey || !userId) return
+    if (bootedFor.current === `${userId}:${apiKey}`) return
+    bootedFor.current = `${userId}:${apiKey}`
+    let cancelled = false
+    void runV6Boot(userId, apiKey, qc).then((r) => {
+      if (cancelled || r.status === 'offline') return
+      // Individual queries stay as-is: seeded caches carry fresh dataUpdatedAt,
+      // so mounted queries don't refetch — they already have current data.
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [apiKey, userId, qc])
+
+  return null
+}
+
 export function Providers({ children }: { children: ReactNode }) {
-  const [client] = useState(
-    () =>
-      new QueryClient({
-        defaultOptions: {
-          queries: {
-            staleTime: 15_000,
-            retry: 1,
-            refetchOnWindowFocus: false,
-          },
+  const [client] = useState(() => {
+    const c = new QueryClient({
+      defaultOptions: {
+        queries: {
+          staleTime: 30_000,
+          retry: 1,
+          refetchOnWindowFocus: false,
         },
-      }),
-  )
+      },
+    })
+    // V6 ULTIMA — synchronous cache hydration BEFORE the first paint.
+    // zustand's persist middleware has already restored the session from
+    // localStorage at module load, so the apiKey/userId are available here.
+    // Seeding now means every dashboard tab mounts with data on screen at
+    // frame one (instant paint), and the V6BootDaemon revalidates after.
+    try {
+      const { apiKey, user } = useOnyxBase.getState()
+      if (apiKey && user?.userId) {
+        hydrateFromStorage(user.userId, c)
+      }
+    } catch {
+      /* storage unavailable (private mode) — normal fetch flow applies */
+    }
+    return c
+  })
   return (
     <QueryClientProvider client={client}>
       <SessionCacheGuard>{children}</SessionCacheGuard>
+      <V6BootDaemon />
     </QueryClientProvider>
   )
 }

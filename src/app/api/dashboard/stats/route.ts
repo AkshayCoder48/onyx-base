@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import { authenticate, ok, fail } from '@/lib/auth'
+import { v6Ok } from '@/lib/v6'
 import { getStats } from '@/lib/data-store'
 
 export const runtime = 'nodejs'
@@ -13,5 +14,5 @@ export async function GET(req: NextRequest) {
 
   const stats = getStats(user.dbUserId)
 
-  return ok(stats)
+  return v6Ok(stats, req.headers.get('if-none-match'))
 }

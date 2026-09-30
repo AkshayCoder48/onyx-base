@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import { authenticate, ok, fail } from '@/lib/auth'
+import { v6Ok } from '@/lib/v6'
 import {
   listApiKeys,
   createApiKey,
@@ -38,7 +39,7 @@ export async function GET(req: NextRequest) {
   if (!user) return fail('Unauthorized.', 401)
 
   const keys = listApiKeys(user.dbUserId)
-  return ok({ apiKeys: keys.map(apiKeyToView) })
+  return v6Ok({ apiKeys: keys.map(apiKeyToView) }, req.headers.get('if-none-match'))
 }
 
 /**

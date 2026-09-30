@@ -18,7 +18,7 @@ import { runWithCloudflareRequestContext } from "../cloudflare/init.js";
 import { maybeGetSkewProtectionResponse } from "../cloudflare/skew-protection.js";
 import { handler as middlewareHandler } from "../middleware/handler.mjs";
 
-export default {
+const worker = {
   async fetch(request, env, ctx) {
     return runWithCloudflareRequestContext(request, env, ctx, async () => {
       const response = maybeGetSkewProtectionResponse(request);
@@ -44,3 +44,5 @@ export default {
     });
   },
 };
+
+export default worker;

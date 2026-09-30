@@ -306,8 +306,9 @@ export function FooterBar() {
       <div className="mx-3 mb-3 glass-soft rounded-2xl px-4 h-11 flex items-center justify-between text-[11px] text-muted-foreground">
         <div className="flex items-center gap-3">
           <span className="font-display font-semibold text-foreground/70">Onyx Base</span>
-          <span className="hidden sm:inline">·</span>
-          <span className="hidden sm:inline">Telegram-backed key-value store</span>
+          <span className="ultima-badge" title="V6 Ultima — instant-access architecture">V6 ULTIMA</span>
+          <span className="hidden md:inline">·</span>
+          <span className="hidden md:inline">Telegram-backed key-value store · instant ETag APIs</span>
         </div>
         <div className="flex items-center gap-3">
           <span className="hidden sm:flex items-center gap-1.5">

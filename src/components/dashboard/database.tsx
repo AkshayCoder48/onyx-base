@@ -104,18 +104,30 @@ export function DatabaseView() {
   // table and desktop CPUs handle thousands of <tr> fine).
   const [mobileLimit, setMobileLimit] = useState(MOBILE_PAGE_SIZE)
 
-  const query = search ? `&q=${encodeURIComponent(search)}` : ''
-  const collectionQuery =
-    activeCollection !== 'all'
-      ? `?collection=${activeCollection}${query ? '&' : ''}${search ? `q=${encodeURIComponent(search)}` : ''}`
-      : `?${query.replace(/^&/, '')}`
-
+  // V6 ULTIMA: ONE base query holds the full record set; collection filter
+  // + search are pure client-side derivations — zero network per keystroke,
+  // zero refetch per tab switch. The cache is hydrated from localStorage
+  // before first paint (see lib/v6/ultima.ts) so this renders instantly.
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ['records', activeCollection, search],
-    queryFn: () => api<{ records: RecordView[] }>(`/api/dashboard/records${collectionQuery}`),
+    queryKey: ['records'],
+    queryFn: () => api<{ records: RecordView[] }>(`/api/dashboard/records`),
   })
 
-  const rawRecords = useMemo(() => data?.records ?? [], [data])
+  const rawRecords = useMemo(() => {
+    let list = data?.records ?? []
+    if (activeCollection !== 'all') {
+      list = list.filter((r) => r.collection === activeCollection)
+    }
+    const q = search.trim().toLowerCase()
+    if (q) {
+      list = list.filter(
+        (r) =>
+          r.key.toLowerCase().includes(q) ||
+          JSON.stringify(r.value).toLowerCase().includes(q),
+      )
+    }
+    return list
+  }, [data, activeCollection, search])
 
   // Client-side sort — stable enough for the dashboard.
   const records = useMemo(() => {
@@ -205,8 +217,16 @@ export function DatabaseView() {
   async function confirmDelete() {
     if (!deleteTarget) return
     setDeleting(true)
+    // V6 optimistic echo — the row disappears instantly; rollback on failure.
+    const target = deleteTarget
+    let rolled = false
+    const before = qc.getQueryData<{ records: RecordView[] }>(['records'])
+    if (before) {
+      const next = before.records.filter((r) => !(r.key === target.key && r.collection === target.collection))
+      qc.setQueryData(['records'], { records: next, count: next.length }, { updatedAt: Date.now() })
+    }
     try {
-      const url = `/api/dashboard/records/${encodeURIComponent(deleteTarget.key)}?collection=${encodeURIComponent(deleteTarget.collection)}`
+      const url = `/api/dashboard/records/${encodeURIComponent(target.key)}?collection=${encodeURIComponent(target.collection)}`
       let res = await api<{ deleted?: boolean; durable?: boolean }>(url, { method: 'DELETE' })
       // Pacing yields are transient (~1/45s per account) — re-try the
       // delete a few times (each attempt also spreads the tombstone to the
@@ -220,19 +240,22 @@ export function DatabaseView() {
         }
       }
       if (res.durable === false) {
-        toast.warning(`Deleted ${deleteTarget.key} locally — sync pending`, {
+        toast.warning(`Deleted ${target.key} locally — sync pending`, {
           description: 'The delete will propagate to the Telegram backup automatically.',
         })
       } else {
-        toast.success(`Deleted ${deleteTarget.key}`)
+        toast.success(`Deleted ${target.key}`)
       }
       setDeleteTarget(null)
-      qc.invalidateQueries({ queryKey: ['records'] })
       qc.invalidateQueries({ queryKey: ['stats'] })
       qc.invalidateQueries({ queryKey: ['logs'] })
       qc.invalidateQueries({ queryKey: ['collections'] })
     } catch (err) {
+      // Rollback the optimistic echo.
+      if (before) qc.setQueryData(['records'], before, { updatedAt: Date.now() })
+      rolled = true
       toast.error(err instanceof Error ? err.message : 'Delete failed')
+      void rolled
     } finally {
       setDeleting(false)
     }

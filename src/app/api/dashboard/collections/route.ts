@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import { authenticate, ok, fail } from '@/lib/auth'
+import { v6Ok } from '@/lib/v6'
 import { listCollections, createCollectionName, resolveChatId } from '@/lib/data-store'
 import { logAction } from '@/lib/kv'
 import { sendEventMessage } from '@/lib/telegram'
@@ -12,14 +13,14 @@ export async function GET(req: NextRequest) {
   if (!user) return fail('Unauthorized.', 401)
 
   const collections = listCollections(user.dbUserId)
-  return ok({
+  return v6Ok({
     collections: collections.map((c) => ({
       id: c.name, // collections are derived; use name as id
       name: c.name,
       records: c.records,
       createdAt: c.createdAt,
     })),
-  })
+  }, req.headers.get('if-none-match'))
 }
 
 /** POST /api/dashboard/collections — create a collection. Body: { "name": "cache" }

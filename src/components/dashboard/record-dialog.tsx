@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,12 +24,6 @@ const TYPES = ['string', 'number', 'boolean', 'object', 'array']
 
 export function RecordDialog({ open, onOpenChange, record }: Props) {
   const api = useApi()
-  const qc = useQueryClient()
-  const [key, setKey] = useState('')
-  const [rawValue, setRawValue] = useState('')
-  const [type, setType] = useState('string')
-  const [collection, setCollection] = useState('default')
-  const [saving, setSaving] = useState(false)
 
   const { data: collectionsData } = useQuery({
     queryKey: ['collections'],
@@ -38,21 +32,43 @@ export function RecordDialog({ open, onOpenChange, record }: Props) {
   })
   const collections = collectionsData?.collections ?? []
 
-  useEffect(() => {
-    if (open) {
-      if (record) {
-        setKey(record.key)
-        setCollection(record.collection)
-        setType(record.valueType)
-        setRawValue(formatForEditor(record.value, record.valueType))
-      } else {
-        setKey('')
-        setRawValue('')
-        setType('string')
-        setCollection('default')
-      }
-    }
-  }, [open, record])
+  // The form remounts fresh on every open (keyed by record identity) and
+  // seeds its fields through useState initializers — no effect-sync, no
+  // cascading re-render.
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        {open && (
+          <RecordForm
+            key={record ? `edit:${record.collection}/${record.key}` : 'create'}
+            record={record ?? null}
+            collections={collections}
+            onOpenChange={onOpenChange}
+          />
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function RecordForm({
+  record,
+  collections,
+  onOpenChange,
+}: {
+  record: RecordView | null
+  collections: CollectionView[]
+  onOpenChange: (v: boolean) => void
+}) {
+  const api = useApi()
+  const qc = useQueryClient()
+  const [key, setKey] = useState(record?.key ?? '')
+  const [rawValue, setRawValue] = useState(
+    record ? formatForEditor(record.value, record.valueType) : '',
+  )
+  const [type, setType] = useState(record?.valueType ?? 'string')
+  const [collection, setCollection] = useState(record?.collection ?? 'default')
+  const [saving, setSaving] = useState(false)
 
   // Re-format the editor contents when the user switches type.
   function changeType(next: string) {
@@ -70,8 +86,27 @@ export function RecordDialog({ open, onOpenChange, record }: Props) {
       return
     }
     setSaving(true)
+    // V6 optimistic echo — the record appears in the database tab instantly.
+    const collection0 = collection
+    const key0 = key.trim()
+    const value0 = buildValue()
+    const before = qc.getQueryData<{ records: import('@/lib/api').RecordView[] }>(['records'])
+    if (before) {
+      const next = [
+        ...before.records.filter((r) => !(r.key === key0 && r.collection === collection0)),
+        {
+          key: key0,
+          value: value0,
+          valueType: type,
+          collection: collection0,
+          updatedAt: new Date().toISOString(),
+          createdAt: record?.createdAt ?? new Date().toISOString(),
+        },
+      ]
+      qc.setQueryData(['records'], { records: next, count: next.length }, { updatedAt: Date.now() })
+    }
     try {
-      const payload = JSON.stringify({ key: key.trim(), value: buildValue(), collection })
+      const payload = JSON.stringify({ key: key0, value: value0, collection: collection0 })
       let res = await api<{ record?: { durable?: boolean } }>('/api/dashboard/records', {
         method: 'POST',
         body: payload,
@@ -97,12 +132,13 @@ export function RecordDialog({ open, onOpenChange, record }: Props) {
       } else {
         toast.success(record ? 'Record updated' : 'Record created')
       }
-      qc.invalidateQueries({ queryKey: ['records'] })
       qc.invalidateQueries({ queryKey: ['stats'] })
       qc.invalidateQueries({ queryKey: ['logs'] })
       qc.invalidateQueries({ queryKey: ['collections'] })
       onOpenChange(false)
     } catch (err) {
+      // Rollback the optimistic echo to the exact snapshot.
+      if (before) qc.setQueryData(['records'], before, { updatedAt: Date.now() })
       toast.error(err instanceof Error ? err.message : 'Save failed')
     } finally {
       setSaving(false)
@@ -110,14 +146,13 @@ export function RecordDialog({ open, onOpenChange, record }: Props) {
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{record ? 'Edit record' : 'New record'}</DialogTitle>
-          <DialogDescription>
-            Stored as typed JSON. Writes mirror to Telegram instantly.
-          </DialogDescription>
-        </DialogHeader>
+    <>
+      <DialogHeader>
+        <DialogTitle>{record ? 'Edit record' : 'New record'}</DialogTitle>
+        <DialogDescription>
+          Stored as typed JSON. Writes mirror to Telegram instantly.
+        </DialogDescription>
+      </DialogHeader>
 
         <div className="space-y-4 py-2">
           <div className="grid grid-cols-2 gap-3">
@@ -191,8 +226,7 @@ export function RecordDialog({ open, onOpenChange, record }: Props) {
             {record ? 'Save changes' : 'Create record'}
           </Button>
         </DialogFooter>
-      </DialogContent>
-    </Dialog>
+    </>
   )
 }
 

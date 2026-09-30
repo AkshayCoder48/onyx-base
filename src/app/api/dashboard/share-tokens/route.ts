@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import { authenticate, ok, fail, getPublicOrigin } from '@/lib/auth'
+import { v6Ok } from '@/lib/v6'
 import {
   listShareTokens,
   createShareToken,
@@ -20,7 +21,7 @@ export async function GET(req: NextRequest) {
   const tokens = listShareTokens(user.dbUserId).map((t) =>
     publicShareTokenView(t, origin),
   )
-  return ok({ shareTokens: tokens })
+  return v6Ok({ shareTokens: tokens }, req.headers.get('if-none-match'))
 }
 
 /**

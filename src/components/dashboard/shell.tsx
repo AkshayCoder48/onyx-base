@@ -1,5 +1,6 @@
 'use client'
 
+import { useState } from 'react'
 import { Search, CalendarDays, ChevronDown, Bell, ArrowUpRight } from 'lucide-react'
 import { Sidebar, FooterBar } from './sidebar'
 import { Overview } from './overview'
@@ -38,11 +39,33 @@ const VIEW_TITLES: Record<ViewKey, string> = {
   diagnostics: 'Diagnostics',
 }
 
+/** Ordered tab index — powers the directional view-transition motion. */
+const VIEW_ORDER: ViewKey[] = [
+  'overview', 'assistant', 'database', 'collections', 'storage',
+  'api-keys', 'email-automation', 'share', 'playground', 'docs', 'logs',
+  'analytics', 'diagnostics', 'settings',
+]
+
 export function DashboardShell() {
   const view = useOnyxBase((s) => s.activeView)
   const user = useOnyxBase((s) => s.user)
   const realtime = useOnyxBase((s) => s.realtimeConnected)
   const setView = useOnyxBase((s) => s.setView)
+
+  // V6 Ultima motion: each tab switch slides the new view in from the
+  // direction of travel (a tab further down the rail → slide from the
+  // right), with a motion-blur fade. Direction is tracked with React's
+  // documented "adjust state during render" pattern (no ref access in
+  // render), and the keyed wrapper remounts per view so the animation
+  // replays on every switch.
+  const [prevView, setPrevView] = useState<ViewKey | null>(null)
+  let direction: 'left' | 'right' = 'right'
+  if (prevView !== view) {
+    if (prevView !== null) {
+      direction = VIEW_ORDER.indexOf(view) >= VIEW_ORDER.indexOf(prevView) ? 'right' : 'left'
+    }
+    setPrevView(view)
+  }
 
   const firstName = user?.name?.split(' ')[0] ?? user?.userId ?? 'there'
 
@@ -60,8 +83,9 @@ export function DashboardShell() {
             <div className="glass rounded-3xl px-4 sm:px-5 h-[60px] flex items-center gap-3">
               {/* Page title + greeting */}
               <div className="min-w-0">
-                <h1 className="page-title font-display text-lg font-semibold leading-none truncate">
-                  {VIEW_TITLES[view] ?? 'Overview'}
+                <h1 className="page-title font-display text-lg font-semibold leading-none truncate flex items-center gap-2.5">
+                  <span className="truncate">{VIEW_TITLES[view] ?? 'Overview'}</span>
+                  <span className="ultima-badge shrink-0" title="V6 Ultima — instant-access architecture">V6 ULTIMA</span>
                 </h1>
                 <p className="text-[11px] text-muted-foreground mt-1 truncate hidden sm:block">
                   {view === 'overview'
@@ -141,23 +165,27 @@ export function DashboardShell() {
                   rest of the dashboard. The user can recover with one click.
                   NOTE: the assistant intentionally escapes this padding
                   (-my-6/lg:-my-8 in its own wrapper) for a full-height chat
-                  surface — keep that in mind when adding new views. */}
-              <ErrorBoundary>
-                {view === 'overview' && <Overview />}
-                {view === 'assistant' && <AssistantView />}
-                {view === 'database' && <DatabaseView />}
-                {view === 'collections' && <CollectionsView />}
-                {view === 'storage' && <CloudStorageView />}
-                {view === 'api-keys' && <ApiKeysView />}
-                {view === 'email-automation' && <EmailAutomationView />}
-                {view === 'share' && <ShareView />}
-                {view === 'logs' && <LogsView />}
-                {view === 'analytics' && <AnalyticsView />}
-                {view === 'playground' && <PlaygroundView />}
-                {view === 'docs' && <DocsView />}
-                {view === 'settings' && <SettingsView />}
-                {view === 'diagnostics' && <DiagnosticsView />}
-              </ErrorBoundary>
+                  surface — keep that in mind when adding new views.
+                  The keyed wrapper replays the directional slide+blur motion
+                  on every tab switch (V6 Ultima motion system). */}
+              <div key={view} className={direction === 'right' ? 'view-enter-right' : 'view-enter-left'}>
+                <ErrorBoundary>
+                  {view === 'overview' && <Overview />}
+                  {view === 'assistant' && <AssistantView />}
+                  {view === 'database' && <DatabaseView />}
+                  {view === 'collections' && <CollectionsView />}
+                  {view === 'storage' && <CloudStorageView />}
+                  {view === 'api-keys' && <ApiKeysView />}
+                  {view === 'email-automation' && <EmailAutomationView />}
+                  {view === 'share' && <ShareView />}
+                  {view === 'logs' && <LogsView />}
+                  {view === 'analytics' && <AnalyticsView />}
+                  {view === 'playground' && <PlaygroundView />}
+                  {view === 'docs' && <DocsView />}
+                  {view === 'settings' && <SettingsView />}
+                  {view === 'diagnostics' && <DiagnosticsView />}
+                </ErrorBoundary>
+              </div>
             </div>
           </main>
           <FooterBar />

@@ -440,12 +440,37 @@ Rate limits: per platform key · per IP (30/min) · per-credential custom cap
 (≤120/min hard ceiling). Secrets (\`mcpe_*\`, \`kv_live_*\`, bot tokens,
 Bearer headers) are redacted from all logs. \`/docs#email\` renders the full
 guide anonymously.
+
+### 4.10 · V6 Ultima — instant-access APIs
+
+The V6 Ultima architecture makes dashboard + client access nearly instant:
+
+| Method | Path | Purpose |
+|:---|:---|:---|
+| \`GET\` | \`/api/v6/boot\` | ONE round trip returning everything the dashboard needs (session, records, stats, analytics, collections, API keys, share tokens, recent logs). Strong \`ETag\` — send \`If-None-Match\` from the previous boot and an unchanged workspace answers **304 with an empty body** (fully instant boot from the client cache). |
+| \`POST\` | \`/api/v6/batch\` | Up to 25 KV ops (\`get\`/\`set\`/\`delete\`/\`list\`) in one function invocation. Per-op authorization (read/write/delete scopes + collection allow-lists); per-op results — one failure never aborts the batch. |
+
+Every dashboard read (\`/api/dashboard/{records,stats,api-keys,collections,logs,analytics,share-tokens}\`)
+carries a strong \`ETag\` + \`Cache-Control: private, no-cache, must-revalidate\`:
+unchanged data → **304 Not Modified** (empty body — the fastest possible
+round trip). The tag is a SHA-256 of the canonical payload, so it is fleet-
+safe across serverless instances. The browser client (\`src/lib/v6/ultima.ts\`)
+pairs this with a localStorage-persisted boot cache (instant paint), client-
+side search/filter derivations (zero network per keystroke) and optimistic
+writes with exact-snapshot rollback.
+
+The **AI Assistant V2** runs entirely in the browser on top of this: a
+BYOK (bring-your-own-key) OpenAI-compatible planner called directly from
+the client (zero server AI work) + a deterministic command grammar fallback,
+with the whole app exposed as tools (records, collections, keys, tokens,
+files, email, navigation). Every mutation is confirmation-gated by the UI.
+
 ---
 
 ## 5 · Quick start in any language
 
-The five core operations below — set, get, upload, create a table, insert a
-row — cover ~90% of what you'll do. Each sample uses
+The three core operations below — set, get, upload — cover ~90% of what
+you'll do. Each sample uses
 \`https://onyx.example.com\` and \`kv_live_YOUR_API_KEY\` as literal
 placeholders so you can copy, swap, and run.
 

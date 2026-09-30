@@ -95,12 +95,17 @@ function Carousel({
 
   React.useEffect(() => {
     if (!api) return
-    onSelect(api)
+    // Mirror embla's (external store) initial can-scroll state one tick
+    // after mount — reading it synchronously here would cascade a re-render
+    // (React Compiler lint) before the browser has painted.
+    const initial = setTimeout(() => onSelect(api), 0)
     api.on("reInit", onSelect)
     api.on("select", onSelect)
 
     return () => {
-      api?.off("select", onSelect)
+      clearTimeout(initial)
+      api.off("select", onSelect)
+      api.off("reInit", onSelect)
     }
   }, [api, onSelect])
 

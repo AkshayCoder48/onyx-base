@@ -88,16 +88,13 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             <Button size="sm" onClick={this.reset} className="bg-primary hover:bg-primary/90 text-primary-foreground">
               <RotateCcw className="size-4" /> Try again
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                this.reset()
-                window.location.href = '/'
-              }}
+            <a
+              href="/"
+              onClick={() => this.reset()}
+              className="inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md text-sm font-medium transition-colors border border-input bg-background hover:bg-accent hover:text-accent-foreground h-8 px-3"
             >
               <Home className="size-4" /> Back to dashboard
-            </Button>
+            </a>
           </div>
         </Card>
       </div>

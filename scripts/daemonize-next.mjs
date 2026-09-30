@@ -3,11 +3,12 @@
  * Start the Next.js dev server as a detached daemon so it survives this
  * shell session. PID is written to .next-dev.pid; logs go to dev.log.
  */
-const { spawn } = require('node:child_process')
-const fs = require('node:fs')
-const path = require('node:path')
+import { spawn } from 'node:child_process'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = path.resolve(__dirname, '..')
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PID_FILE = path.join(ROOT, '.next-dev.pid')
 const LOG_FILE = path.join(ROOT, 'dev.log')
 

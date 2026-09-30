@@ -823,9 +823,16 @@ export function findUserByApiKey(key: string): {
   if (!apiKey) return null
   const user = store.users.find((u) => u.id === apiKey.userId)
   if (!user) return null
-  // Touch lastUsedAt (fire-and-forget save)
-  apiKey.lastUsedAt = new Date().toISOString()
-  saveToDisk()
+  // Touch lastUsedAt — THROTTLED to once per minute. Updating it on every
+  // request made every authenticated read self-invalidating (the payload's
+  // lastUsedAt changed per request → V6 ETags could never 304) and forced
+  // a disk write per call. Minute precision is plenty for "last used".
+  const now = Date.now()
+  const last = apiKey.lastUsedAt ? Date.parse(apiKey.lastUsedAt) : 0
+  if (now - last > 60_000) {
+    apiKey.lastUsedAt = new Date().toISOString()
+    saveToDisk()
+  }
   return { user, apiKey }
 }
 

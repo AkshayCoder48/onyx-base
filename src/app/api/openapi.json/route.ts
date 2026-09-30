@@ -486,6 +486,68 @@ const SPEC = {
         responses: { '200': { description: '{ deleted, attempted } (best-effort, idempotent)' } },
       },
     },
+
+    // ─── V6 Ultima — instant-access architecture ─────────────────────────
+    '/api/v6/boot': {
+      get: {
+        summary: 'V6 Ultima: one-shot dashboard hydration (ETag/304)',
+        description:
+          'Returns EVERYTHING the dashboard needs at boot in ONE response: session, records, stats, analytics, collections, API keys, share tokens and recent logs. Carries a strong ETag — send If-None-Match from the previous boot to get an empty 304 when nothing changed (fully instant boot from the client cache, zero payload transfer). Replaces the old 8-request boot storm with a single function invocation.',
+        parameters: [
+          {
+            name: 'If-None-Match',
+            in: 'header',
+            required: false,
+            schema: { type: 'string' },
+            description: 'The ETag from your previous /api/v6/boot response. Match → 304 with an empty body.',
+          },
+        ],
+        responses: {
+          '200': { description: 'Full boot document', content: { 'application/json': { schema: { type: 'object', properties: { ok: { type: 'boolean', example: true }, data: { type: 'object', properties: { v: { type: 'integer', example: 6 }, arch: { type: 'string', example: 'ultima' }, session: { type: 'object' }, records: { type: 'object' }, stats: { type: 'object' }, analytics: { type: 'object' }, collections: { type: 'object' }, apiKeys: { type: 'object' }, shareTokens: { type: 'object' }, logs: { type: 'object' }, files: { type: 'object' } } } } } } } },
+          '304': { description: 'Cached copy still current (empty body)' },
+          '401': { description: 'Unauthorized' },
+        },
+      },
+    },
+    '/api/v6/batch': {
+      post: {
+        summary: 'V6 Ultima: batch KV operations in one round trip',
+        description:
+          'Execute up to 25 KV operations in a single function invocation. Ops: get / set / delete / list (each with optional collection). Per-op authorization mirrors the v1 surface (read scope for get/list, write for set, delete for delete). One op failing never aborts the batch — every op is answered individually. The AI assistant uses this as its low-invocation transport.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  ops: {
+                    type: 'array',
+                    maxItems: 25,
+                    items: {
+                      type: 'object',
+                      properties: {
+                        op: { type: 'string', enum: ['get', 'set', 'delete', 'list'] },
+                        key: { type: 'string' },
+                        value: {},
+                        collection: { type: 'string' },
+                      },
+                      required: ['op'],
+                    },
+                  },
+                },
+                required: ['ops'],
+              },
+            },
+          },
+        },
+        responses: {
+          '200': { description: '{ ok, data: { results: Array<per-op { ok, … } | { ok: false, error, code }> } }' },
+          '400': { description: 'Invalid ops array' },
+          '401': { description: 'Unauthorized' },
+        },
+      },
+    },
   },
 }
 

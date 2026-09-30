@@ -295,18 +295,9 @@ function CredentialsCard({
   const [deleting, setDeleting] = useState<string | null>(null)
   const [editing, setEditing] = useState<string | null>(null)
 
-  useEffect(() => {
-    if (editing) {
-      const cred = credentials.find((c) => c.name === editing)
-      if (cred) {
-        setName(cred.name)
-        setLabel(cred.label ?? '')
-        setFromName(cred.fromName ?? '')
-        setRateLimit(cred.rateLimitPerMin != null ? String(cred.rateLimitPerMin) : '')
-        setApiKey('')
-      }
-    }
-  }, [editing, credentials])
+  // Form fields are seeded directly in the edit button's click handler (no
+  // effect-sync — cascading setState in effects trips the compiler lint and
+  // re-seeding on every credentials refresh would clobber in-progress edits).
 
   async function save() {
     const trimmedName = name.trim()
@@ -449,7 +440,20 @@ function CredentialsCard({
                   size="sm"
                   variant="ghost"
                   className="h-7 px-2 text-[11px] text-muted-foreground"
-                  onClick={() => setEditing(editing === cred.name ? null : cred.name)}
+                  onClick={() => {
+                    if (editing === cred.name) {
+                      setEditing(null)
+                    } else {
+                      // Seed the form from this credential in the same gesture
+                      // that starts editing (see note above the save fn).
+                      setEditing(cred.name)
+                      setName(cred.name)
+                      setLabel(cred.label ?? '')
+                      setFromName(cred.fromName ?? '')
+                      setRateLimit(cred.rateLimitPerMin != null ? String(cred.rateLimitPerMin) : '')
+                      setApiKey('')
+                    }
+                  }}
                 >
                   {editing === cred.name ? 'Cancel' : 'Update'}
                 </Button>
@@ -677,14 +681,13 @@ function ComposerCard({
   const [sending, setSending] = useState(false)
   const [result, setResult] = useState<SendResponse | null>(null)
 
-  useEffect(() => {
-    if (credentials.length > 0 && !credential) setCredential(credentials[0].name)
-  }, [credentials, credential])
+  // Auto-select the first credential by derivation (no effect-sync state).
+  const effectiveCredential = credential || (credentials.length > 0 ? credentials[0].name : '')
 
   const detected = useMemo(() => detectVariables(subject, body), [subject, body])
 
   async function send() {
-    if (!credential) {
+    if (!effectiveCredential) {
       toast.error('Connect a credential first')
       return
     }
@@ -699,7 +702,7 @@ function ComposerCard({
       const res = await api<SendResponse>('/api/email/send', {
         method: 'POST',
         body: JSON.stringify({
-          credential,
+          credential: effectiveCredential,
           to: trimmedTo,
           subject,
           body,
@@ -729,7 +732,7 @@ function ComposerCard({
           <div className="space-y-1.5">
             <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Credential</Label>
             <select
-              value={credential}
+              value={effectiveCredential}
               onChange={(e) => setCredential(e.target.value)}
               className="h-9 w-full rounded-md border border-border/60 bg-background/60 px-3 text-sm text-foreground outline-none focus:border-primary/50"
             >

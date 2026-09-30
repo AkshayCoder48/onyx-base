@@ -369,6 +369,139 @@ h1, h2, h3, .page-title {
   50% { box-shadow: 0 22px 70px rgba(242, 82, 27, 0.34); }
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   V6 ULTIMA MOTION SYSTEM
+   ─────────────────────────────────────────────────────────────────────────
+   The complete dashboard motion language: motion-blur entrances,
+   directional view slides, time-sliced staggers, and hover micro-
+   interactions. Every animation uses ONLY compositor-friendly properties
+   (transform / opacity / filter) — zero layout thrash, zero jank, 60fps.
+
+     blur-rise        the signature: rise + de-blur into focus
+     view-in-left     view transition arriving from the left tab
+     view-in-right    view transition arriving from the right tab
+     .stagger > *     time-slicing: children enter in 45ms slices
+                      (first 12 children; later children cap at 540ms)
+     .glass-hover     hover micro-interaction for glass cards
+     .ultima-badge    V6 Ultima brand chip
+   ───────────────────────────────────────────────────────────────────────── */
+@keyframes blur-rise {
+  from { opacity: 0; transform: translate3d(0, 18px, 0) scale(0.985); filter: blur(12px); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); filter: blur(0); }
+}
+@keyframes view-in-left {
+  from { opacity: 0; transform: translate3d(-30px, 0, 0); filter: blur(9px); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); filter: blur(0); }
+}
+@keyframes view-in-right {
+  from { opacity: 0; transform: translate3d(30px, 0, 0); filter: blur(9px); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); filter: blur(0); }
+}
+@keyframes ultima-sheen {
+  from { transform: translateX(-120%) skewX(-18deg); }
+  to   { transform: translateX(240%) skewX(-18deg); }
+}
+
+.blur-rise { animation: blur-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.view-enter-left { animation: view-in-left 0.38s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.view-enter-right { animation: view-in-right 0.38s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* Time-slicing: direct children enter one slice apart. Children beyond
+   the 12th share the capped delay so long lists don't wait forever. */
+.stagger > * { animation: blur-rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.stagger > :nth-child(1)  { animation-delay: 20ms; }
+.stagger > :nth-child(2)  { animation-delay: 65ms; }
+.stagger > :nth-child(3)  { animation-delay: 110ms; }
+.stagger > :nth-child(4)  { animation-delay: 155ms; }
+.stagger > :nth-child(5)  { animation-delay: 200ms; }
+.stagger > :nth-child(6)  { animation-delay: 245ms; }
+.stagger > :nth-child(7)  { animation-delay: 290ms; }
+.stagger > :nth-child(8)  { animation-delay: 335ms; }
+.stagger > :nth-child(9)  { animation-delay: 380ms; }
+.stagger > :nth-child(10) { animation-delay: 425ms; }
+.stagger > :nth-child(11) { animation-delay: 470ms; }
+.stagger > :nth-child(n + 12) { animation-delay: 540ms; }
+
+/* Hover micro-interaction — glass cards lift + their glow warms. */
+.glass-hover {
+  transition:
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 0.28s ease;
+  will-change: transform;
+}
+.glass-hover:hover {
+  transform: translateY(-3px);
+  border-color: rgba(242, 82, 27, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.6),
+    0 18px 40px -16px rgba(120, 60, 20, 0.32),
+    0 10px 30px -14px rgba(242, 82, 27, 0.18);
+}
+
+/* Primary-button light sweep on hover. */
+.sheen { position: relative; overflow: hidden; }
+.sheen::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  transform: translateX(-120%) skewX(-18deg);
+  pointer-events: none;
+}
+.sheen:hover::after { animation: ultima-sheen 0.9s cubic-bezier(0.22, 1, 0.36, 1); }
+
+/* V6 Ultima brand chip — warm coral outline with a live pulse. */
+.ultima-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.125rem 0.55rem;
+  border-radius: 999px;
+  font-family: var(--font-mono), monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: #d8410f;
+  background: rgba(242, 82, 27, 0.09);
+  border: 1px solid rgba(242, 82, 27, 0.22);
+}
+.ultima-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #f2521b;
+  animation: pulse-dot 2.4s ease-in-out infinite;
+}
+
+/* Assistant V2 additions — tool chips, LLM badge, settings panel. */
+.assistant-tool-chip {
+  color: #d8410f;
+  background: rgba(242, 82, 27, 0.09);
+  border: 1px solid rgba(242, 82, 27, 0.2);
+  animation: onyx-enter 0.22s ease both;
+}
+.assistant-llm-badge {
+  color: #059669;
+  background: rgba(5, 150, 105, 0.1);
+  border: 1px solid rgba(5, 150, 105, 0.22);
+}
+.assistant-settings {
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 10px 30px -18px rgba(120, 60, 20, 0.3);
+  animation: blur-rise 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Dialog entrances — open state gets the full motion-blur rise (V6). */
+@keyframes ultima-dialog-in {
+  from { opacity: 0; transform: translate(-50%, -46%) scale(0.96); filter: blur(10px); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1); filter: blur(0); }
+}
+.ultima-dialog-in { animation: ultima-dialog-in 0.32s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
 /* Respect users who prefer stillness: collapse all non-essential motion. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

@@ -13,6 +13,13 @@ export async function api<T = unknown>(
   if (apiKey) headers.set('Authorization', `Bearer ${apiKey}`)
 
   const res = await fetch(path, { ...opts, headers })
+  // A bare 304 should never surface here (the browser HTTP cache serves the
+  // cached body transparently on revalidation) — but if one slips through
+  // (exotic proxies, manual revalidation), treat it as an error so TanStack
+  // Query keeps the previous data instead of poisoning the cache with `{}`.
+  if (res.status === 304) {
+    throw new Error('Not modified (304) — cached copy is still current')
+  }
   const text = await res.text()
   const data = text ? safeJson(text) : null
 

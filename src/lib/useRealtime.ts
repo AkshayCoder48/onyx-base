@@ -53,8 +53,5 @@ export function useRealtime() {
       socketRef.current = null
       setRealtimeConnected(false)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [apiKey, userId])
-
-  return socketRef.current
+  }, [apiKey, userId, qc, setRealtimeConnected])
 }

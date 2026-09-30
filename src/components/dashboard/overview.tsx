@@ -28,11 +28,11 @@ export function Overview() {
     queryFn: () => api<StatsView>('/api/dashboard/stats'),
   })
   const { data: records } = useQuery({
-    queryKey: ['records', 'recent'],
-    queryFn: () => api<{ records: RecordView[] }>('/api/dashboard/records?'),
+    queryKey: ['records'],
+    queryFn: () => api<{ records: RecordView[] }>('/api/dashboard/records'),
   })
   const { data: analytics } = useQuery({
-    queryKey: ['analytics', 'overview'],
+    queryKey: ['analytics'],
     queryFn: () => api<AnalyticsView>('/api/dashboard/analytics'),
     staleTime: 30_000,
   })
@@ -98,14 +98,14 @@ export function Overview() {
         }
       />
 
-      {/* ── KPI stat cards ── */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
+      {/* ── KPI stat cards — time-sliced stagger (V6 motion) ── */}
+      <div className="stagger grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         {kpis.map((c) => (
           <KpiCard key={c.label} label={c.label} value={c.value} icon={c.icon} color={c.color} tint={c.tint} spark={activitySeries} delta={delta} />
         ))}
       </div>
 
-      <div className="grid lg:grid-cols-3 gap-4">
+      <div className="stagger grid lg:grid-cols-3 gap-4">
         {/* ── Activity area chart (2/3) ── */}
         <Card className="lg:col-span-2 p-5 bg-card/40 border-border/60">
           <div className="flex items-center justify-between mb-4">
@@ -183,7 +183,7 @@ export function Overview() {
         </Card>
       </div>
 
-      <div className="grid lg:grid-cols-3 gap-4 mt-4">
+      <div className="stagger grid lg:grid-cols-3 gap-4 mt-4">
         {/* ── Recent records table (2/3) ── */}
         <Card className="lg:col-span-2 p-5 bg-card/40 border-border/60">
           <div className="flex items-center justify-between mb-4">
@@ -263,7 +263,7 @@ function KpiCard({
   delta: { text: string; up: boolean | null } | null
 }) {
   return (
-    <Card className="p-4 bg-card/40 border-border/60 relative overflow-hidden group">
+    <Card className="glass-hover p-4 bg-card/40 border-border/60 relative overflow-hidden group">
       <div className="flex items-start justify-between mb-3">
         <div className={cn('size-9 rounded-2xl grid place-items-center border', tint)}>
           <Icon className="size-[18px]" />
@@ -341,13 +341,15 @@ function TypeDonut({ byType, total }: { byType: { type: string; count: number }[
   }
   const R = 62
   const C = 2 * Math.PI * R
+  // Build the donut segments with a plain loop (no closure mutation —
+  // closure-captured reassignment trips the React Compiler lint).
+  const segments: Array<{ type: string; count: number; frac: number; dash: number; offset: number }> = []
   let offset = 0
-  const segments = byType.map((s) => {
+  for (const s of byType) {
     const frac = s.count / sum
-    const seg = { ...s, frac, dash: frac * C, offset }
+    segments.push({ ...s, frac, dash: frac * C, offset })
     offset += frac * C
-    return seg
-  })
+  }
   return (
     <div className="flex flex-col items-center">
       <div className="relative my-2">

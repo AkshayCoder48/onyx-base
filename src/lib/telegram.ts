@@ -1080,7 +1080,9 @@ export async function sendAccountManifest(
     const buildForm = () => {
       const payload = gzipSync(Buffer.from(json, 'utf-8'))
       bytes = payload.length
-      const blob = new Blob([payload], { type: 'application/gzip' })
+      // Copy into a plain Uint8Array: Node's Buffer type is not a valid
+      // BlobPart under lib.dom's stricter ArrayBufferView typing.
+      const blob = new Blob([new Uint8Array(payload)], { type: 'application/gzip' })
       const form = new FormData()
       form.append('chat_id', chatId)
       form.append('document', blob, fileName)

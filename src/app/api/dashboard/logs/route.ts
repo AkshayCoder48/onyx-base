@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
 import { authenticate, ok, fail } from '@/lib/auth'
+import { v6Ok } from '@/lib/v6'
 import { listLogs } from '@/lib/data-store'
 
 export const runtime = 'nodejs'
@@ -13,7 +14,7 @@ export async function GET(req: NextRequest) {
   const action = req.nextUrl.searchParams.get('action') || undefined
 
   const logs = listLogs(user.dbUserId, { limit, action })
-  return ok({
+  return v6Ok({
     logs: logs.map((l) => ({
       id: l.id,
       action: l.action,
@@ -23,5 +24,5 @@ export async function GET(req: NextRequest) {
       ip: l.ip,
       createdAt: l.createdAt,
     })),
-  })
+  }, req.headers.get('if-none-match'))
 }

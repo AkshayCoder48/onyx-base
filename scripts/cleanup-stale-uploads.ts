@@ -11,7 +11,7 @@
  *  2. HEALTH-CHECKS the local dev server (default http://localhost:3000).
  *  3. If the server is DOWN (502 / connection refused) it KILLS zombie
  *     `next dev` processes hogging port 3000 and restarts a fresh one via
- *     `scripts/daemonize-next.js`. This is the automated recovery for the
+ *     `scripts/daemonize-next.mjs`. This is the automated recovery for the
  *     "app crashed after a large upload and gives 502 until manual restart"
  *     failure mode.
  *
@@ -102,13 +102,13 @@ function killZombiesOnPort(port: number): void {
 }
 
 function restartDevServer(): void {
-  const daemonize = '/home/z/my-project/scripts/daemonize-next.js'
+  const daemonize = '/home/z/my-project/scripts/daemonize-next.mjs'
   if (!existsSync(daemonize)) {
     log('daemonize-next.js not found — cannot auto-restart; manual restart needed.')
     return
   }
   try {
-    log('restarting dev server via scripts/daemonize-next.js …')
+    log('restarting dev server via scripts/daemonize-next.mjs …')
     const child = spawn('node', [daemonize], {
       cwd: '/home/z/my-project',
       detached: true,
