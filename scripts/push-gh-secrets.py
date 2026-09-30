@@ -36,7 +36,6 @@ ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 DEFAULTS = {
     "NEXT_PUBLIC_APP_URL": "https://onyxbase.vercel.app",
     "NEXT_PUBLIC_APP_NAME": "Onyx Base",
-    "DATABASE_URL": "file:/tmp/cloudkv.json",
 }
 # Secrets that MUST exist in .env (no safe default).
 REQUIRED_FROM_ENV = [

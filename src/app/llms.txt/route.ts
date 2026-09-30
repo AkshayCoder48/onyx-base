@@ -1140,7 +1140,7 @@ cli/
 
 MIT — build on it, ship it, make it yours.
 
-Built with Next.js 16 · Prisma · Socket.io · Telegram · shadcn/ui.
+Built with Next.js 16 · Socket.io · Telegram · shadcn/ui.
 Palette: Claude-inspired warm clay on cream.
 `
 

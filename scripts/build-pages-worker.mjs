@@ -34,12 +34,12 @@ await build({
     {
       name: 'stub-wasm',
       setup(build) {
-        // Stub out all .wasm imports. Prisma's WASM query engine cannot run
-        // on Cloudflare Pages (read-only filesystem, no SQLite), and the
-        // Prisma client is lazily loaded (only when SQL features are used).
-        // Replacing the WASM import with an empty default export lets the
-        // bundle deploy cleanly. If a user invokes SQL features, Prisma's
-        // lazy init throws — which is caught by the try/catch in db.ts.
+        // Stub out all .wasm imports. WASM modules cannot run on Cloudflare
+        // Pages' bundling path (the runtime resolves wasm imports natively,
+        // but esbuild's loaders would break that resolution). The SQLite SQL
+        // workspace (Prisma + its WASM query engine) was removed from the
+        // app — this stub remains as generic defense so any future wasm
+        // import can never break the Pages bundle.
         build.onResolve({ filter: /\.wasm$/ }, () => ({
           path: 'stub-wasm',
           namespace: 'stub-wasm-ns',
