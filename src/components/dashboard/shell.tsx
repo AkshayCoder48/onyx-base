@@ -3,6 +3,7 @@
 import { Search, CalendarDays, ChevronDown, Bell, ArrowUpRight } from 'lucide-react'
 import { Sidebar, FooterBar } from './sidebar'
 import { Overview } from './overview'
+import { AssistantView } from './assistant'
 import { DatabaseView } from './database'
 import { CollectionsView } from './collections'
 import { CloudStorageView } from './storage'
@@ -23,6 +24,7 @@ import { cn } from '@/lib/utils'
 
 /** Human labels for the top-bar page title. */
 const VIEW_TITLES: Record<ViewKey, string> = {
+  assistant: 'AI Assistant',
   overview: 'Overview',
   database: 'Database',
   collections: 'Collections',
@@ -140,9 +142,13 @@ export function DashboardShell() {
           <main className="flex-1 min-h-0 overflow-y-auto scroll-slim overscroll-contain">
             <div className="mx-auto max-w-6xl px-4 sm:px-6 lg:px-8 py-6 lg:py-8">
               {/* ErrorBoundary per-view so a broken view doesn't take down the
-                  rest of the dashboard. The user can recover with one click. */}
+                  rest of the dashboard. The user can recover with one click.
+                  NOTE: the assistant intentionally escapes this padding
+                  (-my-6/lg:-my-8 in its own wrapper) for a full-height chat
+                  surface — keep that in mind when adding new views. */}
               <ErrorBoundary>
                 {view === 'overview' && <Overview />}
+                {view === 'assistant' && <AssistantView />}
                 {view === 'database' && <DatabaseView />}
                 {view === 'collections' && <CollectionsView />}
                 {view === 'storage' && <CloudStorageView />}

@@ -30,7 +30,23 @@ function getPrisma(): Promise<PrismaClient> {
   }
   prismaPromise = (async () => {
     const mod = await import('@prisma/client')
-    const instance = new mod.PrismaClient({ log: ['query'] })
+    // The platform DATABASE_URL may be PostgreSQL (some hosts inject one
+    // automatically). This legacy SQL workspace is a SQLite datasource
+    // (prisma/schema.prisma) and must NEVER be handed a pg URL — the engine
+    // would try to speak PostgreSQL to a SQLite file and fail in confusing
+    // ways. Resolution order:
+    //   1. ONYX_SQLITE_URL  — explicit opt-in for this workspace
+    //   2. DATABASE_URL     — only when it is a `file:` URL
+    //   3. Fallback          — /tmp on Vercel (ephemeral, bootstrapped by the
+    //                          runtime DDL below), ./onyx-sql.db locally
+    const sqliteUrl =
+      process.env.ONYX_SQLITE_URL ||
+      (process.env.DATABASE_URL?.startsWith('file:') ? process.env.DATABASE_URL : undefined) ||
+      (process.env.VERCEL ? 'file:/tmp/onyx-sql.db' : 'file:./onyx-sql.db')
+    const instance = new mod.PrismaClient({
+      log: ['query'],
+      datasources: { db: { url: sqliteUrl } },
+    })
     if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = instance
     return instance
   })().catch((err) => {

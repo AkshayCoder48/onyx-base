@@ -184,7 +184,7 @@ The dashboard stores your session in `localStorage` under the key
 |:---|:---|
 | `apiKey` | Your `kv_live_…` master API key. Sent as the Bearer header on every dashboard request. |
 | `user` | Your profile: `userId`, `name`, `plan`, `counts` (records / collections / apiKeys / logs), and `isAdmin`. |
-| `activeView` | Which dashboard tab you're on (`overview`, `database`, `collections`, `storage`, `api-keys`, `share`, `playground`, `sql`, `docs`, `logs`, `analytics`, `settings`). Persists across reloads. |
+| `activeView` | Which dashboard tab you're on (`overview`, `assistant`, `database`, `collections`, `storage`, `api-keys`, `share`, `playground`, `sql`, `docs`, `logs`, `analytics`, `settings`). Persists across reloads. |
 | `activeCollection` | The currently-selected collection (defaults to `default`). |
 | `useAdminMode` | `true` when an admin user wants the admin console; `false` for the regular dashboard. Only meaningful when `user.isAdmin` is true. |
 
@@ -227,12 +227,13 @@ localStorage.removeItem('cloudkv-session')
 <!-- ───────────────────────── FEATURE REFERENCE ───────────────────────── -->
 ## Feature reference
 
-Thirteen dashboard tabs, each a real feature — not a placeholder. The icons match
+Fourteen dashboard tabs, each a real feature — not a placeholder. The icons match
 the sidebar exactly.
 
 | Tab | What it does |
 |:---|:---|
 | **Dashboard** | Your landing page: a welcome header, four stat cards (records / collections / files / API keys), a 7-day activity area chart, recent records list, and a quick-jump launcher. Use it as the daily entry point — it surfaces what changed since you last visited and gets you into the database or storage tab in one click. |
+| **AI Assistant** | A chat surface over your workspace: stats, collections, records, file metadata and activity on demand, plus set/delete operations. Mutations are never executed on the first pass — the assistant proposes, you approve, and the per-key policy layer re-checks on confirmation. Works out of the box with a built-in deterministic command parser (`show stats`, `list records`, `get record foo`, `set foo to 42`); set `OPENAI_API_KEY` server-side for natural-language planning (any OpenAI-compatible provider via `OPENAI_BASE_URL` / `OPENAI_MODEL`). Server-side only — the key never reaches the browser, and no chat history is kept. |
 | **Database** | A spreadsheet-style IDE for your key-value data. Browse every record in the active collection, expand JSON cells, edit values inline, create new keys with auto-typing (string / number / boolean / JSON), and delete with a confirmation. Auto-refreshes in real time when other clients (the CLI, the API, a share-token widget) mutate a key — the row updates without a reload. |
 | **Collections** | Group keys into named collections (`default`, `cache`, `metrics`, …). Create, rename, and delete whole collections in one action — deleting a collection also wipes every record inside it and mirrors the deletion to Telegram. Use collections to keep unrelated data (config vs. analytics vs. user state) cleanly separated without a second account. |
 | **Cloud Storage** | A drag-and-drop file manager backed by Telegram. Upload any extension (exe, pdf, png, mp4, zip — anything) up to the effective limit (50 MB cloud Bot API, or 2 GB with a self-hosted local Bot API server). Each file gets a permanent `/f/<fileId>` proxy URL plus a signed 55-minute download token. Toggle public/private per file; track download counts. |

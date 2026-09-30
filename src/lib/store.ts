@@ -4,6 +4,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
 export type ViewKey =
+  | 'assistant'
   | 'overview'
   | 'database'
   | 'collections'
@@ -85,7 +86,7 @@ export const useOnyxBase = create<OnyxBaseState>()(
           state.activeView = 'email-automation'
         }
         if (state.activeView !== undefined && ![
-          'overview', 'database', 'collections', 'storage', 'api-keys',
+          'assistant', 'overview', 'database', 'collections', 'storage', 'api-keys',
           'email-automation', 'share', 'logs', 'analytics', 'playground',
           'sql', 'tables', 'docs', 'settings', 'diagnostics',
         ].includes(state.activeView as string)) {

@@ -87,7 +87,7 @@ export function logRequest(
   fields: Record<string, unknown>,
   level: 'info' | 'warn' | 'error' = 'info',
 ): void {
-  const safeFields = redact(fields)
+  const safeFields = redact(fields) as Record<string, unknown>
   const line = JSON.stringify({
     ts: new Date().toISOString(),
     requestId,

@@ -76,7 +76,7 @@ export async function POST(req: NextRequest) {
   // Validate the projection is a known column list.
   const KNOWN_COLS = ['key', 'value', 'valueType', 'collection', 'createdAt', 'updatedAt']
   const requestedCols =
-    projection === '*' ? KNOWN_COLS : projection.split(',').map((c) => c.trim()).filter(Boolean)
+    projection === '*' ? KNOWN_COLS : projection.split(',').map((c: string) => c.trim()).filter(Boolean)
   for (const c of requestedCols) {
     if (!KNOWN_COLS.includes(c)) {
       return fail(

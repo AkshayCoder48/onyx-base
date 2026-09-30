@@ -167,10 +167,14 @@ export function authorize(
   const token = /^Bearer\s+(.+)$/i.exec((auth || '').trim())?.[1]?.trim()
   const rec = token ? findApiKeyRecord(token) : null
 
-  // If we somehow can't find the record (e.g. just revoked between authenticate
-  // and now), allow the request through — authenticate already verified it.
-  // Per-key restrictions are a best-effort policy layer, not a security gate.
-  if (!rec) return { ok: true }
+  // A key that cannot be found here was revoked (or expired out of the
+  // record store) between authenticate and authorize. Allowing it through
+  // would let a just-revoked key bypass its scope / collection / rate-limit
+  // policy — per-key restrictions are a security gate, not best-effort
+  // decoration. Fail closed.
+  if (!rec) {
+    return { ok: false, status: 401, code: 'key_revoked', message: 'API key is no longer valid.' }
+  }
 
   // Defensively default v3 fields — old keys created before scopes/rate-limits
   // (or restored from a v2 manifest) may have these as undefined. Treat missing

@@ -23,6 +23,7 @@ import {
   Send,
   Sun,
   HelpCircle,
+  Sparkles,
 } from 'lucide-react'
 import { useOnyxBase, type ViewKey } from '@/lib/store'
 import { cn } from '@/lib/utils'
@@ -42,6 +43,7 @@ const NAV: { group: string; items: NavItem[] }[] = [
     group: 'Workspace',
     items: [
       { key: 'overview', label: 'Dashboard', icon: LayoutDashboard },
+      { key: 'assistant', label: 'AI Assistant', icon: Sparkles, hint: 'Manage your workspace with AI' },
       { key: 'database', label: 'Database', icon: Database },
       { key: 'collections', label: 'Collections', icon: FolderTree },
       { key: 'storage', label: 'Cloud Storage', icon: HardDrive },
