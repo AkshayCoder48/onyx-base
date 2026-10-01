@@ -7,7 +7,7 @@ import {
   migrateV3ToV4,
   getAccountIndex,
 } from '@/lib/data-store'
-import { SYSTEM_ACCOUNT_ID } from '@/lib/telegram'
+import { isV6Entry, SYSTEM_ACCOUNT_ID } from '@/lib/telegram'
 
 export const runtime = 'nodejs'
 
@@ -31,26 +31,41 @@ export async function GET(req: NextRequest) {
   await getAccountIndex().catch(() => null)
   const entries = await adminListAccountManifests()
   const v4 = isV4ModeActive()
+  const idx = await getAccountIndex().catch(() => null)
+  const v6Accounts = (entries ?? []).filter((e) => isV6Entry(e)).length
   // Build a per-user view that joins the account index entry with the user
   // record (for name/email display).
   const users = adminListAllUsers()
   const userByUserId = new Map(users.map((u) => [u.userId, u]))
   const accounts = (entries ?? []).map((e) => {
     const u = userByUserId.get(e.userId)
+    const v6 = isV6Entry(e)
     return {
       userId: e.userId,
       isSystem: e.userId === SYSTEM_ACCOUNT_ID,
       name: u?.name ?? (e.userId === SYSTEM_ACCOUNT_ID ? 'System (admin keys)' : null),
       email: u?.email ?? null,
+      format: v6 ? 6 : 4,
       messageId: e.messageId,
       bytes: e.bytes,
       recordCount: e.recordCount,
       updatedAt: e.updatedAt,
+      // V6 Ultima detail (absent on legacy V4 entries).
+      ...(v6
+        ? {
+            baseRev: (e as { base?: { rev?: number } }).base?.rev ?? null,
+            chunkCount: (e as { base?: { chunks?: unknown[] } }).base?.chunks?.length ?? 0,
+            deltaOps: (e as { delta?: { ops?: number } }).delta?.ops ?? 0,
+            deltaBytes: (e as { delta?: { bytes?: number } }).delta?.bytes ?? 0,
+          }
+        : {}),
     }
   })
   return ok({
     v4Mode: v4,
-    storageMode: v4 ? 'v4-per-account' : 'v3-full-state',
+    v6Mode: v6Accounts > 0,
+    indexVersion: idx?.version ?? null,
+    storageMode: v6Accounts > 0 ? 'v6-ultima-chat' : v4 ? 'v4-per-account' : 'v3-full-state',
     totalAccounts: accounts.length,
     totalBytes: accounts.reduce((s, a) => s + a.bytes, 0),
     accounts,

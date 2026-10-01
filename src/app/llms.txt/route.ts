@@ -465,6 +465,11 @@ the client (zero server AI work) + a deterministic command grammar fallback,
 with the whole app exposed as tools (records, collections, keys, tokens,
 files, email, navigation). Every mutation is confirmation-gated by the UI.
 
+V6 Ultima is also the **Telegram chat architecture** (see §10): an
+immutable sharded base + per-write deltas, so \`/v1\` writes stay ~0.5s
+durable and 100,000-key collections restore in about a second — at ANY
+account size.
+
 ---
 
 ## 5 · Quick start in any language
@@ -897,16 +902,30 @@ curl -X POST https://onyx.example.com/api/admin/promote \\
 
 ---
 
-## 10 · Storage model
+## 10 · Storage model — V6 Ultima chat architecture
 
-- **In-memory store** (with a JSON file cache) — fast local index,
-  instant reads, single-node.
-- **Telegram** — durable backup. Every record is mirrored as a structured
-  message in the user's chat (their own bot or the server-side shared
-  bot). Append-only, replayable.
-- **Identity manifest** — a pinned Telegram message recording
-  \`user → API keys → collections → records\`; re-pinned after every write
-  so the platform self-heals after a full reset.
+- **In-memory store** (with a coalesced JSON file cache) — fast local
+  index, instant reads, single-node.
+- **Telegram — V6 Ultima chat format** (durable layer):
+  - **Immutable chunked base** — each account's records are sharded
+    across gzipped Telegram documents (~20k records / ~20MB raw per
+    chunk). A 100,000-key collection is ~5 chunks, restorable in about
+    a second via PARALLEL downloads.
+  - **Per-write delta** — durable writes upload ONE small document (the
+    account "core" + record ops since the last compaction) and edit the
+    pinned index pointer. A SET on a 100k-key collection costs the same
+    ~4 small Bot API calls as on an empty account: ~0.5s, measured.
+  - **Pinned account index** (V6) — maps \`userId → {base chunks, delta}\`.
+    When the serialized index would pass Telegram's 4096-char pin cap,
+    it flips to ref mode: a constant-size pointer pin + a gzipped index
+    document (readers resolve both transparently). Legacy V4 single-
+    manifest entries migrate to V6 transparently on their next write.
+  - **Background compaction** — when a delta grows past its budget, the
+    base is re-sharded off the request path and the delta resets.
+- **Durability contract** — \`/v1\` mutations await the merged delta pin
+  before responding (\`durable: true\`); the pending-op log keeps every
+  unconfirmed write until a verified durable tip proves it subsumed, and
+  tombstones make deletes stick across instances.
 - **Realtime** — Socket.io on port 3003 pushes \`record:changed\` events;
   no polling.
 

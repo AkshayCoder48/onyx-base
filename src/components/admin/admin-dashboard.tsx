@@ -1742,7 +1742,7 @@ function AdminsView() {
 }
 
 /* ===================================================================
- *  Storage tab — per-account V4 manifest status.
+ *  Storage tab — per-account manifest status (V6 Ultima chat store).
  * =================================================================== */
 
 interface ManifestAccount {
@@ -1750,15 +1750,24 @@ interface ManifestAccount {
   isSystem: boolean
   name: string | null
   email: string | null
+  /** 6 = V6 Ultima chunked+delta chat format; 4 = legacy single manifest. */
+  format?: number
   messageId: number
   bytes: number
   recordCount: number
   updatedAt: string
+  /** V6 detail. */
+  baseRev?: number | null
+  chunkCount?: number
+  deltaOps?: number
+  deltaBytes?: number
 }
 
 interface ManifestsResponse {
   ok: boolean
   v4Mode: boolean
+  v6Mode?: boolean
+  indexVersion?: number | null
   storageMode: string
   totalAccounts: number
   totalBytes: number
@@ -1787,6 +1796,7 @@ function StorageTab() {
   })
 
   const v4Mode = data?.v4Mode ?? false
+  const v6Mode = data?.v6Mode ?? false
   const accounts = data?.accounts ?? []
 
   async function migrateToV4() {
@@ -1833,7 +1843,11 @@ function StorageTab() {
               <div className="space-y-1">
                 <CardTitle className="flex items-center gap-2 text-base">
                   Storage mode
-                  {v4Mode ? (
+                  {v6Mode ? (
+                    <Badge className="bg-primary/15 text-primary border-primary/30 hover:bg-primary/15 font-mono text-[10px] uppercase tracking-wider">
+                      V6 Ultima Chat
+                    </Badge>
+                  ) : v4Mode ? (
                     <Badge className="bg-emerald-500/15 text-emerald-600 border-emerald-500/30 hover:bg-emerald-500/15 font-mono text-[10px] uppercase tracking-wider">
                       V4 Per-Account
                     </Badge>
@@ -1946,6 +1960,15 @@ function StorageTab() {
                               <span className="text-sm font-medium text-foreground/90 truncate">
                                 {a.isSystem ? 'System' : a.name ?? 'Unnamed'}
                               </span>
+                              {a.format === 6 && (
+                                <Badge
+                                  variant="outline"
+                                  className="bg-primary/10 text-primary border-primary/30 font-mono text-[10px] uppercase"
+                                  title={`base rev ${a.baseRev ?? '—'} · ${a.chunkCount ?? 0} chunk(s) · ${a.deltaOps ?? 0} delta op(s)`}
+                                >
+                                  V6
+                                </Badge>
+                              )}
                               {a.isSystem && (
                                 <Badge
                                   variant="outline"

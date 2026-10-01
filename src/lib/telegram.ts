@@ -824,6 +824,21 @@ export async function sendAndPinFullState(
 /** Marker for the V4 pinned account index. */
 const ACCOUNT_INDEX_MARKER = 'CLOUDKV_ACCOUNT_INDEX_V4'
 
+/** Marker for the V6 Ultima pinned account index (inline mode). */
+const ACCOUNT_INDEX_MARKER_V6 = 'CLOUDKV_ACCOUNT_INDEX_V6'
+
+/** Caption marker for the full index DOCUMENT in ref mode. */
+const ACCOUNT_INDEX_DOC_MARKER_V6 = 'CLOUDKV_ACCOUNT_INDEX_DOC_V6'
+
+/**
+ * Inline budget for the pinned index text. Telegram text messages cap hard
+ * at 4096 chars; the production index was already at 3977/4096 with plain
+ * V4 entries, so V6 switches to ref mode (a constant-size pointer pin to a
+ * gzipped index document) before hitting the wall. Readers handle both.
+ * (Env-tunable so test rigs can force ref mode with a single account.)
+ */
+const INDEX_INLINE_CHAR_BUDGET = Number(process.env.TELEGRAM_INDEX_INLINE_BUDGET ?? 3500)
+
 /** Marker prefix for per-account manifest documents (caption). */
 const ACCOUNT_MANIFEST_MARKER = 'CLOUDKV_ACCOUNT_MANIFEST_V4'
 
@@ -846,14 +861,101 @@ export interface AccountIndexEntry {
   updatedAt: string
 }
 
-/** Shape of the pinned V4 index message body. */
+// ─── V6 Ultima: chunked immutable base + tiny per-write delta ────────────────
+//
+// V4's per-account manifest re-uploaded the ENTIRE account on every durable
+// write and hard-capped at one document (cloud Bot API: 50 MB up / 20 MB
+// down), so a 100k-key collection made every SET a multi-MB, multi-second
+// upload and any bigger account impossible. V6 Ultima restructures the chat:
+//
+//   base  — the account's records sharded across IMMUTABLE gzipped chunk
+//           documents (rewritten only by background compaction),
+//   delta — ONE small document per account carrying the small "core" (user,
+//           apiKeys, logs, files metadata, tombstones…) plus the record ops
+//           since the last compaction. A durable write uploads ONLY this:
+//           ~4 small Bot API calls, sub-second even on 100k-key accounts.
+//
+// Restores download every chunk + the delta in PARALLEL, so a 100k-key cold
+// rehydrate is a bounded-width parallel fetch instead of one giant document.
+
+/** Reference to one immutable base chunk document. */
+export interface V6ChunkRef {
+  fileId: string
+  messageId: number
+  /** Shard ordinal (0..n-1) — chunk order for assembly. */
+  shard: number
+  /** Records carried by this chunk. */
+  count: number
+  /** Gzipped byte size. */
+  bytes: number
+}
+
+/** Reference to the account's current (mutable-by-replacement) delta doc. */
+export interface V6DeltaRef {
+  messageId: number
+  fileId: string
+  /** Op count in the delta (admin display + compaction trigger). */
+  ops: number
+  /** Gzipped byte size. */
+  bytes: number
+}
+
+/** V6 Ultima index entry for one account. */
+export interface AccountEntryV6 {
+  userId: string
+  format: 6
+  /**
+   * Monotonic rev: the highest Telegram message_id among this account's
+   * documents (delta or chunks). Any later durable state has a higher id,
+   * so `tip.messageId >= mine` proves this instance's write is subsumed.
+   */
+  messageId: number
+  /** Legacy-compatible pointer fields (delta doc when present, else last chunk). */
+  fileId: string
+  bytes: number
+  recordCount: number
+  updatedAt: string
+  /** The immutable sharded record base. */
+  base: {
+    rev: number
+    /** ISO time of the compaction that produced this base. */
+    compactedAt: string
+    chunks: V6ChunkRef[]
+  }
+  /** Current delta on top of base; null right after a compaction. */
+  delta: V6DeltaRef | null
+}
+
+/** Any index entry shape (V4 legacy or V6 Ultima). */
+export type AccountEntry = AccountIndexEntry | AccountEntryV6
+
+/** Runtime guard for the V6 entry shape. */
+export function isV6Entry(e: unknown): e is AccountEntryV6 {
+  return (
+    typeof e === 'object' &&
+    e !== null &&
+    (e as { format?: unknown }).format === 6 &&
+    typeof (e as { messageId?: unknown }).messageId === 'number' &&
+    Array.isArray((e as { base?: { chunks?: unknown } }).base?.chunks)
+  )
+}
+
+/** Shape of the pinned account index (V4 and V6 Ultima wire-compatible). */
 export interface AccountIndex {
   cloudkv: true
   kind: 'account-index'
-  version: 4
+  version: 4 | 6
   exportedAt: string
+  /**
+   * V6 ref mode only: when the inline JSON would pass the 4096-char pin
+   * budget, the pin text carries just this pointer and the full index
+   * lives in a gzipped document (fetched transparently by readers).
+   */
+  mode?: 'inline' | 'ref'
+  indexFileId?: string
+  indexMessageId?: number
   /** `userId → entry`. */
-  accounts: Record<string, AccountIndexEntry>
+  accounts: Record<string, AccountEntry>
 }
 
 /** Shape of a single account's manifest document. */
@@ -884,9 +986,15 @@ export interface AccountManifest {
 }
 
 /**
- * Fetch + parse the pinned V4 account index. Returns null if Telegram is not
+ * Fetch + parse the pinned account index. Returns null if Telegram is not
  * configured, the pin is missing, or the pin is not ours (e.g. still a V3
  * full-state manifest — caller should fall back to fetchPinnedManifest).
+ *
+ * V6 Ultima aware:
+ *   - V6 inline pin → parse the JSON directly.
+ *   - V6 ref pin → the full index lives in a gzipped document; download it
+ *     (cached — index docs are immutable per rev) and parse that.
+ *   - V4 pin → legacy parse (mixed entries are fine inside either shape).
  */
 export async function fetchAccountIndex(
   chatIdOverride?: string,
@@ -904,7 +1012,23 @@ export async function fetchAccountIndex(
     // The index is a TEXT message (small). If the pin is a document, it's a
     // V3 full-state manifest — not ours.
     const text = pinned.text ?? null
-    if (!text || !text.startsWith(ACCOUNT_INDEX_MARKER)) return null
+    if (!text) return null
+
+    // V6 Ultima pin (inline or ref mode).
+    if (text.startsWith(ACCOUNT_INDEX_MARKER_V6)) {
+      const json = text.slice(ACCOUNT_INDEX_MARKER_V6.length).trim()
+      let parsed = JSON.parse(json) as AccountIndex
+      if (parsed.mode === 'ref' && parsed.indexFileId) {
+        const docText = await fetchIndexDocument(parsed.indexFileId, botTokenOverride, botApiBaseUrlOverride)
+        if (!docText) return null
+        parsed = JSON.parse(docText) as AccountIndex
+      }
+      if (parsed.cloudkv !== true || parsed.kind !== 'account-index' || (parsed.version !== 6 && parsed.version !== 4)) return null
+      return parsed
+    }
+
+    // V4 pin (legacy).
+    if (!text.startsWith(ACCOUNT_INDEX_MARKER)) return null
     const json = text.slice(ACCOUNT_INDEX_MARKER.length).trim()
     const parsed = JSON.parse(json) as AccountIndex
     if (parsed.cloudkv !== true || parsed.kind !== 'account-index' || parsed.version !== 4) return null
@@ -916,10 +1040,92 @@ export async function fetchAccountIndex(
 }
 
 /**
- * Write (or overwrite) the pinned V4 account index. Replaces whatever is
+ * Fresh-install variant used by the V6 sync: when the chat has NO pinned
+ * message at all, return a synthetic EMPTY V6 index instead of null — the
+ * first write on a fresh deployment must be able to pin the very first
+ * index (the strict variant's null meant "unreadable, abort" and froze
+ * fresh installs at register). Still returns null on transport failure or
+ * a FOREIGN pin (never clobber a pin we don't own).
+ */
+export async function fetchAccountIndexAllowEmpty(
+  chatIdOverride?: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<AccountIndex | null> {
+  const strict = await fetchAccountIndex(chatIdOverride, botTokenOverride, botApiBaseUrlOverride)
+  if (strict) return strict
+  // Distinguish "no pin" from "unreadable": one direct getChat.
+  const chatId = chatIdOverride ?? ENV_CHAT_ID
+  if (!isTelegramConfigured(chatId, botTokenOverride)) return null
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
+  try {
+    const chat = (await getBotJson(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)) as GetChatResult | null
+    if (!chat || !chat.ok || !chat.result) return null
+    const pinned = chat.result.pinned_message
+    // Foreign pin (not ours, not absent) → null (anti-clobber).
+    if (pinned) return null
+    // Genuinely no pin → fresh install: synthesize the empty index.
+    return {
+      cloudkv: true,
+      kind: 'account-index',
+      version: 6,
+      exportedAt: new Date(0).toISOString(),
+      accounts: {},
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Small immutable-document cache for ref-mode index documents (by fileId). */
+const indexDocCache = new Map<string, { text: string; at: number }>()
+const INDEX_DOC_CACHE_TTL_MS = 10 * 60_000
+const INDEX_DOC_CACHE_MAX = 8
+
+async function fetchIndexDocument(
+  fileId: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<string | null> {
+  const hit = indexDocCache.get(fileId)
+  if (hit && Date.now() - hit.at < INDEX_DOC_CACHE_TTL_MS) return hit.text
+  const text = await downloadJsonDocument(fileId, botTokenOverride, botApiBaseUrlOverride)
+  if (text === null) return null
+  if (indexDocCache.size >= INDEX_DOC_CACHE_MAX) {
+    const oldest = indexDocCache.keys().next()
+    if (!oldest.done) indexDocCache.delete(oldest.value)
+  }
+  indexDocCache.set(fileId, { text, at: Date.now() })
+  return text
+}
+
+/**
+ * Per-instance index-edit lock. The pinned index is a single shared message:
+ * two concurrent edits from THIS instance can interleave (fetch by A, fetch
+ * by B, edit by A, edit by B — B's edit silently reverts A's entry change).
+ * Serializing all pin edits on one instance removes that entire class.
+ * Cross-instance races are handled by the sync-level verify + repair loops.
+ */
+let indexPinLock: Promise<unknown> = Promise.resolve()
+export function withIndexPinLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = indexPinLock.then(fn, fn)
+  indexPinLock = run.then(
+    () => undefined,
+    () => undefined,
+  )
+  return run
+}
+
+/**
+ * Write (or overwrite) the pinned account index. Replaces whatever is
  * currently pinned (including a V3 full-state document — that message stays in
  * the chat history but is no longer pinned). Returns the new pinned message_id
  * or null on failure.
+ *
+ * V6 Ultima: when the serialized index would exceed the inline pin budget
+ * (Telegram text messages cap at 4096 chars — production was already at
+ * 3977), the full index is uploaded as a gzipped document and the pin text
+ * carries only a constant-size pointer to it. Readers resolve both shapes.
  */
 export async function pinAccountIndex(
   index: AccountIndex,
@@ -930,60 +1136,102 @@ export async function pinAccountIndex(
   const chatId = chatIdOverride ?? ENV_CHAT_ID
   if (!isTelegramConfigured(chatId, botTokenOverride)) return null
   const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
-  const text = `${ACCOUNT_INDEX_MARKER}\n${JSON.stringify(index)}`
-  try {
-    const chat = (await getBotJson(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)) as GetChatResult | null
-    const pinned = chat?.result?.pinned_message
-    const pinnedText = pinned?.text ?? null
-    const pinnedIsOurIndex = !!pinned && !!pinnedText && pinnedText.startsWith(ACCOUNT_INDEX_MARKER)
-    if (pinnedIsOurIndex && pinned) {
-      const editData = await postBotJson(`${apiBase}/editMessageText`, {
+
+  return withIndexPinLock(async () => {
+    let text: string
+    const body = JSON.stringify(index)
+    if (body.length + ACCOUNT_INDEX_MARKER_V6.length > INDEX_INLINE_CHAR_BUDGET) {
+      // REF MODE: upload the full index as a document, pin the pointer.
+      const sent = await sendGzippedJsonDocument(
+        body,
+        'onyxbase-v6-index.json.gz',
+        ACCOUNT_INDEX_DOC_MARKER_V6,
+        chatIdOverride,
+        botTokenOverride,
+        botApiBaseUrlOverride,
+      )
+      if (!sent) {
+        console.error('[telegram] pinAccountIndex: ref-mode index document upload failed')
+        return null
+      }
+      const pointer: AccountIndex = {
+        cloudkv: true,
+        kind: 'account-index',
+        version: 6,
+        mode: 'ref',
+        exportedAt: index.exportedAt,
+        indexFileId: sent.fileId,
+        indexMessageId: sent.messageId,
+        accounts: {},
+      }
+      text = `${ACCOUNT_INDEX_MARKER_V6}\n${JSON.stringify(pointer)}`
+    } else {
+      // INLINE MODE (small indexes stay a single cheap text pin).
+      const marker = index.version === 6 ? ACCOUNT_INDEX_MARKER_V6 : ACCOUNT_INDEX_MARKER
+      const inline: AccountIndex = { ...index, mode: 'inline' }
+      delete (inline as Partial<AccountIndex>).indexFileId
+      delete (inline as Partial<AccountIndex>).indexMessageId
+      text = `${marker}\n${JSON.stringify(inline)}`
+    }
+    try {
+      const chat = (await getBotJson(`${apiBase}/getChat?chat_id=${encodeURIComponent(chatId)}`)) as GetChatResult | null
+      const pinned = chat?.result?.pinned_message
+      const pinnedText = pinned?.text ?? null
+      const pinnedIsOurIndex =
+        !!pinned &&
+        !!pinnedText &&
+        (pinnedText.startsWith(ACCOUNT_INDEX_MARKER_V6) || pinnedText.startsWith(ACCOUNT_INDEX_MARKER))
+      if (pinnedIsOurIndex && pinned) {
+        const editData = await postBotJson(`${apiBase}/editMessageText`, {
+          chat_id: chatId,
+          message_id: pinned.message_id,
+          text,
+          parse_mode: 'HTML',
+          disable_web_page_preview: true,
+        })
+        if (editData?.ok) return pinned.message_id
+        // "Message is not modified" means the pin already holds exactly this
+        // content (converged retry / duplicate sync) — that IS success. Without
+        // this we fall through to send+pin spam on every duplicate sync.
+        if (editData && /message is not modified/i.test(editData.description ?? '')) {
+          return pinned.message_id
+        }
+        // Flooded edit: STILL try the send+pin fallback below. Same-message
+        // edits and fresh sends often sit in different Telegram buckets — an
+        // edit-ban (escalated after hammering one message) usually still
+        // allows sends. If the send also floods, we fail fast there.
+      }
+      const sendData = await postBotJson(`${apiBase}/sendMessage`, {
         chat_id: chatId,
-        message_id: pinned.message_id,
         text,
         parse_mode: 'HTML',
         disable_web_page_preview: true,
       })
-      if (editData?.ok) return pinned.message_id
-      // "Message is not modified" means the pin already holds exactly this
-      // content (converged retry / duplicate sync) — that IS success. Without
-      // this we fall through to send+pin spam on every duplicate sync.
-      if (editData && /message is not modified/i.test(editData.description ?? '')) {
-        return pinned.message_id
+      if (!sendData?.ok || !sendData.result) {
+        console.error('[telegram] pinAccountIndex sendMessage failed:', sendData?.description)
+        return null
       }
-      // Flooded edit: STILL try the send+pin fallback below. Same-message
-      // edits and fresh sends often sit in different Telegram buckets — an
-      // edit-ban (escalated after hammering one message) usually still
-      // allows sends. If the send also floods, we fail fast there.
-    }
-    const sendData = await postBotJson(`${apiBase}/sendMessage`, {
-      chat_id: chatId,
-      text,
-      parse_mode: 'HTML',
-      disable_web_page_preview: true,
-    })
-    if (!sendData?.ok || !sendData.result) {
-      console.error('[telegram] pinAccountIndex sendMessage failed:', sendData?.description)
+      const newMessageId = (sendData.result as { message_id: number }).message_id
+      const pinData = await postBotJson(`${apiBase}/pinChatMessage`, {
+        chat_id: chatId,
+        message_id: newMessageId,
+        disable_notification: true,
+      })
+      if (!pinData?.ok) console.warn('[telegram] pinAccountIndex pinChatMessage failed:', pinData?.description)
+      return newMessageId
+    } catch (err) {
+      console.error('[telegram] pinAccountIndex error:', err)
       return null
     }
-    const newMessageId = (sendData.result as { message_id: number }).message_id
-    const pinData = await postBotJson(`${apiBase}/pinChatMessage`, {
-      chat_id: chatId,
-      message_id: newMessageId,
-      disable_notification: true,
-    })
-    if (!pinData?.ok) console.warn('[telegram] pinAccountIndex pinChatMessage failed:', pinData?.description)
-    return newMessageId
-  } catch (err) {
-    console.error('[telegram] pinAccountIndex error:', err)
-    return null
-  }
+  })
 }
 
 /**
  * POST a multipart form (sendDocument). SINGLE attempt — on 429 fail fast
  * to the caller (no in-request sleep; the throttle window is armed and the
- * sync/backstop/client retry owns the wait).
+ * sync/backstop/client retry owns the wait). A generous 60s abort cap
+ * protects callers that hold locks across the upload (the index pin lock):
+ * "no timeout for large uploads" must never become "hang forever".
  */
 async function sendDocumentWithRetry(
   apiBase: string,
@@ -991,8 +1239,20 @@ async function sendDocumentWithRetry(
 ): Promise<{ message_id: number; document?: { file_id: string } } | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      // Raw fetch (no 5s timeout) — multi-MB uploads need time.
-      const sendRes = await breakerFetch(`${apiBase}/sendDocument`, { method: 'POST', body: buildForm() })
+      // Raw fetch (no 5s timeout) — multi-MB uploads need time, but the
+      // 60s AbortController cap guarantees the promise always settles.
+      const controller = new AbortController()
+      const cap = setTimeout(() => controller.abort(), 60_000)
+      let sendRes: Response
+      try {
+        sendRes = await breakerFetch(`${apiBase}/sendDocument`, {
+          method: 'POST',
+          body: buildForm(),
+          signal: controller.signal,
+        })
+      } finally {
+        clearTimeout(cap)
+      }
       const sendData = (await sendRes.json().catch(() => null)) as {
         ok: boolean
         description?: string
@@ -1016,6 +1276,43 @@ async function sendDocumentWithRetry(
 /** sha256 hex of a string (canonical-change detection for manifests). */
 export function sha256Hex(s: string): string {
   return createHash('sha256').update(s, 'utf8').digest('hex')
+}
+
+/**
+ * V6 Ultima transport: upload an arbitrary JSON payload as a GZIPPED
+ * Telegram document (chunk shards, deltas, ref-mode index docs). Small
+ * bodies upload in well under a second — this is the ONLY upload a durable
+ * V6 write performs (the multi-MB base chunks are rewritten by background
+ * compaction, never by the request path).
+ */
+export async function sendGzippedJsonDocument(
+  json: string,
+  fileName: string,
+  caption: string,
+  chatIdOverride?: string,
+  botTokenOverride?: string,
+  botApiBaseUrlOverride?: string,
+): Promise<{ messageId: number; fileId: string; bytes: number } | null> {
+  const chatId = chatIdOverride ?? ENV_CHAT_ID
+  if (!isTelegramConfigured(chatId, botTokenOverride)) return null
+  const apiBase = resolveApiBase(botTokenOverride, botApiBaseUrlOverride)
+  let bytes = 0
+  const buildForm = () => {
+    const payload = gzipSync(Buffer.from(json, 'utf-8'))
+    bytes = payload.length
+    // Copy into a plain Uint8Array: Node's Buffer type is not a valid
+    // BlobPart under lib.dom's stricter ArrayBufferView typing.
+    const blob = new Blob([new Uint8Array(payload)], { type: 'application/gzip' })
+    const form = new FormData()
+    form.append('chat_id', chatId)
+    form.append('document', blob, fileName)
+    form.append('caption', caption.slice(0, 1024))
+    form.append('disable_notification', 'true')
+    return form
+  }
+  const result = await sendDocumentWithRetry(apiBase, buildForm)
+  if (!result || !result.document) return null
+  return { messageId: result.message_id, fileId: result.document.file_id, bytes }
 }
 
 /**

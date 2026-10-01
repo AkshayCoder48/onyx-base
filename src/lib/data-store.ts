@@ -41,12 +41,30 @@ import {
   manifestContentSha,
   notePacingThrottle,
   throttleYieldMs,
+  isV6Entry,
   SYSTEM_ACCOUNT_ID,
   type AccountIndex,
   type AccountIndexEntry,
   type AccountManifest,
 } from '@/lib/telegram'
 import { hashPassword, verifyPassword } from '@/lib/password'
+import {
+  registerV6StoreAdapter,
+  noteV6RecordSet,
+  noteV6RecordDelete,
+  syncV6Account,
+  rehydrateV6Account,
+} from '@/lib/v6/chat'
+import {
+  msOf,
+  maxIso,
+  asArray,
+  tombMap,
+  mergeTombstoneLists,
+  mergeAccountManifests,
+} from '@/lib/v6/merge'
+
+export { mergeAccountManifests }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -189,7 +207,7 @@ export interface LogEntry {
   createdAt: string
 }
 
-interface TelegramConfigRecord {
+export interface TelegramConfigRecord {
   /** The dbUserId this config belongs to. */
   userId: string
   /** Custom Telegram chat ID (e.g. -1001234567890) — overrides the env default. */
@@ -327,7 +345,7 @@ interface StoreShape {
   recordTombstones: RecordTombstone[]
 }
 
-interface CollectionNameRecord {
+export interface CollectionNameRecord {
   userId: string
   name: string
   createdAt: string
@@ -418,14 +436,39 @@ function loadFromDisk(): StoreShape {
   }
 }
 
-function saveToDisk() {
+/**
+ * Coalesced disk-cache writer. The old saveToDisk wrote the FULL store JSON
+ * synchronously on EVERY mutation — O(n²) on a bulk import (100k records ×
+ * a 25MB stringify each = minutes of pure serialization). Now mutations
+ * only mark dirty; ONE trailing write lands within 200ms of the last
+ * mutation. Telegram is the durable layer — this file is a best-effort
+ * local cache, so a coalescing window costs nothing in durability terms.
+ *
+ * RECORDS CAP: once the store holds more than DISK_CACHE_MAX_RECORDS, the
+ * cache stops snapshotting record bodies entirely (a 100k-record store
+ * would otherwise pay a 25MB stringify + write on every mutation batch —
+ * ~0.5s of event-loop blocking per request under load). Identity data
+ * (users, keys, config) still caches; records rehydrate from Telegram
+ * on demand (maybeRehydrateAccount / auth-on-miss) — correct by design.
+ */
+let diskCacheDirty = false
+let diskCacheTimer: ReturnType<typeof setTimeout> | null = null
+const DISK_CACHE_COALESCE_MS = 200
+const DISK_CACHE_MAX_RECORDS = 10_000
+
+function writeDiskCacheNow(): void {
+  diskCacheDirty = false
+  if (diskCacheTimer) {
+    clearTimeout(diskCacheTimer)
+    diskCacheTimer = null
+  }
   try {
     const dir = path.dirname(STORE_PATH)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    const data: StoreShape = {
+    const data: StoreShape & { recordsTruncated?: boolean } = {
       users: store.users,
       apiKeys: store.apiKeys,
-      records: store.records,
+      records: store.records.length > DISK_CACHE_MAX_RECORDS ? [] : store.records,
       logs: store.logs,
       telegramConfigs: store.telegramConfigs,
       shareTokens: store.shareTokens,
@@ -433,16 +476,41 @@ function saveToDisk() {
       collectionNames: store.collectionNames,
       adminKeys: store.adminKeys,
       recordTombstones: store.recordTombstones,
+      recordsTruncated: store.records.length > DISK_CACHE_MAX_RECORDS,
     }
     // Atomic write: write to a temp file in the same directory, then rename.
     // `rename` is atomic on POSIX, so a crash mid-write can never leave a
     // truncated/corrupt cloudkv.json — at worst the old version stays.
     const tmpPath = STORE_PATH + '.tmp'
-    fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8')
+    fs.writeFileSync(tmpPath, JSON.stringify(data), 'utf-8')
     fs.renameSync(tmpPath, STORE_PATH)
   } catch (err) {
     console.error('[store] failed to write JSON cache:', err)
   }
+}
+
+/** Mark the disk cache dirty; ONE trailing write lands shortly after the
+ * last mutation (see writeDiskCacheNow for why this is coalesced). */
+function saveToDisk() {
+  diskCacheDirty = true
+  if (diskCacheTimer) return // timer armed → the freeze guard for this cycle is already registered
+  diskCacheTimer = setTimeout(() => {
+    diskCacheTimer = null
+    if (diskCacheDirty) writeDiskCacheNow()
+  }, DISK_CACHE_COALESCE_MS)
+  // Serverless freeze guard: if the instance is frozen before the trailing
+  // write fires, flush it in the after() window first. Registered ONCE per
+  // write cycle (not per mutation — a 100k-record import must not stack
+  // 100k after() hooks).
+  keepAliveUntilSyncFlushed(async () => {
+    if (diskCacheDirty) writeDiskCacheNow()
+    return
+  })
+}
+
+/** Flush any pending coalesced disk-cache write immediately. */
+export function flushDiskCacheNow(): void {
+  if (diskCacheDirty || diskCacheTimer) writeDiskCacheNow()
 }
 
 // ─── In-memory store (survives hot reloads via globalThis) ───────────────────
@@ -1627,6 +1695,47 @@ export function buildAccountManifest(userId: string): AccountManifest | null {
   }
 }
 
+// ─── V6 Ultima store adapter ──────────────────────────────────────────────────
+//
+// The V6 chat engine (src/lib/v6/chat.ts) needs store access (build/restore
+// manifests, rev bookkeeping, the serverless keepAlive) but must NOT import
+// this module (we import IT for sync routing). It receives this adapter at
+// init instead — one-way dependency, no cycle.
+
+/** Resolve a V6 account key (public userId or __system__) to the internal dbUserId. */
+function dbUserIdForAccount(publicUserId: string): string | null {
+  if (publicUserId === SYSTEM_ACCOUNT_ID) return ADMIN_DB_USER_ID
+  const u = store.users.find((x) => x.userId === publicUserId)
+  return u ? u.id : null
+}
+
+registerV6StoreAdapter({
+  tombstoneTtlMs: TOMBSTONE_TTL_MS,
+  buildCoreManifest(userId) {
+    const m = buildAccountManifest(userId)
+    return m ? { ...m, records: [] } : null
+  },
+  buildFullManifest(userId) {
+    return buildAccountManifest(userId)
+  },
+  localRecords(userId) {
+    const db = dbUserIdForAccount(userId)
+    return db ? store.records.filter((r) => r.userId === db) : []
+  },
+  restoreManifest(m) {
+    return restoreAccountManifest(m)
+  },
+  lastDurableRev(userId) {
+    return lastDurableRev.get(userId)
+  },
+  noteDurable(userId, entry) {
+    lastDurableRev.set(userId, entry.messageId)
+  },
+  keepAlive(fn) {
+    keepAliveUntilSyncFlushed(fn)
+  },
+})
+
 /**
  * Restore a single V4 account manifest into the local store — MERGE
  * semantics (the old add-only restore could neither update stale values nor
@@ -1658,7 +1767,7 @@ function restoreAccountManifest(m: AccountManifest): {
   )
   if (remoteTombs.length > 0) {
     const before = JSON.stringify(store.recordTombstones)
-    store.recordTombstones = mergeTombstoneLists(store.recordTombstones, remoteTombs)
+    store.recordTombstones = mergeTombstoneLists(store.recordTombstones, remoteTombs, TOMBSTONE_TTL_MS)
     if (JSON.stringify(store.recordTombstones) !== before) dirty = true
   }
   const tombById = tombMap(store.recordTombstones)
@@ -1740,14 +1849,21 @@ function restoreAccountManifest(m: AccountManifest): {
   }
 
   // Records: add missing (unless tombstoned), overwrite when remote is newer.
+  // O(n) via a position Map — the old per-record findIndex made restores
+  // O(n²) (a 100k-record restore blocked the event loop for a minute+,
+  // which starved every in-flight fetch into its 5s timeout and tripped
+  // the flood breaker — the true engine of the import death spiral).
+  const recordPos = new Map<string, number>()
+  for (let i = 0; i < store.records.length; i++) {
+    const x = store.records[i]
+    recordPos.set(`${x.userId}|${x.collection}|${x.key}`, i)
+  }
   for (const r of asArray<RecordEntry>(m.records)) {
     if (!r || !r.userId || !r.collection || !r.key) continue
-    const li = store.records.findIndex(
-      (x) => x.userId === r.userId && x.collection === r.collection && x.key === r.key,
-    )
-    if (li === -1) {
+    const li = recordPos.get(`${r.userId}|${r.collection}|${r.key}`)
+    if (li === undefined) {
       if (shadowed(r.userId, 'record', r.collection, r.key, r.updatedAt)) continue
-      store.records.push({
+      const added: RecordEntry = {
         id: r.id || (r.userId + ':' + r.collection + ':' + r.key),
         userId: r.userId,
         collection: r.collection,
@@ -1758,12 +1874,18 @@ function restoreAccountManifest(m: AccountManifest): {
         valueRef: r.valueRef ?? null,
         createdAt: r.createdAt ?? new Date().toISOString(),
         updatedAt: r.updatedAt ?? r.createdAt ?? new Date().toISOString(),
-      })
+      }
+      recordPos.set(`${added.userId}|${added.collection}|${added.key}`, store.records.length)
+      store.records.push(added)
       recordsRestored++
       dirty = true
-    } else if (msOf(r.updatedAt) > msOf(store.records[li].updatedAt)) {
+    } else if (li < store.records.length && msOf(r.updatedAt) > msOf(store.records[li].updatedAt)) {
       if (shadowed(r.userId, 'record', r.collection, r.key, r.updatedAt)) {
-        store.records.splice(li, 1)
+        // Defer the drop (a mid-loop splice would shift every later
+        // position and corrupt the map). The tombstone-shadow filter right
+        // below the loop removes it anyway — just mark it stale so nothing
+        // else can update it in the meantime.
+        recordPos.delete(`${r.userId}|${r.collection}|${r.key}`)
         dirty = true
         continue
       }
@@ -1926,192 +2048,10 @@ export async function getAccountIndex(): Promise<AccountIndex | null> {
 // race and re-merges + re-pins (bounded retries), so no write is silently
 // dropped. Merge is idempotent, so duplicate syncs are harmless.
 
-function msOf(iso: string | null | undefined): number {
-  const t = Date.parse(iso || '')
-  return Number.isFinite(t) ? t : 0
-}
+// (msOf / maxIso / mergeTombstoneLists / tombMap / asArray now live in src/lib/v6/merge.ts —
+// pure utilities shared with the V6 Ultima chat engine without a module cycle.)
 
-function maxIso(a: string | null | undefined, b: string | null | undefined): string | null {
-  if (!a) return b ?? null
-  if (!b) return a
-  return msOf(b) > msOf(a) ? b : a
-}
-
-function mergeTombstoneLists(
-  a: RecordTombstone[],
-  b: RecordTombstone[],
-): RecordTombstone[] {
-  const cutoff = Date.now() - TOMBSTONE_TTL_MS
-  const map = new Map<string, RecordTombstone>()
-  for (const t of [...a, ...b]) {
-    if (!t || !t.userId || !t.key || (t.kind !== 'record' && t.kind !== 'file')) continue
-    if (msOf(t.deletedAt) < cutoff) continue
-    const k = `${t.userId}|${t.kind}|${t.collection || ''}|${t.key}`
-    const prev = map.get(k)
-    if (!prev || msOf(t.deletedAt) > msOf(prev.deletedAt)) map.set(k, { ...t })
-  }
-  return [...map.values()]
-}
-
-function tombMap(tombs: RecordTombstone[]): Map<string, number> {
-  const m = new Map<string, number>()
-  for (const t of tombs) {
-    m.set(`${t.userId}|${t.kind}|${t.collection || ''}|${t.key}`, msOf(t.deletedAt))
-  }
-  return m
-}
-
-function asArray<T>(v: unknown): T[] {
-  return Array.isArray(v) ? (v as T[]) : []
-}
-
-/**
- * Merge two account manifests (LOCAL ∪ REMOTE) into one converged manifest.
- * - records/files: latest-updatedAt-wins per identity, tombstone-shadowed
- *   items dropped.
- * - tombstones: union, latest-deletedAt-wins, >7d pruned.
- * - logs: union by id (append-only).
- * - apiKeys/shareTokens/adminKeys: union by id; revoked=OR (a revoke anywhere
- *   sticks everywhere); lastUsedAt=max; other fields prefer LOCAL on ties.
- * - user: latest-updatedAt-wins, passwordHash backfilled from either side.
- * - collectionNames/telegramConfigs: union by identity.
- */
-export function mergeAccountManifests(local: AccountManifest, remote: AccountManifest): AccountManifest {
-  const tombs = mergeTombstoneLists(
-    asArray<RecordTombstone>(local.tombstones),
-    asArray<RecordTombstone>(remote.tombstones),
-  )
-  const tombById = tombMap(tombs)
-  const shadowed = (
-    userId: string, kind: 'record' | 'file', collection: string, key: string, updatedAt: string,
-  ): boolean => {
-    const del = tombById.get(`${userId}|${kind}|${collection || ''}|${key}`)
-    return del !== undefined && msOf(updatedAt) < del
-  }
-
-  // Records: latest wins (local second + >= → local wins exact ties).
-  const recMap = new Map<string, RecordEntry>()
-  for (const r of [...asArray<RecordEntry>(remote.records), ...asArray<RecordEntry>(local.records)]) {
-    if (!r || !r.userId || !r.collection || !r.key) continue
-    const k = `${r.userId}|${r.collection}|${r.key}`
-    const prev = recMap.get(k)
-    if (!prev || msOf(r.updatedAt) >= msOf(prev.updatedAt)) recMap.set(k, { ...r })
-  }
-  const records = [...recMap.values()].filter(
-    (r) => !shadowed(r.userId, 'record', r.collection, r.key, r.updatedAt),
-  )
-
-  // Files: same latest-wins + tombstone shadowing (tomb key = file id).
-  const fileMap = new Map<string, FileRecord>()
-  for (const f of [...asArray<FileRecord>(remote.files), ...asArray<FileRecord>(local.files)]) {
-    if (!f || !f.id) continue
-    const prev = fileMap.get(f.id)
-    if (!prev || msOf(f.updatedAt) >= msOf(prev.updatedAt)) fileMap.set(f.id, { ...f })
-  }
-  const files = [...fileMap.values()].filter(
-    (f) => !shadowed(f.userId, 'file', '', f.id, f.updatedAt),
-  )
-
-  // API keys: union + revoked-OR + lastUsedAt-max.
-  const keyMap = new Map<string, ApiKeyRecord>()
-  for (const k of [...asArray<ApiKeyRecord>(remote.apiKeys), ...asArray<ApiKeyRecord>(local.apiKeys)]) {
-    if (!k || !k.id || !k.key || !k.userId) continue
-    const prev = keyMap.get(k.id)
-    if (!prev) {
-      keyMap.set(k.id, { ...k })
-    } else {
-      keyMap.set(k.id, {
-        ...prev,
-        ...k,
-        revoked: prev.revoked || k.revoked,
-        lastUsedAt: maxIso(prev.lastUsedAt, k.lastUsedAt),
-      })
-    }
-  }
-
-  // Share tokens: same revoked-OR treatment.
-  const shareMap = new Map<string, ShareTokenRecord>()
-  for (const t of [...asArray<ShareTokenRecord>(remote.shareTokens), ...asArray<ShareTokenRecord>(local.shareTokens)]) {
-    if (!t || !t.id) continue
-    const prev = shareMap.get(t.id)
-    if (!prev) {
-      shareMap.set(t.id, { ...t })
-    } else {
-      shareMap.set(t.id, {
-        ...prev,
-        ...t,
-        revoked: prev.revoked || t.revoked,
-        lastUsedAt: maxIso(prev.lastUsedAt, t.lastUsedAt),
-      })
-    }
-  }
-
-  // Admin keys: union + revoked-OR.
-  const adminMap = new Map<string, AdminKeyRecord>()
-  for (const ak of [...asArray<AdminKeyRecord>(remote.adminKeys), ...asArray<AdminKeyRecord>(local.adminKeys)]) {
-    if (!ak || !ak.key) continue
-    const id = ak.id ?? ak.key
-    const prev = adminMap.get(id)
-    if (!prev) {
-      adminMap.set(id, { ...ak })
-    } else {
-      adminMap.set(id, { ...prev, ...ak, revoked: prev.revoked || ak.revoked })
-    }
-  }
-
-  // Logs: append-only union by id.
-  const logMap = new Map<string, LogEntry>()
-  for (const l of [...asArray<LogEntry>(remote.logs), ...asArray<LogEntry>(local.logs)]) {
-    if (!l || !l.id) continue
-    if (!logMap.has(l.id)) logMap.set(l.id, { ...l })
-  }
-
-  // Collection names: union by (userId, name).
-  const cnMap = new Map<string, CollectionNameRecord>()
-  for (const c of [...asArray<CollectionNameRecord>(remote.collectionNames), ...asArray<CollectionNameRecord>(local.collectionNames)]) {
-    if (!c || !c.userId || !c.name) continue
-    const k = `${c.userId}|${c.name}`
-    if (!cnMap.has(k)) cnMap.set(k, { ...c })
-  }
-
-  // Telegram configs: union by userId (prefer local on conflict).
-  const tcMap = new Map<string, TelegramConfigRecord>()
-  for (const tc of [...asArray<TelegramConfigRecord>(remote.telegramConfigs), ...asArray<TelegramConfigRecord>(local.telegramConfigs)]) {
-    if (!tc || !tc.userId) continue
-    if (!tcMap.has(tc.userId)) tcMap.set(tc.userId, { ...tc })
-    else if ((local.telegramConfigs as TelegramConfigRecord[]).some((x) => x.userId === tc.userId)) {
-      tcMap.set(tc.userId, { ...(local.telegramConfigs as TelegramConfigRecord[]).find((x) => x.userId === tc.userId)! })
-    }
-  }
-
-  // User: latest-updatedAt-wins + passwordHash backfill.
-  const lu = (local.user ?? null) as UserRecord | null
-  const ru = (remote.user ?? null) as UserRecord | null
-  let user: unknown | null = lu ?? ru
-  if (lu && ru) {
-    const winner = msOf(ru.updatedAt) > msOf(lu.updatedAt) ? { ...ru } : { ...lu }
-    if (!winner.passwordHash) winner.passwordHash = lu.passwordHash ?? ru.passwordHash ?? null
-    user = winner
-  }
-
-  return {
-    cloudkv: true,
-    kind: 'account-manifest',
-    version: 4,
-    userId: local.userId,
-    exportedAt: new Date().toISOString(),
-    user,
-    apiKeys: [...keyMap.values()],
-    records,
-    logs: [...logMap.values()],
-    files,
-    shareTokens: [...shareMap.values()],
-    collectionNames: [...cnMap.values()],
-    telegramConfigs: [...tcMap.values()],
-    adminKeys: local.userId === SYSTEM_ACCOUNT_ID || remote.userId === SYSTEM_ACCOUNT_ID ? [...adminMap.values()] : [],
-    tombstones: tombs,
-  }
-}
+// (mergeAccountManifests now lives in src/lib/v6/merge.ts — re-exported above.)
 
 const sleepMs = (ms: number) => new Promise<void>((r) => setTimeout(() => r(), ms))
 
@@ -2211,292 +2151,28 @@ async function fetchBase(fileId: string): Promise<AccountManifest | null> {
   }
 }
 
-/**
- * Post-verify convergence repair (runs post-response via after()).
- *
- * Closes the last-pin-wins hole the attempt loop cannot see: our pin
- * VERIFIED (we are the tip), but a rival instance mid-flight on a STALE base
- * pins AFTER our verify and silently drops our keys. The loser of that race
- * must re-check — so seconds after every verified pin we re-fetch the tip
- * and, if someone overwrote us, re-merge our in-memory state over their base
- * and re-pin. Merges are unions, so overlapping repairs converge
- * monotonically instead of fighting.
- *
- * Persistent (up to 12 rounds x 10s) and fully background — client latency
- * unaffected. Floods can outlast a 3-round repair and strand a verified
- * write off-tip FOREVER (nothing else re-pushes that instance's memory),
- * so the repair must outlast floods. Never throws.
- *
- * CALM (learned live): blind re-pinning on every "tip moved" duels with
- * fellow repairs/syncs — each treats the other's fresh pin as a rival
- * overwrite and re-pins, a 40-round self-sustaining flood that trips the
- * breaker and starves real writes. So: single-flight per account (a second
- * schedule just advances the running repair's target), fresh tips are
- * ADOPTED (someone is actively converging right now — don't pile on), and
- * a merge-compare proves our state is inside the tip before adopting
- * forever (else our keys could strand silently under a live rival).
- */
-const activeRepairs = new Map<string, { targetRev: number }>()
-function schedulePostVerifyRepair(userId: string, pinnedRev: number): void {
-  const already = activeRepairs.get(userId)
-  if (already) {
-    if (pinnedRev > already.targetRev) already.targetRev = pinnedRev
-    return
-  }
-  const state = { targetRev: pinnedRev }
-  activeRepairs.set(userId, state)
-  const repair = async (): Promise<unknown> => {
-    try {
-      let freshAdoptions = 0
-      for (let round = 0; round < 12; round++) {
-        await sleepMs(10000)
-        const idx = await fetchFreshIndex()
-        if (!idx) continue
-        const cur = idx.accounts[userId]
-        // Still the tip — nobody overwrote us. Done.
-        if (cur && cur.messageId === state.targetRev) return null
-        const tipAgeMs = cur ? Date.now() - Date.parse(cur.updatedAt ?? '') : NaN
-        if (cur && Number.isFinite(tipAgeMs) && tipAgeMs < 90000) {
-          // Fresh tip: a fellow sync/repair pinned seconds ago and is
-          // likely still converging — adopt it instead of dueling.
-          state.targetRev = cur.messageId
-          freshAdoptions++
-          if (freshAdoptions < 3) continue
-          // Adopted 3x yet still divergent: prove our state is actually
-          // INSIDE the tip (merge adds nothing) before adopting forever.
-          freshAdoptions = 0
-          try {
-            const tip = cur.fileId ? await fetchBase(cur.fileId) : null
-            const local = buildAccountManifest(userId)
-            if (
-              tip &&
-              local &&
-              manifestContentSha(mergeAccountManifests(local, tip)) === manifestContentSha(tip)
-            ) {
-              lastDurableRev.set(userId, cur.messageId)
-              return null
-            }
-          } catch {
-            // Compare failed — fall through to a genuine re-merge below.
-          }
-        } else {
-          console.warn(
-            `[store] post-verify repair for ${userId}: tip moved (round ${round + 1}) — re-merging`,
-          )
-        }
-        // Full VERIFIED sync (fetch-merge-pin-verify with retries). An
-        // open-loop pin here would just join the clobber race against rival
-        // repairs — the verify/retry loop is what makes rounds converge.
-        const entry = await syncAccountManifestToTelegram(userId, { scheduleRepair: false })
-        if (entry) {
-          state.targetRev = entry.messageId
-          lastDurableRev.set(userId, entry.messageId)
-          freshAdoptions = 0
-        }
-      }
-    } catch {
-      // Background repair must never throw.
-    } finally {
-      if (activeRepairs.get(userId) === state) activeRepairs.delete(userId)
-    }
-    return null
-  }
-  keepAliveUntilSyncFlushed(repair)
-}
+// ─── V6 Ultima sync (write path) ──────────────────────────────────────────────
+//
+// syncAccountManifestToTelegram now routes to the V6 Ultima chat engine
+// (src/lib/v6/chat.ts): an immutable sharded base + a tiny per-write delta.
+// A durable write uploads ONLY the small delta document (~4 Bot API calls,
+// sub-second at ANY account size — 100k-key collections included), instead
+// of re-uploading the entire account manifest (V4) with 12-15s cooperative
+// pacing windows. Old V4 index entries are migrated transparently on the
+// account's first V6 sync; the V4 READ path below remains as the fallback
+// for entries not yet migrated. Post-verify convergence (a rival instance
+// pinning between our fetch and our edit) is owned by the V6 engine's
+// postVerifyCheck — it re-runs the sync from memory, and the pending-op
+// log keeps every unconfirmed write until a verified tip proves it durable.
 
-/**
- * Sync ONE account's manifest to Telegram + update the pinned index. Used after
- * a write that affects only one account (the common case). Debounced per-account
- * via scheduleAccountSync.
- *
- * Returns the updated index entry, or null on failure.
- */
-/** Cooperative pacing windows (index: global; account: per-account). */
-const COOP_INDEX_WINDOW_MS = 12000
-const ACCOUNT_WINDOW_MS = 15000
-/** Max pacing wait absorbed in-request; longer waits fail fast (client retries). */
-const MAX_PACING_WAIT_MS = 10000
 export async function syncAccountManifestToTelegram(
   userId: string,
   opts?: { scheduleRepair?: boolean },
 ): Promise<AccountIndexEntry | null> {
-  // Throttle yield: Telegram throttled THIS instance inside the live
-  // window — make ZERO calls (calling in re-violates and EXTENDS it, which
-  // is how one failed op spawned minutes of self-sustaining swarm).
-  if (throttleYieldMs() > 0) return null
-  // Fetch-merge-pin with pin-race + flood retry. NEVER upload a partial
-  // local-only manifest over durable state (the old last-pin-wins clobber
-  // that wiped other instances' keys). Flood failures RETRY with backoff
-  // (bounded) instead of instantly failing into memory-only mode.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    // Rebuild local EVERY attempt: attempt N restores merged_N into memory,
-    // so rebuilding makes local grow monotonically — keys learned from a
-    // rival's base are never dropped by a later attempt's merge.
-    const local = buildAccountManifest(userId)
-    if (!local) return null
-    // ONE paced retry: the single inter-attempt wait lives HERE (not
-    // scattered per-op). Attempt 0 tries immediately; attempt 1 waits out
-    // the flood/contention first. Two attempts max — sustained floods fail
-    // fast (honest durable:false) and the CLIENT retries after the flood
-    // clears, instead of grinding 429s into a minutes-long death spiral.
-    if (attempt > 0) await sleepWithJitter(2000)
-    // Fresh index every attempt — another instance may have pinned newer
-    // since we last looked. NULL (unreadable) aborts the attempt: proceeding
-    // with an assumed-empty index would clobber durable state.
-    let idx = await fetchFreshIndex()
-    if (!idx) {
-      console.warn(`[store] sync index unreadable for ${userId} (attempt ${attempt + 1}) — retrying`)
-      continue
-    }
-    let existing = idx.accounts[userId]
-    // FAST PATH: index still points at the rev we last pinned/restored, so
-    // no other instance wrote since — durable base ⊆ local state, skip the
-    // manifest download entirely.
-    let revUnchanged = !!existing && existing.messageId === lastDurableRev.get(userId)
-    // HOT-TIP YIELD: a FOREIGN pin landed within the last seconds — that
-    // instance is likely still mid-flight (or its repair is running). Yield
-    // BEFORE adding to the flood: our re-fetch will then merge its finished
-    // state instead of racing it. This serializes contended pins (~1/12s,
-    // which Telegram's same-message edit limits love) instead of stampeding
-    // into 429s. Quiet writes (cold tip) and our own tip proceed undelayed;
-    // the final attempt never yields (bounded wait).
-    if (existing && !revUnchanged && attempt < 1) {
-      const tipAgeMs = Date.now() - Date.parse(existing.updatedAt ?? '')
-      if (Number.isFinite(tipAgeMs) && tipAgeMs < 12000) {
-        console.warn(
-          `[store] sync yielding to hot tip for ${userId} (age ${Math.max(0, Math.round(tipAgeMs))}ms, attempt ${attempt + 1})`,
-        )
-        await sleepWithJitter(2500)
-        continue
-      }
-    }
-    // CONTENT SHORT-CIRCUIT: our pin is the tip AND memory still hashes to
-    // what we pinned — nothing to do. Same-instance concurrent syncs,
-    // duplicate syncs, and idempotent client retries all land here instead
-    // of re-uploading + re-pinning identical bytes. Any real change (even
-    // one record) hashes differently and takes the full pin path.
-    if (existing && revUnchanged && manifestContentSha(local) === lastPinnedSha.get(userId)) {
-      return existing
-    }
-    // COOPERATIVE PACING → WAIT (not fail): the index is ONE Telegram
-    // message and rapid same-message edits 429, so pins stay serialized
-    // (index ≥12s apart globally, same account ≥15s apart). But a pacing
-    // window must not FAIL natural bursts (OTP write+flag, chunk
-    // sequences): waits ≤10s are absorbed in-request (one cheap sleep + a
-    // FRESH re-fetch + re-merge — a rival may have pinned while we
-    // waited), and only longer waits fail fast for the client to retry.
-    // (The old 35s/45s fail-fast windows throttled real flows to ~1
-    // write/45s — every OTP flag update and resend died on them.)
-    for (let pw = 0; pw < 2; pw++) {
-      const paceAgeMs = Date.now() - Date.parse(idx.exportedAt || '')
-      const idxRemain = Number.isFinite(paceAgeMs) ? COOP_INDEX_WINDOW_MS - paceAgeMs : 0
-      let accRemain = 0
-      if (existing?.updatedAt) {
-        const accAgeMs = Date.now() - Date.parse(existing.updatedAt)
-        if (Number.isFinite(accAgeMs)) accRemain = ACCOUNT_WINDOW_MS - accAgeMs
-      }
-      const waitMs = Math.max(idxRemain, accRemain, 0)
-      if (waitMs <= 0) break
-      if (pw > 0 || waitMs > MAX_PACING_WAIT_MS) {
-        notePacingThrottle(Math.ceil(waitMs / 1000))
-        return null
-      }
-      await sleepMs(waitMs + 500 + Math.random() * 500)
-      const ridx = await fetchFreshIndex()
-      if (!ridx) {
-        console.warn(`[store] sync pacing re-fetch unreadable for ${userId} — failing fast`)
-        return null
-      }
-      // Fresh tip (a rival may have pinned during the wait): refresh ALL
-      // derived state — merging against the stale base would clobber.
-      idx = ridx
-      existing = idx.accounts[userId]
-      revUnchanged = !!existing && existing.messageId === lastDurableRev.get(userId)
-    }
-    let base: AccountManifest | null = null
-    if (existing && !revUnchanged) {
-      base = await fetchBase(existing.fileId)
-      if (!base) {
-        console.error(`[store] sync aborted for ${userId}: durable base unreadable (not clobbering)`)
-        return null
-      }
-    }
-    const merged = base ? mergeAccountManifests(local, base) : local
-    // Fold the converged state back into THIS instance too (fast cross-
-    // instance convergence; merge semantics make this safe).
-    restoreAccountManifest(merged)
-    // Upload FIRST. On upload failure (flood) back off and retry the whole
-    // merge — our local state still holds the write, nothing is lost.
-    const sent = await sendAccountManifest(merged)
-    if (!sent) {
-      console.warn(`[store] sync upload failed for ${userId} (attempt ${attempt + 1}) — retrying`)
-      continue
-    }
-    const recordCount = (merged.records ?? []).length
-    const entry: AccountIndexEntry = {
-      userId,
-      messageId: sent.messageId,
-      fileId: sent.fileId,
-      bytes: sent.bytes,
-      recordCount,
-      updatedAt: new Date().toISOString(),
-    }
-    idx.accounts[userId] = entry
-    idx.exportedAt = new Date().toISOString()
-    const pinnedId = await pinAccountIndex(idx)
-    if (!pinnedId) {
-      console.warn(`[store] sync pin failed for ${userId} (attempt ${attempt + 1}) — retrying`)
-      continue
-    }
-    // Verify we still hold the pin — another instance may have pinned
-    // after our fetch. FRESH read; ONLY an explicit match is success. An
-    // UNREADABLE verify (flood) is NOT accepted (that turned lost races
-    // into false-durable writes) — it fails the attempt.
-    // LAG-PATIENT, FLOOD/RIVAL-IMPATIENT polling: Telegram's pin
-    // propagation lags intermittently (getChat returns the PRE-pin index
-    // for a few seconds after a landed pin) — so poll on while reads
-    // succeed and show a STALE rev (messageIds increase, so older-than-our-
-    // pin = still converging). A NEWER rev (a rival pinned over us) or an
-    // UNREADABLE index (flood) exits immediately: attempt 2 re-merges over
-    // the rival, or the client retries after the flood. (Too little
-    // patience turns lag into false races → wasted re-uploads → deadline
-    // failures; too much burns the 20s sync budget. 4x2s splits it.)
-    let verify = await fetchFreshIndex()
-    let current = verify?.accounts[userId]
-    for (let v = 0; v < 4 && verify && (!current || current.messageId < sent.messageId); v++) {
-      await sleepMs(2000)
-      verify = await fetchFreshIndex()
-      current = verify?.accounts[userId]
-    }
-    if (verify && current && current.messageId === sent.messageId) {
-      // NOTE: superseded docs are intentionally NOT deleted. Deleting them
-      // racy-breaks concurrent readers mid-download (fetch index → victim
-      // doc deleted → rehydrate fails → spurious 404s). Chat history is
-      // free and unbounded; old manifests are harmless backups.
-      accountIndexCache = idx
-      accountIndexCacheAt = Date.now()
-      lastDurableRev.set(userId, sent.messageId)
-      lastPinnedSha.set(userId, sent.sha)
-      // Cache what we just pinned (we already hold it): imminent repairs /
-      // rehydrates / retries re-request this exact rev.
-      manifestCacheSet(sent.fileId, merged)
-      v4ModeActive = true
-      // A rival mid-flight on a stale base may pin AFTER our verify (silent
-      // last-pin-wins drop). The background repair re-checks the tip and
-      // re-merges if we got overwritten — client latency unaffected.
-      // (Skipped when WE are the repair — chained after()s don't extend
-      // serverless lifetime, so repairs must not schedule repairs.)
-      if (opts?.scheduleRepair !== false) schedulePostVerifyRepair(userId, sent.messageId)
-      // (Inline grace round REMOVED: the 4s sleep + recursive full sync
-      // inside the request stacked latency and re-entered the pin race it
-      // was trying to fix. The persistent background repair scheduled above
-      // covers lost races post-response — client latency unaffected.)
-      return entry
-    }
-    console.warn(`[store] sync pin race/unverified for ${userId} (attempt ${attempt + 1}) — re-merging`)
-  }
-  console.error(`[store] sync failed for ${userId} after 2 attempts — write stays memory-only (client should retry)`)
-  return null
+  const entry = await syncV6Account(userId, { scheduleRepair: opts?.scheduleRepair })
+  // The V6 engine returns a V6-shaped entry; callers only need non-null on
+  // success, but the V4-shaped return type is kept for wire compatibility.
+  return entry as unknown as AccountIndexEntry | null
 }
 
 // ─── Lazy record rehydrate-on-miss (read-your-writes across instances) ───────
@@ -2575,9 +2251,24 @@ export async function rehydrateAccountFromTelegram(userId: string): Promise<{
   accountIndexCache = idx
   accountIndexCacheAt = Date.now()
   v4ModeActive = true
+  if (!userId) return { attempted: false, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0 }
   const entry = idx.accounts[userId]
   if (!entry) return { attempted: false, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0 }
   try {
+    // V6 ULTIMA entry: chunked base + delta, fetched in PARALLEL. When this
+    // instance already holds the same base rev, the fast path downloads ONLY
+    // the small delta doc — a freshness refresh costs KBs even for 100k-key
+    // accounts.
+    if (isV6Entry(entry)) {
+      const r = await rehydrateV6Account(userId, entry)
+      if (r.attempted && !r.error && (r.users || r.apiKeys || r.records || r.logs || r.files)) {
+        console.log(
+          `[store] V6 rehydrated account ${userId}: +${r.users} user, +${r.apiKeys} keys, +${r.records} records, +${r.logs} logs, +${r.files} files`,
+        )
+      }
+      return r
+    }
+    // V4 entry (not yet migrated): single-manifest download path.
     const manifest = await fetchBase(entry.fileId)
     if (!manifest) return { attempted: true, users: 0, apiKeys: 0, records: 0, logs: 0, files: 0, error: 'download failed' }
     const r = restoreAccountManifest(manifest)
@@ -2840,16 +2531,30 @@ export async function flushAccountSync(userId: string): Promise<boolean> {
 export function scheduleAccountSync(userId: string): void {
   // New write = fresh retry budget for the failure backstop below.
   accountSyncRetries.delete(userId)
-  // If we're not yet in V4 mode, probe the pinned account index ONCE before
-  // deciding — never blindly fall back to the V3 push (see ensureV4Probed).
+  // If we're not yet in index mode, probe the pinned account index ONCE
+  // before deciding. When NO index exists at all we must NOT fall back to
+  // the legacy V3 full-state push anymore: its pin lands ON TOP of the
+  // fresh V6 index pin (both are pins of the same message slot) and breaks
+  // the V6 verify — the two paths fought each other on every fresh
+  // instance (register 503 loops). Instead: split any legacy V3 pin into
+  // per-account manifests (migrateV3ToV4 — a no-op without one), then let
+  // the V6 sync pin the index natively from local memory.
   if (!v4ModeActive) {
-    void ensureV4Probed().then(() => {
+    void (async () => {
+      await ensureV4Probed()
       if (v4ModeActive) {
         scheduleAccountSync(userId)
         return
       }
-      scheduleFullStateSync()
-    })
+      await migrateV3ToV4().catch(() => null)
+      if (v4ModeActive) {
+        scheduleAccountSync(userId)
+        return
+      }
+      // Fresh chat (no V3 pin, no index): the V6 sync's migration path
+      // builds + pins the index directly. Subsequent probes then find it.
+      await syncV6Account(userId).catch(() => null)
+    })()
     return
   }
   const scheduledAt = Date.now()
@@ -2927,6 +2632,77 @@ export function findRecord(
   )
 }
 
+/**
+ * Bulk upsert fast path (used by imports). Identical semantics to calling
+ * upsertRecord per item, but the account's existing records are indexed into
+ * a Map ONCE — per-item lookups are O(1) instead of upsertRecord's O(n)
+ * findRecord scan. A 100k-record import is O(n) here instead of O(n²)
+ * (the quadratic path measured in minutes; this is milliseconds).
+ * Synchronous — no interleaving can invalidate the position index.
+ */
+export function upsertRecordsBulk(
+  dbUserId: string,
+  publicUserId: string,
+  items: Array<{
+    collection: string
+    key: string
+    value: string
+    valueType: string
+    valueRef?: { fileId: string; messageId: number; bytes: number } | null
+  }>,
+): number {
+  // Position index for THIS account's records (built once).
+  const pos = new Map<string, number>()
+  for (let i = 0; i < store.records.length; i++) {
+    const r = store.records[i]
+    if (r.userId !== dbUserId) continue
+    pos.set(`${r.collection}|${r.key}`, i)
+  }
+  const now = new Date().toISOString()
+  let count = 0
+  for (const item of items) {
+    const existing = pos.has(`${item.collection}|${item.key}`)
+      ? store.records[pos.get(`${item.collection}|${item.key}`)!]
+      : undefined
+    if (existing) {
+      // Small-over-large: orphaned offload doc dropped (best-effort), same
+      // as the single upsert path.
+      if (existing.valueRef?.messageId) {
+        void deleteKvMessage(existing.valueRef.messageId)
+        existing.valueRef = null
+      }
+      existing.value = item.value
+      existing.valueType = item.valueType
+      if (item.valueRef) {
+        existing.valueRef = item.valueRef
+        existing.value = ''
+      }
+      existing.updatedAt = now
+      if (publicUserId) noteV6RecordSet(publicUserId, existing)
+    } else {
+      const record: RecordEntry = {
+        id: cuid(),
+        userId: dbUserId,
+        collection: item.collection,
+        key: item.key,
+        value: item.valueRef ? '' : item.value,
+        valueType: item.valueType,
+        telegramMessageId: null,
+        valueRef: item.valueRef ?? null,
+        createdAt: now,
+        updatedAt: now,
+      }
+      store.records.push(record)
+      pos.set(`${item.collection}|${item.key}`, store.records.length - 1)
+      if (publicUserId) noteV6RecordSet(publicUserId, record)
+    }
+    count++
+  }
+  saveToDisk()
+  scheduleAccountSyncForDbUser(dbUserId)
+  return count
+}
+
 export function upsertRecord(
   dbUserId: string,
   publicUserId: string,
@@ -2965,6 +2741,9 @@ export function upsertRecord(
     existing.valueType = opts.valueType
     existing.updatedAt = now
     saveToDisk()
+    // V6 Ultima: the write rides the next delta upload (never a full
+    // re-upload). Logged as pending until a verified durable tip subsumes it.
+    if (publicUserId) noteV6RecordSet(publicUserId, existing)
     if (!opts.nosync) scheduleAccountSyncForDbUser(dbUserId)
     // NOTE: no per-key Telegram message is sent here anymore. Nothing ever
     // reads per-key messages back (manifests are the durable truth), and each
@@ -2985,6 +2764,8 @@ export function upsertRecord(
   }
   store.records.push(record)
   saveToDisk()
+  // V6 Ultima: pending delta op (see the update branch above).
+  if (publicUserId) noteV6RecordSet(publicUserId, record)
   if (!opts.nosync) scheduleAccountSyncForDbUser(dbUserId)
   // NOTE: no per-key Telegram message (see above) — durability = manifest sync.
   return { record, created: true }
@@ -3053,6 +2834,9 @@ export function deleteRecord(
   // being resurrected by another instance's manifest on merge/rehydrate.
   addTombstone(dbUserId, 'record', collection, key)
   saveToDisk()
+  // V6 Ultima: a pending del op rides the next delta upload.
+  const pub = publicUserIdForDbUser(dbUserId)
+  if (pub) noteV6RecordDelete(pub, collection, key)
   scheduleAccountSyncForDbUser(dbUserId)
   if (removed.telegramMessageId) {
     void deleteKvMessage(removed.telegramMessageId, chatId, botToken, botApiBaseUrl)
@@ -3211,10 +2995,13 @@ export function deleteCollection(dbUserId: string, name: string, chatId?: string
   const toRemove = store.records.filter(
     (r) => r.userId === dbUserId && r.collection === name,
   )
+  const pub = publicUserIdForDbUser(dbUserId)
   for (const r of toRemove) {
     if (r.telegramMessageId) void deleteKvMessage(r.telegramMessageId, chatId, botToken, botApiBaseUrl)
     if (r.valueRef?.messageId) void deleteKvMessage(r.valueRef.messageId, chatId, botToken, botApiBaseUrl)
     addTombstone(dbUserId, 'record', name, r.key)
+    // V6 Ultima: pending del op per key (rides the next delta upload).
+    if (pub) noteV6RecordDelete(pub, name, r.key)
   }
   store.records = store.records.filter((r) => !(r.userId === dbUserId && r.collection === name))
   removeCollectionName(dbUserId, name)

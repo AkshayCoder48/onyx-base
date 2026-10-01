@@ -44,7 +44,11 @@ and you can walk away with it at any time.
 ## Architecture
 
 Onyx Base is a Next.js application that uses Telegram as its durable storage
-layer and an in-memory store (with a JSON file cache) as a fast local index. A Socket.io mini-service powers the
+layer (**V6 Ultima chat architecture** — each account's records live in an
+immutable sharded base of gzipped documents plus a tiny per-write delta, so a
+durable `set` is ~0.5s at any account size and a 100,000-key collection
+restores in about a second via parallel downloads) and an in-memory store
+(with a coalesced JSON file cache) as a fast local index. A Socket.io mini-service powers the
 real-time dashboard. Clients — browser, CLI, or any HTTP library — talk to a
 single REST surface.
 

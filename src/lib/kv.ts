@@ -14,6 +14,7 @@ import {
 } from '@/lib/auth'
 import {
   upsertRecord,
+  upsertRecordsBulk,
   findRecord,
   deleteRecord,
   listRecords,
@@ -24,6 +25,7 @@ import {
   maybeRehydrateAccount,
   flushAccountSync,
   offloadLargeRecordValue,
+  LARGE_VALUE_THRESHOLD_BYTES,
 } from '@/lib/data-store'
 import { downloadJsonDocument } from '@/lib/telegram'
 import { notifyRealtime } from '@/lib/realtime'
@@ -270,39 +272,50 @@ export async function importRecords(
   const chatId = resolveChatId(user.dbUserId)
   const botToken = resolveBotToken(user.dbUserId)
   const botApiBaseUrl = resolveBotApiBaseUrl(user.dbUserId)
-  let imported = 0
   const refKeys = new Set<string>()
+  const bulk: Array<{
+    collection: string
+    key: string
+    value: string
+    valueType: string
+    valueRef?: { fileId: string; messageId: number; bytes: number } | null
+  }> = []
   for (const r of records) {
     const key = String(r.key ?? '').trim()
     if (!key) continue
     const collectionName = String(r.collection || 'default')
     const value = r.json ?? null
     const valueType = r.valueType || detectValueType(value)
-    const { record } = upsertRecord(user.dbUserId, user.userId, {
-      collection: collectionName,
-      key,
-      value: JSON.stringify(value),
-      valueType,
-      chatId,
-      botToken,
-      botApiBaseUrl,
-    })
-    // Pre-uploaded ref (master-key importer already put the doc on
-    // Telegram): mirror offload's end-state exactly (valueRef + empty
-    // value), skipping the upload below. Trust-but-document: the importer
-    // MUST verify with a read-back (a bad fileId breaks reads).
     if (r.valueRef?.fileId) {
-      record.valueRef = {
-        fileId: r.valueRef.fileId,
-        messageId: r.valueRef.messageId ?? 0,
-        bytes: r.valueRef.bytes ?? 0,
-      }
-      record.value = ''
-      record.updatedAt = new Date().toISOString()
+      // Pre-uploaded ref (master-key importer already put the doc on
+      // Telegram): mirror offload's end-state exactly (valueRef + empty
+      // value). Trust-but-document: the importer MUST verify with a
+      // read-back (a bad fileId breaks reads).
+      bulk.push({
+        collection: collectionName,
+        key,
+        value: '',
+        valueType,
+        valueRef: {
+          fileId: r.valueRef.fileId,
+          messageId: r.valueRef.messageId ?? 0,
+          bytes: r.valueRef.bytes ?? 0,
+        },
+      })
       refKeys.add(`${collectionName}|${key}`)
+    } else {
+      bulk.push({
+        collection: collectionName,
+        key,
+        value: JSON.stringify(value),
+        valueType,
+      })
     }
-    imported += 1
   }
+  // O(n) bulk upsert (Map-indexed) — the per-record upsertRecord path was
+  // O(n²) on large imports (a 100k-key import took minutes just in
+  // findRecord scans).
+  const imported = upsertRecordsBulk(user.dbUserId, user.userId, bulk)
 
   // Same durability gate as setKey: offload large values, then ONE merged
   // sync for the whole batch. Hard 25s deadline over the whole gate.
@@ -316,15 +329,16 @@ export async function importRecords(
       }, 25000)
     })
     const gate = (async () => {
-      for (const r of records) {
-        const key = String(r.key ?? '').trim()
-        if (!key) continue
-        // Pre-uploaded ref already applied — no offload upload needed.
-        if (refKeys.has(`${String(r.collection || 'default')}|${key}`)) continue
+      // Offload only records that CAN be large — the size check here avoids
+      // an O(n) findRecord scan per small record (5000 small records × a
+      // 100k store used to burn seconds of pure scanning per batch).
+      for (const item of bulk) {
+        if (refKeys.has(`${item.collection}|${item.key}`)) continue
+        if ((item.value?.length ?? 0) <= LARGE_VALUE_THRESHOLD_BYTES) continue
         await offloadLargeRecordValue(
           user.dbUserId,
-          String(r.collection || 'default'),
-          key,
+          item.collection,
+          item.key,
           chatId,
           botToken,
           botApiBaseUrl,
